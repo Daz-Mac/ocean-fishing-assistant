@@ -3,12 +3,22 @@
     "common_name": "Sea Bass",
     "preferred_temp_c": [10, 20],
     "preferred_wind_m_s": [0, 6],
-    "max_wave_height_m": 2.0
+    "max_wave_height_m": 2.0,
+    "preferred_tide_m": [0.2, 1.2],
+    "preferred_tide_phase": ["rising", "high"],
+    "preferred_times": [{"start_hour":5,"end_hour":9},{"start_hour":17,"end_hour":19}],
+    "preferred_months": [4,5,6,7,8,9],
+    "moon_preference": ["full"]
   },
   "mackerel": {
     "common_name": "Mackerel",
     "preferred_temp_c": [12, 22],
     "preferred_wind_m_s": [0, 8],
-    "max_wave_height_m": 1.5
+    "max_wave_height_m": 1.5,
+    "preferred_tide_m": [0.0, 0.8],
+    "preferred_tide_phase": ["falling"],
+    "preferred_times": [{"start_hour":6,"end_hour":10}],
+    "preferred_months": [5,6,7,8,9],
+    "moon_preference": []
   }
 }
