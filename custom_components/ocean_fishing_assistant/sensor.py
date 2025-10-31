@@ -1,7 +1,7 @@
 from homeassistant.helpers.entity import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
 
-from .const import DEFAULT_NAME
+from .const import DEFAULT_NAME, DOMAIN
 from .ocean_scoring import compute_score
 
 ATTRIBUTION = "Data provided by Open-Meteo"
@@ -37,3 +37,8 @@ class OFASensor(CoordinatorEntity):
             }
         except Exception:
             return {}
+
+async def async_setup_entry(hass, entry, async_add_entities):
+    """Set up sensor platform from a config entry."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([OFASensor(coordinator)], update_before_add=True)

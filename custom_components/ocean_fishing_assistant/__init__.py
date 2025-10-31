@@ -27,6 +27,11 @@ async def async_setup_entry(hass, entry):
         store_enabled=entry.options.get("persist_last_fetch", False),
         ttl=entry.options.get("persist_ttl", 3600),
     )
+    # try to load persisted last successful fetch before first refresh (fast recovery)
+    if entry.options.get("persist_last_fetch", False):
+        await coord.async_load_from_store()
+
+    # request a fresh update (will run after any restored data is available)
     await coord.async_request_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
 
