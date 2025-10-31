@@ -17,23 +17,17 @@ _LOGGER = logging.getLogger(__name__)
 _DEFAULT_TTL = 15 * 60  # seconds
 _TIDE_HALF_DAY_HOURS = 12.42
 _SECONDS_PER_HOUR = 3600.0
+_ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
 
 
 class TideProxy:
     """
     Astronomical tide proxy using Skyfield and helpers.astro when available.
 
-    How it works:
-    - Try to reuse helpers.astro.calculate_astronomy_forecast(...) to get per-day
-      moon_phase and moon_transit times (preferred).
-    - Use Skyfield (lazy import) to compute instantaneous moon altitude for
-      timestamps when available (useful to determine 'slack' states).
-    - Generate a semi-diurnal sinusoidal tide aligned with moon_transit if present,
-      otherwise use a longitude-derived phase shift. Amplitude scales with moon_phase
-      (spring -> larger amplitude).
-    - Return normalized structure with tide_height_m aligned to input timestamps,
-      optional tide_phase, tide_strength, next_high/next_low prediction datetimes
-      (ISO UTC strings), source and confidence.
+    Improvements:
+    - Uses skyfield.almanac.meridian_transits + find_discrete to compute precise moon
+      transit times for the given lat/lon when Skyfield is available.
+    - Falls back to helpers.astro moon_transit (if provided) or longitude-based phase.
     """
 
     def __init__(self, hass, latitude: float, longitude: float, ttl: int = _DEFAULT_TTL):
@@ -45,30 +39,11 @@ class TideProxy:
         self._cache: Optional[Dict[str, Any]] = None
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
-        """
-        Accepts ISO8601 UTC timestamp strings (Z suffix).
-        Returns normalized dict:
-          {
-            "timestamps": [...],
-            "tide_height_m": [float|None,...],
-            "tide_phase": float|None,  # 0..1
-            "tide_strength": float,    # 0..1
-            "next_high": "YYYY-MM-DDTHH:MM:SSZ" or "",
-            "next_low": "...",
-            "confidence": "proxy",
-            "source": "astronomical_proxy",
-            "forecast": { "YYYY-MM-DD": {...} }  # optional per-day summary
-          }
-        """
         now = dt_util.now()
 
-        # simple cache by timestamps fingerprint (we include lat/lon implicitly)
         fingerprint = (tuple(timestamps), round(self.latitude, 6), round(self.longitude, 6))
         if self._last_calc and self._cache and (now - self._last_calc).total_seconds() < self._ttl:
-            # cached response is valid (we don't key by fingerprint for simplicity),
-            # but if user requests different timestamps we still regenerate below.
             cached = self._cache
-            # Quick check: if timestamps match, return cached copy
             if cached.get("timestamps") == list(timestamps):
                 return cached
 
@@ -76,7 +51,6 @@ class TideProxy:
         try:
             dt_objs = [datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc) for ts in timestamps]
         except Exception:
-            # Malformed timestamps: return empty-shaped payload
             empty = {
                 "timestamps": list(timestamps),
                 "tide_height_m": [None] * len(timestamps),
@@ -91,12 +65,11 @@ class TideProxy:
         astro_forecast: Dict[str, Any] = {}
         try:
             from .helpers.astro import calculate_astronomy_forecast  # type: ignore
-            # request 7 days (today + future)
             astro_forecast = await calculate_astronomy_forecast(self.hass, self.latitude, self.longitude, days=7)
         except Exception:
             astro_forecast = {}
 
-        # Determine moon_phase (0..1) preference using day's sample (prefer local moon_transit sample)
+        # Determine moon_phase (0..1) and candidate moon_transit from helpers.astro
         moon_phase: Optional[float] = None
         moon_transit_dt: Optional[datetime] = None
 
@@ -110,7 +83,6 @@ class TideProxy:
                         moon_phase = _coerce_phase(mp)
                     except Exception:
                         moon_phase = None
-                # prefer moon_transit field if present (ISO string)
                 mt = today_entry.get("moon_transit")
                 if mt:
                     try:
@@ -120,34 +92,44 @@ class TideProxy:
                     except Exception:
                         moon_transit_dt = None
 
-        # If helpers.astro didn't provide moon_phase, try to compute via Skyfield (lazy)
+        # Try to initialize Skyfield (lazy)
         sf_ts = None
         sf_eph = None
+        sf_wgs = None
+        sf_almanac = None
         try:
             from skyfield.api import load, wgs84  # type: ignore
+            from skyfield import almanac as _almanac  # type: ignore
             sf_ts = load.timescale()
-            # do not force download ephemeris here for the entire method; load() will obtain as needed
             sf_eph = load('de421.bsp')
+            sf_wgs = wgs84
+            sf_almanac = _almanac
         except Exception:
             sf_ts = None
             sf_eph = None
+            sf_wgs = None
+            sf_almanac = None
 
-        # If we have skyfield, compute instantaneous moon altitude for the first timestamp (and optionally all)
+        # If helpers.astro didn't provide moon_transit_dt, attempt precise almanac-based transit-finding
+        if moon_transit_dt is None and sf_ts and sf_eph and sf_almanac and sf_wgs:
+            try:
+                moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now)
+            except Exception:
+                moon_transit_dt = None
+
+        # Compute moon altitudes for timestamps if skyfield present (used for state heuristics)
         moon_altitudes: List[Optional[float]] = []
-        if sf_ts and sf_eph:
+        if sf_ts and sf_eph and sf_wgs:
             try:
                 earth = sf_eph['earth']
                 moon = sf_eph['moon']
-                # Prepare times array for skyfield
                 times_list = []
                 for dt in dt_objs:
                     times_list.append(sf_ts.utc(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second))
-                # compute altaz for each time
-                loc = wgs84.latlon(self.latitude, self.longitude)
+                loc = sf_wgs.latlon(self.latitude, self.longitude)
                 for t in times_list:
                     astrom = earth.at(t).observe(moon).apparent()
                     alt, az, dist = astrom.altaz()
-                    # alt may be Angle-like; try degrees attribute
                     try:
                         moon_altitudes.append(float(getattr(alt, "degrees", alt.degrees)))
                     except Exception:
@@ -157,10 +139,9 @@ class TideProxy:
         else:
             moon_altitudes = [None] * len(dt_objs)
 
-        # If moon_phase still unknown, derive an approximate phase via Sun-Moon elongation using Skyfield if available
+        # If moon_phase still unknown, derive via elongation using Skyfield if available
         if moon_phase is None and sf_ts and sf_eph:
             try:
-                # use first timestamp as sample
                 sample_dt = dt_objs[0]
                 t0 = sf_ts.utc(sample_dt.year, sample_dt.month, sample_dt.day, sample_dt.hour, sample_dt.minute, sample_dt.second)
                 earth = sf_eph['earth']
@@ -176,46 +157,35 @@ class TideProxy:
                 mag_m = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
                 cos_ang = max(-1.0, min(1.0, dot / (mag_s * mag_m)))
                 angle = math.degrees(math.acos(cos_ang))  # 0..180
-                # Map angle to phase fraction 0..0.5 (new..full) similar to earlier heuristics
                 moon_phase = (angle / 180.0) * 0.5
             except Exception:
                 moon_phase = None
 
-        # compute tide_strength from moon_phase
         tide_strength = _compute_tide_strength(moon_phase)
 
-        # Determine base phase anchor for sinusoid:
-        # Prefer using moon_transit_dt if present (align high tide near transit), otherwise shift by longitude
-        anchor_dt = moon_transit_dt or dt_objs[0] if dt_objs else now
-        # convert anchor to epoch seconds
+        # Anchor: use precise moon_transit_dt if found, otherwise first timestamp or now
+        anchor_dt = moon_transit_dt or (dt_objs[0] if dt_objs else now)
         anchor_epoch = anchor_dt.timestamp()
 
-        # compute amplitude (meters) using tide_strength — conservative base amplitude
         base_amp = 1.0
-        amp = base_amp * (0.5 + 0.5 * tide_strength)  # ranges ~0.5..1.0 * base_amp
+        amp = base_amp * (0.5 + 0.5 * tide_strength)
 
-        # compute tide for each requested timestamp, aligned to anchor; use semi-diurnal sinusoid
         period_seconds = _TIDE_HALF_DAY_HOURS * _SECONDS_PER_HOUR
         tide_heights: List[Optional[float]] = []
         for dt in dt_objs:
             sec = dt.timestamp()
-            # local phase shift: use longitude to shift by fraction of day (longitude/360 * period)
             lon_shift = (self.longitude / 360.0) * period_seconds
             x = 2.0 * math.pi * ((sec - anchor_epoch + lon_shift) / period_seconds)
             value = amp * math.sin(x)
             tide_heights.append(round(float(value), 3))
 
-        # Predict next high and low using semi-diurnal anchored to anchor_epoch (find next crest/trough)
         next_high_dt, next_low_dt = _predict_next_high_low(anchor_dt if anchor_dt else now)
 
-        # Build optional forecast per-day using helpers.astro if available (use moon_transit/local noon sampling)
         forecast: Dict[str, Any] = {}
         try:
-            # prefer using astro_forecast mapping if available
             if isinstance(astro_forecast, dict) and astro_forecast:
                 for date_str, a in astro_forecast.items():
                     try:
-                        # choose sample datetime: moon_transit if present else local noon UTC
                         dt_sample = None
                         if isinstance(a, dict):
                             mt = a.get("moon_transit")
@@ -225,22 +195,18 @@ class TideProxy:
                                 except Exception:
                                     dt_sample = None
                             if dt_sample is None:
-                                # fallback to UTC noon
                                 d = datetime.fromisoformat(date_str)
                                 dt_sample = datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=timezone.utc)
                         if dt_sample:
-                            # compute day-level state & strength
                             phase_day = None
                             if isinstance(a, dict):
                                 phase_day = a.get("moon_phase")
-                            # try compute state via moon altitude at sample if skyfield present
                             alt = None
                             if sf_ts and sf_eph:
                                 try:
                                     t = sf_ts.utc(dt_sample.year, dt_sample.month, dt_sample.day, dt_sample.hour, dt_sample.minute, dt_sample.second)
                                     earth = sf_eph['earth']
                                     moon = sf_eph['moon']
-                                    loc = None
                                     from skyfield.api import wgs84  # type: ignore
                                     loc = wgs84.latlon(self.latitude, self.longitude)
                                     astrom = earth.at(t).observe(moon).apparent()
@@ -277,7 +243,6 @@ class TideProxy:
         if forecast:
             raw_tide["forecast"] = forecast
 
-        # Normalize via DataFormatter if available
         if DataFormatter:
             try:
                 normalized = DataFormatter.format_tide_data(raw_tide)
@@ -286,23 +251,49 @@ class TideProxy:
         else:
             normalized = raw_tide
 
-        # Cache and return
         self._cache = normalized
         self._last_calc = now
         return normalized
 
+    async def _async_find_next_moon_transit(self, sf_eph, sf_ts, sf_almanac, sf_wgs, start_dt: datetime) -> Optional[datetime]:
+        """
+        Find the next moon meridian transit (local transit) after start_dt using skyfield.almanac.
+        Returns timezone-aware UTC datetime or None on failure.
+        """
+        try:
+            # define search window
+            t0 = sf_ts.utc(start_dt.year, start_dt.month, start_dt.day, start_dt.hour, start_dt.minute, start_dt.second)
+            end_dt = start_dt + timedelta(days=_ALMANAC_SEARCH_DAYS)
+            t1 = sf_ts.utc(end_dt.year, end_dt.month, end_dt.day, end_dt.hour, end_dt.minute, end_dt.second)
+            # build observer/location
+            loc = sf_wgs.latlon(self.latitude, self.longitude)
+            # build function for meridian transits of the moon
+            f = sf_almanac.meridian_transits(sf_eph, sf_eph['moon'], loc)
+            # find discrete events
+            times, events = sf_almanac.find_discrete(t0, t1, f)
+            # times is a Time object array; events indicate transit type (upper/lower)
+            # choose first time that is strictly after start_dt
+            for t in times:
+                try:
+                    dt = t.utc_datetime().replace(tzinfo=timezone.utc)
+                except Exception:
+                    try:
+                        dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)  # fallback
+                    except Exception:
+                        dt = None
+                if dt and dt > start_dt:
+                    return dt
+            return None
+        except Exception:
+            _LOGGER.debug("Skyfield almanac transit-finding failed", exc_info=True)
+            return None
+
     def _calculate_tide_state(self, moon_data: Dict[str, Optional[float]], sun_data: Dict[str, Optional[float]], now: datetime) -> str:
-        """
-        Determine tide state (rising/falling/slack_high/slack_low/unknown).
-        Accepts moon_data={"phase":..., "altitude":...}, sun_data={"elevation":...}.
-        """
         try:
             moon_alt = moon_data.get("altitude")
             if moon_alt is None:
-                # fallback to simple rising/falling heuristic
                 rising = self._is_moon_rising(now)
                 return "rising" if rising else "falling"
-            # big positive altitude -> slack_high heuristic, very low -> slack_low
             if abs(moon_alt) > 70:
                 return "slack_high"
             if abs(moon_alt) < 10:
@@ -313,7 +304,6 @@ class TideProxy:
             return "unknown"
 
     def _is_moon_rising(self, now: datetime) -> bool:
-        """Simple heuristic: lunar cycle fraction to tell rising/falling."""
         try:
             lunar_day_hours = 24.84
             hours_since_epoch = now.timestamp() / 3600.0
@@ -328,7 +318,6 @@ class TideProxy:
 
 
 def _coerce_phase(val: Any) -> Optional[float]:
-    """Convert numeric or named phase to float in [0,1]."""
     try:
         if val is None:
             return None
@@ -366,9 +355,6 @@ def _coerce_phase(val: Any) -> Optional[float]:
 
 
 def _compute_tide_strength(phase: Optional[float]) -> float:
-    """
-    Map moon phase to tide strength 0..1 (spring near new/full, neap near quarters).
-    """
     try:
         if phase is None:
             return 0.5
@@ -377,7 +363,6 @@ def _compute_tide_strength(phase: Optional[float]) -> float:
         dist_new = abs(p - 0.0)
         dist_full = abs(p - 0.5)
         dist = min(dist_new, dist_full)
-        # map [0..0.25] -> [1..0], clamp
         val = max(0.0, 1.0 - (dist / 0.25))
         return float(max(0.0, min(1.0, val)))
     except Exception:
@@ -385,14 +370,9 @@ def _compute_tide_strength(phase: Optional[float]) -> float:
 
 
 def _predict_next_high_low(anchor_dt: datetime) -> Tuple[Optional[datetime], Optional[datetime]]:
-    """
-    Using semi-diurnal half-cycle, estimate next high and next low relative to anchor datetime.
-    Returns timezone-aware UTC datetimes.
-    """
     try:
         now = dt_util.now()
         half_cycle = _TIDE_HALF_DAY_HOURS
-        # figure fraction within half-cycle for now relative to anchor
         anchor_epoch = anchor_dt.timestamp()
         hours_since_anchor = (now.timestamp() - anchor_epoch) / 3600.0
         frac = (hours_since_anchor % half_cycle) / half_cycle
