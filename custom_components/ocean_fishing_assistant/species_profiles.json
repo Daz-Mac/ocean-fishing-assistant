@@ -1,0 +1,14 @@
+{
+  "sea_bass": {
+    "common_name": "Sea Bass",
+    "preferred_temp_c": [10, 20],
+    "preferred_wind_m_s": [0, 6],
+    "max_wave_height_m": 2.0
+  },
+  "mackerel": {
+    "common_name": "Mackerel",
+    "preferred_temp_c": [12, 22],
+    "preferred_wind_m_s": [0, 8],
+    "max_wave_height_m": 1.5
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "title": "Ocean Fishing Assistant",
+  "sensor": {
+    "ocean_fishing_score": {
+      "name": "Ocean Fishing Score",
+      "state": "Score"
+    }
+  }
+}
