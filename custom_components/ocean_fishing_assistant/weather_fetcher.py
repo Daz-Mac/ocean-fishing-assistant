@@ -1,8 +1,11 @@
+import logging
 import aiohttp
-import asyncio
 from typing import Dict, Any
 
 from .const import OM_BASE
+
+_LOGGER = logging.getLogger(__name__)
+
 
 class OpenMeteoClient:
     """
@@ -12,12 +15,19 @@ class OpenMeteoClient:
       - wind speed: meters per second (m/s)
       - wave height: meters (m)
       - pressure: hectopascal (hPa)
+
+    Parameters
+    ----------
+    days : int
+        Number of forecast days to request when asking for hourly or daily
+        forecasts (default 5). When requesting hourly mode this yields an
+        hourly grid of approximately days * 24 entries (provider-dependent).
     """
 
     def __init__(self, session: aiohttp.ClientSession):
         self._session = session
 
-    async def fetch(self, lat: float, lon: float, mode: str = "hourly") -> Dict[str, Any]:
+    async def fetch(self, lat: float, lon: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
         params = {
             "latitude": lat,
             "longitude": lon,
@@ -29,17 +39,34 @@ class OpenMeteoClient:
             params["hourly"] = ",".join(
                 ["temperature_2m", "windspeed_10m", "pressure_msl", "wave_height"]
             )
+            # request multiple forecast days (hourly grid)
+            params["forecast_days"] = int(days)
         else:
             params["daily"] = ",".join(
                 ["temperature_2m_max", "temperature_2m_min", "windspeed_10m_max", "pressure_msl"]
             )
+            params["forecast_days"] = int(days)
 
-        async with self._session.get(OM_BASE, params=params, timeout=30) as resp:
+        # increase timeout to allow larger responses for multi-day hourly grids
+        async with self._session.get(OM_BASE, params=params, timeout=60) as resp:
             resp.raise_for_status()
             data = await resp.json()
 
         # Normalize to a minimal canonical structure expected downstream.
-        return self._normalize_to_si(data, mode)
+        out = self._normalize_to_si(data, mode)
+
+        # Sanity-check: if hourly mode but fewer than requested points, log a warning
+        if mode == "hourly":
+            timestamps = out.get("timestamps") or []
+            expected = max(0, int(days)) * 24
+            if timestamps and expected > 0 and len(timestamps) < expected:
+                _LOGGER.warning(
+                    "Open-Meteo returned fewer hourly timestamps (%d) than requested (%d).",
+                    len(timestamps),
+                    expected,
+                )
+
+        return out
 
     def _normalize_to_si(self, om_response: Dict[str, Any], mode: str) -> Dict[str, Any]:
         """
