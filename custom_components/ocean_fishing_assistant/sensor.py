@@ -8,6 +8,7 @@ from .ocean_scoring import compute_score, MissingDataError
 
 ATTRIBUTION = "Data provided by Open-Meteo"
 
+
 class OFASensor(CoordinatorEntity):
     def __init__(self, coordinator, name=DEFAULT_NAME):
         super().__init__(coordinator)
@@ -39,7 +40,7 @@ class OFASensor(CoordinatorEntity):
 
         # Fallback: compute from raw payload (index 0)
         try:
-            result = compute_score(self.coordinator.data, species_profile=getattr(self.coordinator, "species", None), use_index=0)
+            result = compute_score(self.coordinator.data, species_profile=getattr(self.coordinator, "species", None), use_index=0, safety_limits=getattr(self.coordinator, "safety_limits", None))
             return int(result["score_100"])
         except MissingDataError:
             return None
@@ -69,6 +70,11 @@ class OFASensor(CoordinatorEntity):
 
         attrs["profile_used"] = current.get("profile_used") if current else None
         attrs["units"] = getattr(self.coordinator, "units", None)
+        # expose the canonical safety limits used for this config entry
+        attrs["safety_limits"] = getattr(self.coordinator, "safety_limits", None)
+        # also expose the safety evaluation for current index
+        attrs["safety"] = current.get("safety") if current else None
+
         attrs["attribution"] = ATTRIBUTION
         attrs[ATTR_ATTRIBUTION] = ATTRIBUTION
         return attrs

@@ -2,7 +2,7 @@
 and precompute per-timestamp forecasts using the scoring engine.
 
 This module provides a single DataFormatter class with:
-- validate(raw, species_profile=None, units='metric') -> canonical dict with 'forecasts' array
+- validate(raw, species_profile=None, units='metric', safety_limits=None) -> canonical dict with 'forecasts' array
 - format_tide_data(raw_tide) -> normalized tide dict
 
 The formatter accepts either the normalized output from the internal OpenMeteo client or
@@ -120,6 +120,8 @@ class DataFormatter:
         - wave_height_ft -> wave_height_m
         - tide_height_ft -> tide_height_m
         - pressure_inhg -> pressure_hpa
+        - visibility_mi -> visibility_km (if present)
+        - swell_period_s / swell_period -> swell_period_s (try to canonicalize)
         """
         # Temperature
         if "temperature_f" in payload and "temperature_c" not in payload:
@@ -143,7 +145,27 @@ class DataFormatter:
         if "pressure_inhg" in payload and "pressure_hpa" not in payload:
             payload["pressure_hpa"] = [_inhg_to_hpa(x) for x in payload.get("pressure_inhg") or []]
 
-    def validate(self, raw: Dict[str, Any], species_profile: Optional[str] = None, units: str = "metric") -> Dict[str, Any]:
+        # Visibility (miles -> km)
+        if "visibility_mi" in payload and "visibility_km" not in payload:
+            try:
+                payload["visibility_km"] = [float(x) * 1.609344 for x in (payload.get("visibility_mi") or [])]
+            except Exception:
+                payload["visibility_km"] = payload.get("visibility_mi")
+
+        # Swell period: try to canonicalize common keys
+        if "swell_period_s" not in payload:
+            if "swell_period" in payload:
+                payload["swell_period_s"] = payload.get("swell_period")
+            elif "swell_period_sec" in payload:
+                payload["swell_period_s"] = payload.get("swell_period_sec")
+
+    def validate(
+        self,
+        raw: Dict[str, Any],
+        species_profile: Optional[str] = None,
+        units: str = "metric",
+        safety_limits: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Take raw payloads (normalized by fetcher) and produce canonical output.
 
         Returns a dict with keys:
@@ -151,6 +173,8 @@ class DataFormatter:
         - forecasts (list of per-index forecast dicts)
         - raw_payload (canonicalized input used for scoring)
         - units ("metric")
+        - species_profile_requested
+        - safety_limits (the canonical limits used)
         """
         if not raw:
             return {}
@@ -183,7 +207,12 @@ class DataFormatter:
         forecasts: List[Dict[str, Any]] = []
         for idx, ts in enumerate(timestamps):
             try:
-                res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits)
+                res = compute_score(
+                    payload,
+                    species_profile=species_profile,
+                    use_index=idx,
+                    safety_limits=safety_limits,
+                )
                 # Attach index and timestamp to the forecast entry
                 entry: Dict[str, Any] = {
                     "timestamp": ts,
@@ -196,10 +225,28 @@ class DataFormatter:
                     "safety": res.get("safety"),
                 }
             except MissingDataError:
-                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None, "safety": {"unsafe": False, "caution": False}}
+                entry = {
+                    "timestamp": ts,
+                    "index": idx,
+                    "score_10": None,
+                    "score_100": None,
+                    "components": None,
+                    "raw": None,
+                    "profile_used": None,
+                    "safety": {"unsafe": False, "caution": False, "reasons": []},
+                }
             except Exception:
                 _LOGGER.debug("Failed to compute score for index %s", idx, exc_info=True)
-                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None, "safety": {"unsafe": False, "caution": False}}
+                entry = {
+                    "timestamp": ts,
+                    "index": idx,
+                    "score_10": None,
+                    "score_100": None,
+                    "components": None,
+                    "raw": None,
+                    "profile_used": None,
+                    "safety": {"unsafe": False, "caution": False, "reasons": []},
+                }
             forecasts.append(entry)
 
         out: Dict[str, Any] = {
@@ -207,6 +254,7 @@ class DataFormatter:
             "forecasts": forecasts,
             "raw_payload": payload,
             "units": "metric",
+            "safety_limits": safety_limits or {},
         }
         # If caller passed species_profile name, add to output for visibility
         out["species_profile_requested"] = species_profile

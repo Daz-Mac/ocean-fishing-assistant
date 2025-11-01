@@ -13,6 +13,9 @@ Implements factor names and weights per OceanFishingScorer._get_factor_weights:
 
 All component scores are computed on 0..10 scale (score_10). The payload includes both
 score_10 and score_100 (rounded int) for each component and for overall.
+
+This module now also evaluates per-index safety flags when provided a `safety_limits`
+dictionary (canonical metric keys) and returns a `safety` dict in the result.
 """
 from __future__ import annotations
 import json
@@ -47,8 +50,10 @@ DEFAULT_PROFILE = {
     "weights": FACTOR_WEIGHTS,
 }
 
+
 class MissingDataError(ValueError):
     pass
+
 
 def _to_float_safe(v: Any) -> Optional[float]:
     try:
@@ -57,6 +62,7 @@ def _to_float_safe(v: Any) -> Optional[float]:
         return float(v)
     except Exception:
         return None
+
 
 def _linear_within_score_10(value: float, pref_min: float, pref_max: float, tolerance: float) -> float:
     """
@@ -81,8 +87,10 @@ def _linear_within_score_10(value: float, pref_min: float, pref_max: float, tole
         return 10.0 * (span_high - value) / (span_high - high)
     return 0.0
 
+
 def _clamp_0_10(x: float) -> float:
     return max(0.0, min(10.0, float(x)))
+
 
 def _load_species_profile_by_name(name: str) -> Optional[Dict[str, Any]]:
     try:
@@ -95,10 +103,12 @@ def _load_species_profile_by_name(name: str) -> Optional[Dict[str, Any]]:
         _LOGGER.debug("Unable to load species profiles", exc_info=True)
         return None
 
+
 def compute_score(
     data: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
     use_index: int = 0,
+    safety_limits: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Compute scores with exact factor weights for a given index (timestamp).
@@ -108,7 +118,8 @@ def compute_score(
       "score_100": int,
       "components": { ... },
       "raw": {...},
-      "profile_used": ...
+      "profile_used": ...,
+      "safety": {"unsafe": bool, "caution": bool, "reasons": [...]}
     }
     """
 
@@ -353,6 +364,58 @@ def compute_score(
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
+    # Safety evaluation (if safety_limits provided) -> produce structured info
+    safety = {"unsafe": False, "caution": False, "reasons": []}
+    try:
+        if safety_limits:
+            # Canonical keys expected:
+            # max_wind_m_s, max_wave_height_m, min_visibility_km, max_swell_period_s
+            # WIND (max)
+            max_wind = _to_float_safe(safety_limits.get("max_wind_m_s"))
+            if max_wind is not None and wind is not None:
+                if wind > max_wind:
+                    safety["unsafe"] = True
+                    safety["reasons"].append(f"wind>{max_wind}")
+                elif wind > (0.9 * max_wind):
+                    safety["caution"] = True
+                    safety["reasons"].append("wind_near_limit")
+
+            # WAVE (max)
+            max_wave = _to_float_safe(safety_limits.get("max_wave_height_m"))
+            if max_wave is not None and wave is not None:
+                if wave > max_wave:
+                    safety["unsafe"] = True
+                    safety["reasons"].append(f"wave>{max_wave}")
+                elif wave > (0.9 * max_wave):
+                    safety["caution"] = True
+                    safety["reasons"].append("wave_near_limit")
+
+            # VISIBILITY (min)
+            min_vis = _to_float_safe(safety_limits.get("min_visibility_km"))
+            vis = _get_at("visibility_km", use_index) or _get_at("visibility", use_index)
+            if min_vis is not None and vis is not None:
+                if vis < min_vis:
+                    safety["unsafe"] = True
+                    safety["reasons"].append(f"vis<{min_vis}")
+                elif vis < (1.1 * min_vis):
+                    # Slightly above minimum threshold -> caution
+                    safety["caution"] = True
+                    safety["reasons"].append("vis_near_limit")
+
+            # SWELL PERIOD (max)
+            max_swell = _to_float_safe(safety_limits.get("max_swell_period_s"))
+            swell = _get_at("swell_period_s", use_index) or _get_at("swell_period", use_index)
+            if max_swell is not None and swell is not None:
+                if swell > max_swell:
+                    safety["unsafe"] = True
+                    safety["reasons"].append(f"swell>{max_swell}")
+                elif swell > (0.9 * max_swell):
+                    safety["caution"] = True
+                    safety["reasons"].append("swell_near_limit")
+    except Exception:
+        # Do not fail scoring for safety evaluation errors; log and continue
+        _LOGGER.debug("Safety evaluation failed", exc_info=True)
+
     result = {
         "score_10": overall_10,
         "score_100": overall_100,
@@ -367,5 +430,6 @@ def compute_score(
             "moon_phase": moon_phase,
         },
         "profile_used": profile.get("common_name", "unknown"),
+        "safety": safety,
     }
     return result

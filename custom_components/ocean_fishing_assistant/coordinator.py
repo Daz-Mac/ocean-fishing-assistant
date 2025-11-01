@@ -1,16 +1,38 @@
 from datetime import timedelta
 import async_timeout
+import logging
+import time
+from typing import Optional
+
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.storage import Store
 
 from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN
 from .tide_proxy import TideProxy
 
+_LOGGER = logging.getLogger(__name__)
+
+
 class OFACoordinator(DataUpdateCoordinator):
-    def __init__(self, hass, entry_id, fetcher, formatter, lat, lon, update_interval, store_enabled=False, ttl=3600, species=None, units="metric"):
+    def __init__(
+        self,
+        hass,
+        entry_id: str,
+        fetcher,
+        formatter,
+        lat: float,
+        lon: float,
+        update_interval: int,
+        store_enabled: bool = False,
+        ttl: int = 3600,
+        species: Optional[str] = None,
+        units: str = "metric",
+        safety_limits: Optional[dict] = None,
+    ):
+        """Coordinator that fetches, aligns tide, formats data and persists last fetch."""
         super().__init__(
             hass,
-            _LOGGER := hass.helpers.logging.getLogger(__name__),
+            _LOGGER,
             name="ocean_fishing_assistant",
             update_interval=timedelta(seconds=update_interval),
         )
@@ -31,7 +53,7 @@ class OFACoordinator(DataUpdateCoordinator):
         self._tide_proxy = TideProxy(hass, self.lat, self.lon)
 
     async def _async_update_data(self):
-        # fetch weather -> fetch tide -> merge -> format -> return
+        """Fetch weather (cached), attach tide data, run formatter to precompute forecasts."""
         async with async_timeout.timeout(60):
             # build robust cache access via hass.data
             cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
@@ -39,7 +61,6 @@ class OFACoordinator(DataUpdateCoordinator):
             cached = cache_dict.get(cache_key)
             raw = None
             try:
-                import time
                 if cached and (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
                     raw = cached.get("data")
                 else:
@@ -47,7 +68,7 @@ class OFACoordinator(DataUpdateCoordinator):
                     try:
                         cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
                     except Exception:
-                        pass
+                        _LOGGER.debug("Failed to update in-memory fetch cache", exc_info=True)
             except Exception:
                 # fallback to fetching directly if cache logic fails
                 raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
@@ -65,17 +86,25 @@ class OFACoordinator(DataUpdateCoordinator):
                     raw.setdefault("tide", {}).update(tide)
                 except Exception:
                     _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
-            data = self.formatter.validate(raw, species_profile=self.species, units=self.units, safety_limits=self.safety_limits)
+
+            # IMPORTANT: pass per-entry species, units and safety_limits into the formatter
+            data = self.formatter.validate(
+                raw,
+                species_profile=self.species,
+                units=self.units,
+                safety_limits=self.safety_limits,
+            )
+
             # persist if store enabled (wrap with timestamp for TTL checks)
             if self._store:
                 try:
-                    import time
                     await self._store.async_save({"fetched_at": time.time(), "data": data})
                 except Exception:
                     _LOGGER.debug("Failed to persist fetch to store", exc_info=True)
+
             return data
 
-    async def async_load_from_store(self):
+    async def async_load_from_store(self) -> bool:
         """Load persisted data from the per-entry store if within TTL.
         Returns True if data restored, False otherwise.
         """
@@ -87,9 +116,8 @@ class OFACoordinator(DataUpdateCoordinator):
                 return False
             fetched_at = raw.get("fetched_at")
             stored = raw.get("data")
-            if not fetched_at or not stored:
+            if not fetched_at or stored is None:
                 return False
-            import time
             now = time.time()
             if (now - float(fetched_at)) > float(self._ttl):
                 return False
