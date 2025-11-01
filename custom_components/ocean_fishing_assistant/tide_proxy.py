@@ -65,7 +65,7 @@ class TideProxy:
         astro_forecast: Dict[str, Any] = {}
         try:
             from .helpers.astro import calculate_astronomy_forecast  # type: ignore
-            astro_forecast = await calculate_astronomy_forecast(self.hass, self.latitude, self.longitude, days=7)
+            astro_forecast = await calculate_astronomy_forecast(self.hass, self.latitude, self.longitude, days=5)
         except Exception:
             astro_forecast = {}
 

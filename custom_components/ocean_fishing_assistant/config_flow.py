@@ -23,8 +23,8 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Optional(CONF_LATITUDE, default=self.hass.config.latitude): cv.latitude,
-                vol.Optional(CONF_LONGITUDE, default=self.hass.config.longitude): cv.longitude,
+                vol.Required(CONF_LATITUDE): cv.latitude,
+                vol.Required(CONF_LONGITUDE): cv.longitude,
                 vol.Optional("update_interval", default=DEFAULT_UPDATE_INTERVAL): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=False): bool,
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,

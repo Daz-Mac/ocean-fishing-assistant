@@ -17,12 +17,20 @@ async def async_setup_entry(hass, entry):
     session = aiohttp_client.async_get_clientsession(hass)
     client = OpenMeteoClient(session)
     formatter = DataFormatter()
+    # require explicit coordinates per the development guide (no fallback to global HA location)
+    lat = entry.data.get(CONF_LATITUDE)
+    lon = entry.data.get(CONF_LONGITUDE)
+    if lat is None or lon is None:
+        _LOGGER.error("Config entry missing latitude/longitude; aborting setup")
+        return False
+
     coord = OFACoordinator(
         hass,
+        entry.entry_id,
         fetcher=client,
         formatter=formatter,
-        lat=entry.data.get(CONF_LATITUDE) or hass.config.latitude,
-        lon=entry.data.get(CONF_LONGITUDE) or hass.config.longitude,
+        lat=lat,
+        lon=lon,
         update_interval=entry.options.get("update_interval", DEFAULT_UPDATE_INTERVAL),
         store_enabled=entry.options.get("persist_last_fetch", False),
         ttl=entry.options.get("persist_ttl", 3600),
