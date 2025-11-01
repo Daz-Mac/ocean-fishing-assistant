@@ -12,10 +12,17 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None):
         errors = {}
         if user_input is not None:
-            # Store coordinates in data, options for runtime flags
+            # Store coordinates in data; options include runtime flags and required safety limits
             data = {
                 CONF_LATITUDE: user_input.get(CONF_LATITUDE),
                 CONF_LONGITUDE: user_input.get(CONF_LONGITUDE),
+            }
+            # Collect safety limits into a single dict stored under options
+            safety_limits = {
+                "max_wind": float(user_input.get("safety_max_wind")),
+                "max_wave_height": float(user_input.get("safety_max_wave_height")),
+                "min_visibility": float(user_input.get("safety_min_visibility")),
+                "max_swell_period": float(user_input.get("safety_max_swell_period")),
             }
             options = {
                 "update_interval": user_input.get("update_interval", DEFAULT_UPDATE_INTERVAL),
@@ -23,9 +30,11 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "persist_ttl": user_input.get("persist_ttl", 3600),
                 "species": user_input.get("species"),
                 "units": user_input.get("units", "metric"),
+                "safety_limits": safety_limits,
             }
             return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
 
+        # Require users to provide explicit safety limits at setup. Units determine how wind is entered (km/h or mph)
         schema = vol.Schema(
             {
                 vol.Required(CONF_LATITUDE): cv.latitude,
@@ -34,7 +43,11 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("persist_last_fetch", default=False): bool,
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,
                 vol.Optional("species", default=""): cv.string,
-                vol.Optional("units", default="metric"): vol.In(["metric", "imperial"]),
+                vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
+                vol.Required("safety_max_wind"): vol.Coerce(float),
+                vol.Required("safety_max_wave_height"): vol.Coerce(float),
+                vol.Required("safety_min_visibility"): vol.Coerce(float),
+                vol.Required("safety_max_swell_period"): vol.Coerce(float),
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
