@@ -34,6 +34,8 @@ async def async_setup_entry(hass, entry):
         update_interval=entry.options.get("update_interval", DEFAULT_UPDATE_INTERVAL),
         store_enabled=entry.options.get("persist_last_fetch", False),
         ttl=entry.options.get("persist_ttl", 3600),
+        species=entry.options.get("species"),
+        units=entry.options.get("units", "metric"),
     )
     # try to load persisted last successful fetch before first refresh (fast recovery)
     if entry.options.get("persist_last_fetch", False):

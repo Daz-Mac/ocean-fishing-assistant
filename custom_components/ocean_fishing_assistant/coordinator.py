@@ -7,7 +7,7 @@ from .const import STORE_KEY, STORE_VERSION
 from .tide_proxy import TideProxy
 
 class OFACoordinator(DataUpdateCoordinator):
-    def __init__(self, hass, entry_id, fetcher, formatter, lat, lon, update_interval, store_enabled=False, ttl=3600):
+    def __init__(self, hass, entry_id, fetcher, formatter, lat, lon, update_interval, store_enabled=False, ttl=3600, species=None, units="metric"):
         super().__init__(
             hass,
             _LOGGER := hass.helpers.logging.getLogger(__name__),
@@ -19,6 +19,9 @@ class OFACoordinator(DataUpdateCoordinator):
         self.formatter = formatter
         self.lat = lat
         self.lon = lon
+        # per-entry options
+        self.species = species
+        self.units = units or "metric"
         # per-entry store key to avoid cross-entry collisions
         self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
         self._ttl = int(ttl)
@@ -40,7 +43,7 @@ class OFACoordinator(DataUpdateCoordinator):
                     raw["tide_strength"] = tide.get("tide_strength")
                 except Exception:
                     _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
-            data = self.formatter.validate(raw)
+            data = self.formatter.validate(raw, species_profile=self.species, units=self.units)
             # persist if store enabled (wrap with timestamp for TTL checks)
             if self._store:
                 try:

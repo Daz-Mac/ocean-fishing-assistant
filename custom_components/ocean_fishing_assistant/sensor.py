@@ -39,7 +39,7 @@ class OFASensor(CoordinatorEntity):
 
         # Fallback: compute from raw payload (index 0)
         try:
-            result = compute_score(self.coordinator.data, use_index=0)
+            result = compute_score(self.coordinator.data, species_profile=getattr(self.coordinator, "species", None), use_index=0)
             return int(result["score_100"])
         except MissingDataError:
             return None
@@ -67,7 +67,8 @@ class OFASensor(CoordinatorEntity):
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
         attrs["raw_payload"] = raw
 
-        attrs["profile_used"] = current.get("components", {}).get("profile_used") if current else None
+        attrs["profile_used"] = current.get("profile_used") if current else None
+        attrs["units"] = getattr(self.coordinator, "units", None)
         attrs["attribution"] = ATTRIBUTION
         attrs[ATTR_ATTRIBUTION] = ATTRIBUTION
         return attrs
