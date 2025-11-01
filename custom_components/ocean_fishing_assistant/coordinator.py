@@ -3,7 +3,7 @@ import async_timeout
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.storage import Store
 
-from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL
+from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN
 from .tide_proxy import TideProxy
 
 class OFACoordinator(DataUpdateCoordinator):
@@ -31,37 +31,25 @@ class OFACoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         # fetch weather -> fetch tide -> merge -> format -> return
         async with async_timeout.timeout(60):
-            # Try in-memory shared fetch cache (keyed by rounded coords to reduce duplicates)
-            try:
-                import time
-                cache = getattr(self.hass.data.get("ocean_fishing_assistant"), "get", None)
-            except Exception:
-                cache = None
-
             # build robust cache access via hass.data
-            cache_dict = self.hass.data.setdefault("ocean_fishing_assistant", {}).setdefault("fetch_cache", {})
+            cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
             cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
             cached = cache_dict.get(cache_key)
-            if cached:
-                try:
-                    import time
-                    if (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
-                        raw = cached.get("data")
-                    else:
-                        raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-                        cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
-                except Exception:
+            raw = None
+            try:
+                import time
+                if cached and (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
+                    raw = cached.get("data")
+                else:
                     raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-            else:
+                    try:
+                        cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
+                    except Exception:
+                        pass
+            except Exception:
+                # fallback to fetching directly if cache logic fails
                 raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-                try:
-                    import time
-                    cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
-                except Exception:
-                    pass
 
-
-            raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
             # attempt to align tide to weather timestamps if available
             timestamps = raw.get("timestamps") or raw.get("time")
             if timestamps:
@@ -71,6 +59,8 @@ class OFACoordinator(DataUpdateCoordinator):
                     raw["tide_height_m"] = tide.get("tide_height_m")
                     raw["tide_phase"] = tide.get("tide_phase")
                     raw["tide_strength"] = tide.get("tide_strength")
+                    # include tide sub-dict for downstream formatting if present
+                    raw.setdefault("tide", {}).update(tide)
                 except Exception:
                     _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
             data = self.formatter.validate(raw, species_profile=self.species, units=self.units)

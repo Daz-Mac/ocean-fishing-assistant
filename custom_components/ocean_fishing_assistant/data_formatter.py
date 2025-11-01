@@ -1,110 +1,212 @@
-from datetime import timedelta
-import async_timeout
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers.storage import Store
+"""Data formatter: validate incoming raw payloads, canonicalize units, attach tide data,
+and precompute per-timestamp forecasts using the scoring engine.
 
-from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL
-from .tide_proxy import TideProxy
+This module provides a single DataFormatter class with:
+- validate(raw, species_profile=None, units='metric') -> canonical dict with 'forecasts' array
+- format_tide_data(raw_tide) -> normalized tide dict
 
-class OFACoordinator(DataUpdateCoordinator):
-    def __init__(self, hass, entry_id, fetcher, formatter, lat, lon, update_interval, store_enabled=False, ttl=3600, species=None, units="metric"):
-        super().__init__(
-            hass,
-            _LOGGER := hass.helpers.logging.getLogger(__name__),
-            name="ocean_fishing_assistant",
-            update_interval=timedelta(seconds=update_interval),
-        )
-        self.entry_id = entry_id
-        self.fetcher = fetcher
-        self.formatter = formatter
-        self.lat = lat
-        self.lon = lon
-        # per-entry options
-        self.species = species
-        self.units = units or "metric"
-        # per-entry store key to avoid cross-entry collisions
-        self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
-        self._ttl = int(ttl)
-        # instantiate TideProxy for this sensor coords
-        self._tide_proxy = TideProxy(hass, self.lat, self.lon)
+The formatter accepts either the normalized output from the internal OpenMeteo client or
+more raw structures and will attempt to canonicalize keys.
+"""
+from __future__ import annotations
 
-    async def _async_update_data(self):
-        # fetch weather -> fetch tide -> merge -> format -> return
-        async with async_timeout.timeout(60):
-            # Try in-memory shared fetch cache (keyed by rounded coords to reduce duplicates)
-            try:
-                import time
-                cache = getattr(self.hass.data.get("ocean_fishing_assistant"), "get", None)
-            except Exception:
-                cache = None
+import copy
+import logging
+from typing import Any, Dict, List, Optional
 
-            # build robust cache access via hass.data
-            cache_dict = self.hass.data.setdefault("ocean_fishing_assistant", {}).setdefault("fetch_cache", {})
-            cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
-            cached = cache_dict.get(cache_key)
-            if cached:
-                try:
-                    import time
-                    if (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
-                        raw = cached.get("data")
-                    else:
-                        raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-                        cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
-                except Exception:
-                    raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-            else:
-                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-                try:
-                    import time
-                    cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
-                except Exception:
-                    pass
+from .ocean_scoring import compute_score, MissingDataError
+
+_LOGGER = logging.getLogger(__name__)
 
 
-            raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-            # attempt to align tide to weather timestamps if available
-            timestamps = raw.get("timestamps") or raw.get("time")
-            if timestamps:
-                try:
-                    tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
-                    # merge tide arrays into raw payload
-                    raw["tide_height_m"] = tide.get("tide_height_m")
-                    raw["tide_phase"] = tide.get("tide_phase")
-                    raw["tide_strength"] = tide.get("tide_strength")
-                except Exception:
-                    _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
-            data = self.formatter.validate(raw, species_profile=self.species, units=self.units)
-            # persist if store enabled (wrap with timestamp for TTL checks)
-            if self._store:
-                try:
-                    import time
-                    await self._store.async_save({"fetched_at": time.time(), "data": data})
-                except Exception:
-                    _LOGGER.debug("Failed to persist fetch to store", exc_info=True)
-            return data
+def _ft_to_m(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v) * 0.3048
+    except Exception:
+        return None
 
-    async def async_load_from_store(self):
-        """Load persisted data from the per-entry store if within TTL.
-        Returns True if data restored, False otherwise.
+
+def _mph_to_m_s(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v) * 0.44704
+    except Exception:
+        return None
+
+
+def _kmh_to_m_s(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v) * 0.277777778
+    except Exception:
+        return None
+
+
+def _f_to_c(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return (float(v) - 32.0) * (5.0 / 9.0)
+    except Exception:
+        return None
+
+
+def _inhg_to_hpa(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v) * 33.8638866667
+    except Exception:
+        return None
+
+
+class DataFormatter:
+    """Validate and canonicalize payloads and precompute forecasts."""
+
+    @staticmethod
+    def format_tide_data(raw_tide: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize tide proxy output to canonical keys.
+
+        Accepts the structure produced by TideProxy and returns a dict containing:
+        - timestamps (list of ISO strings)
+        - tide_height_m (list of floats/None)
+        - tide_phase (float|None)
+        - tide_strength (float)
+        - next_high/next_low (ISO strings)
+        - confidence/source
+        - forecast (optional per-day forecast dict)
         """
-        if not self._store:
-            return False
+        if not isinstance(raw_tide, dict):
+            return raw_tide or {}
+
+        out: Dict[str, Any] = {}
+        out["timestamps"] = raw_tide.get("timestamps") or raw_tide.get("time") or []
+
+        # Accept either meter or feet keys
+        if "tide_height_m" in raw_tide:
+            out["tide_height_m"] = raw_tide.get("tide_height_m")
+        elif "tide_height_ft" in raw_tide:
+            out["tide_height_m"] = [_ft_to_m(x) for x in (raw_tide.get("tide_height_ft") or [])]
+        else:
+            out["tide_height_m"] = [None] * len(out["timestamps"])
+
+        out["tide_phase"] = raw_tide.get("tide_phase")
+        # ensure strength is a float 0..1
         try:
-            raw = await self._store.async_load()
-            if not raw:
-                return False
-            fetched_at = raw.get("fetched_at")
-            stored = raw.get("data")
-            if not fetched_at or not stored:
-                return False
-            import time
-            now = time.time()
-            if (now - float(fetched_at)) > float(self._ttl):
-                return False
-            # accept stored data and mark last_update_success
-            self._data = stored
-            self.last_update_success = True
-            return True
+            out["tide_strength"] = float(raw_tide.get("tide_strength", 0.5))
         except Exception:
-            _LOGGER.debug("Failed to load from store", exc_info=True)
-            return False
+            out["tide_strength"] = 0.5
+
+        out["next_high"] = raw_tide.get("next_high")
+        out["next_low"] = raw_tide.get("next_low")
+        out["confidence"] = raw_tide.get("confidence")
+        out["source"] = raw_tide.get("source")
+        if "forecast" in raw_tide:
+            out["forecast"] = raw_tide.get("forecast")
+
+        return out
+
+    @staticmethod
+    def _convert_imperial_to_metric(payload: Dict[str, Any]) -> None:
+        """In-place convert common imperial keys to canonical metric keys expected by scoring.
+
+        Common conversions handled:
+        - temperature_f -> temperature_c
+        - wind_mph / wind_kmh -> wind_m_s
+        - wave_height_ft -> wave_height_m
+        - tide_height_ft -> tide_height_m
+        - pressure_inhg -> pressure_hpa
+        """
+        # Temperature
+        if "temperature_f" in payload and "temperature_c" not in payload:
+            payload["temperature_c"] = [_f_to_c(x) for x in payload.get("temperature_f") or []]
+
+        # Wind
+        if "wind_mph" in payload and "wind_m_s" not in payload:
+            payload["wind_m_s"] = [_mph_to_m_s(x) for x in payload.get("wind_mph") or []]
+        if "wind_kmh" in payload and "wind_m_s" not in payload:
+            payload["wind_m_s"] = [_kmh_to_m_s(x) for x in payload.get("wind_kmh") or []]
+
+        # Wave
+        if "wave_height_ft" in payload and "wave_height_m" not in payload:
+            payload["wave_height_m"] = [_ft_to_m(x) for x in payload.get("wave_height_ft") or []]
+
+        # Tide
+        if "tide_height_ft" in payload and "tide_height_m" not in payload:
+            payload["tide_height_m"] = [_ft_to_m(x) for x in payload.get("tide_height_ft") or []]
+
+        # Pressure
+        if "pressure_inhg" in payload and "pressure_hpa" not in payload:
+            payload["pressure_hpa"] = [_inhg_to_hpa(x) for x in payload.get("pressure_inhg") or []]
+
+    def validate(self, raw: Dict[str, Any], species_profile: Optional[str] = None, units: str = "metric") -> Dict[str, Any]:
+        """Take raw payloads (normalized by fetcher) and produce canonical output.
+
+        Returns a dict with keys:
+        - timestamps
+        - forecasts (list of per-index forecast dicts)
+        - raw_payload (canonicalized input used for scoring)
+        - units ("metric")
+        """
+        if not raw:
+            return {}
+
+        # Make a defensive copy
+        payload = copy.deepcopy(raw)
+
+        # Some callers (e.g. TideProxy) may return a nested structured tide dict; merge if present
+        if "tide" in payload and isinstance(payload.get("tide"), dict):
+            t = payload.get("tide") or {}
+            if "tide_height_m" in t and "tide_height_m" not in payload:
+                payload["tide_height_m"] = t.get("tide_height_m")
+
+        # Convert known imperial keys if requested or present
+        # Always attempt to canonicalize any imperial keys we find (defensive)
+        self._convert_imperial_to_metric(payload)
+
+        # Ensure timestamps exist (some payloads use 'time' or nested structures)
+        timestamps = payload.get("timestamps") or payload.get("time") or []
+        payload["timestamps"] = timestamps
+
+        # If TideProxy attached a normalized tide structure under 'tide' key, normalize it
+        if "tide" in payload and isinstance(payload.get("tide"), dict):
+            tide_norm = self.format_tide_data(payload.get("tide"))
+            payload["tide_height_m"] = tide_norm.get("tide_height_m")
+            payload["tide_phase"] = tide_norm.get("tide_phase")
+            payload["tide_strength"] = tide_norm.get("tide_strength")
+
+        # Prepare forecasts list by computing score per timestamp
+        forecasts: List[Dict[str, Any]] = []
+        for idx, ts in enumerate(timestamps):
+            try:
+                res = compute_score(payload, species_profile=species_profile, use_index=idx)
+                # Attach index and timestamp to the forecast entry
+                entry: Dict[str, Any] = {
+                    "timestamp": ts,
+                    "index": idx,
+                    "score_10": res.get("score_10"),
+                    "score_100": res.get("score_100"),
+                    "components": res.get("components"),
+                    "raw": res.get("raw"),
+                    "profile_used": res.get("profile_used"),
+                }
+            except MissingDataError:
+                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None}
+            except Exception:
+                _LOGGER.debug("Failed to compute score for index %s", idx, exc_info=True)
+                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None}
+            forecasts.append(entry)
+
+        out: Dict[str, Any] = {
+            "timestamps": timestamps,
+            "forecasts": forecasts,
+            "raw_payload": payload,
+            "units": "metric",
+        }
+        # If caller passed species_profile name, add to output for visibility
+        out["species_profile_requested"] = species_profile
+        return out
