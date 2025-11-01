@@ -21,12 +21,12 @@ class OFACoordinator(DataUpdateCoordinator):
         self._store = Store(hass, STORE_VERSION, STORE_KEY) if store_enabled else None
         self._ttl = ttl
         # instantiate TideProxy for this sensor coords
-        self._tide_proxy = TideProxy(self.lat, self.lon)
+        self._tide_proxy = TideProxy(hass, self.lat, self.lon)
 
     async def _async_update_data(self):
         # fetch weather -> fetch tide -> merge -> format -> return
-        async with async_timeout.timeout(30):
-            raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly")
+        async with async_timeout.timeout(60):
+            raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
             # attempt to align tide to weather timestamps if available
             timestamps = raw.get("timestamps") or raw.get("time")
             if timestamps:
