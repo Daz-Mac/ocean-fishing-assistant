@@ -29,6 +29,53 @@ async def async_setup_entry(hass, entry):
         _LOGGER.error("Config entry missing latitude/longitude; aborting setup")
         return False
 
+    # Normalize and validate per-entry safety limits (convert to canonical metric internally)
+    raw_safety = entry.options.get("safety_limits") or {}
+    units = entry.options.get("units", "metric") or "metric"
+
+    def _kmh_to_m_s(v):
+        try:
+            return float(v) * 0.277777778
+        except Exception:
+            return None
+    def _mph_to_m_s(v):
+        try:
+            return float(v) * 0.44704
+        except Exception:
+            return None
+    def _ft_to_m(v):
+        try:
+            return float(v) * 0.3048
+        except Exception:
+            return None
+    def _miles_to_km(v):
+        try:
+            return float(v) * 1.609344
+        except Exception:
+            return None
+
+    # Expected raw keys: max_wind, max_wave_height, min_visibility, max_swell_period
+    safety_limits = {}
+    try:
+        # Wind: user input is km/h (metric) or mph (imperial) per UX decision
+        raw_wind = raw_safety.get("max_wind")
+        if raw_wind is not None:
+            safety_limits["max_wind_m_s"] = _kmh_to_m_s(raw_wind) if units == "metric" else _mph_to_m_s(raw_wind)
+        # Wave height: meters (metric) or feet (imperial)
+        raw_wave = raw_safety.get("max_wave_height")
+        if raw_wave is not None:
+            safety_limits["max_wave_height_m"] = float(raw_wave) if units == "metric" else _ft_to_m(raw_wave)
+        # Visibility: km (metric) or miles (imperial)
+        raw_vis = raw_safety.get("min_visibility")
+        if raw_vis is not None:
+            safety_limits["min_visibility_km"] = float(raw_vis) if units == "metric" else _miles_to_km(raw_vis)
+        # Swell period: seconds
+        raw_period = raw_safety.get("max_swell_period")
+        if raw_period is not None:
+            safety_limits["max_swell_period_s"] = float(raw_period)
+    except Exception:
+        _LOGGER.debug("Failed to normalize safety limits; using raw options as fallback", exc_info=True)
+
     coord = OFACoordinator(
         hass,
         entry.entry_id,
@@ -40,7 +87,8 @@ async def async_setup_entry(hass, entry):
         store_enabled=entry.options.get("persist_last_fetch", False),
         ttl=entry.options.get("persist_ttl", 3600),
         species=entry.options.get("species"),
-        units=entry.options.get("units", "metric"),
+        units=units,
+        safety_limits=safety_limits,
     )
     # try to load persisted last successful fetch before first refresh (fast recovery)
     if entry.options.get("persist_last_fetch", False):

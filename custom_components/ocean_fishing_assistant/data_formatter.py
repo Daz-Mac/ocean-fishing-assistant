@@ -183,7 +183,7 @@ class DataFormatter:
         forecasts: List[Dict[str, Any]] = []
         for idx, ts in enumerate(timestamps):
             try:
-                res = compute_score(payload, species_profile=species_profile, use_index=idx)
+                res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits)
                 # Attach index and timestamp to the forecast entry
                 entry: Dict[str, Any] = {
                     "timestamp": ts,
@@ -193,12 +193,13 @@ class DataFormatter:
                     "components": res.get("components"),
                     "raw": res.get("raw"),
                     "profile_used": res.get("profile_used"),
+                    "safety": res.get("safety"),
                 }
             except MissingDataError:
-                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None}
+                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None, "safety": {"unsafe": False, "caution": False}}
             except Exception:
                 _LOGGER.debug("Failed to compute score for index %s", idx, exc_info=True)
-                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None}
+                entry = {"timestamp": ts, "index": idx, "score_10": None, "score_100": None, "components": None, "raw": None, "profile_used": None, "safety": {"unsafe": False, "caution": False}}
             forecasts.append(entry)
 
         out: Dict[str, Any] = {

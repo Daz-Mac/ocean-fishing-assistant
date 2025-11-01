@@ -22,6 +22,8 @@ class OFACoordinator(DataUpdateCoordinator):
         # per-entry options
         self.species = species
         self.units = units or "metric"
+        # canonicalized safety limits in metric units (e.g. m/s, m, km, s)
+        self.safety_limits = safety_limits or {}
         # per-entry store key to avoid cross-entry collisions
         self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
         self._ttl = int(ttl)
@@ -63,7 +65,7 @@ class OFACoordinator(DataUpdateCoordinator):
                     raw.setdefault("tide", {}).update(tide)
                 except Exception:
                     _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
-            data = self.formatter.validate(raw, species_profile=self.species, units=self.units)
+            data = self.formatter.validate(raw, species_profile=self.species, units=self.units, safety_limits=self.safety_limits)
             # persist if store enabled (wrap with timestamp for TTL checks)
             if self._store:
                 try:
