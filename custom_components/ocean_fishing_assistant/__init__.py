@@ -63,8 +63,11 @@ async def async_setup_entry(hass, entry):
     except Exception:
         _LOGGER.debug("Failed to normalize safety limits; falling back to defaults", exc_info=True)
 
-    # If after normalization we have no valid limits, fall back to conservative defaults
-    if not safety_limits:
+    # Merge with defaults for any missing canonical keys; if none successfully parsed, fall back to defaults
+    if safety_limits:
+        for k, v in DEFAULT_SAFETY_LIMITS.items():
+            safety_limits.setdefault(k, v)
+    else:
         safety_limits = DEFAULT_SAFETY_LIMITS.copy()
         _LOGGER.debug("Using DEFAULT_SAFETY_LIMITS for entry %s", entry.entry_id)
 

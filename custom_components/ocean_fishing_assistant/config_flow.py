@@ -72,7 +72,7 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                 # Attempt to load species list from file packaged with integration
                 try:
                     import json, pkgutil
-                    raw = pkgutil.get_data(__name__, "species_profiles.json")
+                    raw = pkgutil.get_data(__package__, "species_profiles.json")
                     profiles = json.loads(raw.decode("utf-8")) if raw else {}
                     if species not in profiles:
                         errors["species"] = "invalid_species"

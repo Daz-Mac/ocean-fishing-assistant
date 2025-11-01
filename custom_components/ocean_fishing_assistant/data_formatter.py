@@ -103,10 +103,11 @@ class DataFormatter:
 
         # Visibility (miles -> km)
         if "visibility_mi" in payload and "visibility_km" not in payload:
-            try:
-                payload["visibility_km"] = [unit_helpers.miles_to_km(x) for x in (payload.get("visibility_mi") or [])]
-            except Exception:
-                payload["visibility_km"] = payload.get("visibility_mi")
+            vis = payload.get("visibility_mi")
+            if isinstance(vis, (list, tuple)):
+                payload["visibility_km"] = [unit_helpers.miles_to_km(x) for x in vis]
+            else:
+                payload["visibility_km"] = unit_helpers.miles_to_km(vis)
 
         # Swell period: try to canonicalize common keys
         if "swell_period_s" not in payload:

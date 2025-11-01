@@ -20,7 +20,7 @@ dictionary (canonical metric keys) and returns a `safety` dict in the result.
 from __future__ import annotations
 import json
 import math
-from typing import Any, Dict, Optional, Iterable, List, Union
+from typing import Any, Dict, Optional, Iterable, List, Union, Tuple
 import pkgutil
 import logging
 
@@ -99,7 +99,7 @@ def resolve_species_profile(name: str) -> Tuple[Optional[Dict[str, Any]], Option
     Matching is case-insensitive for common names. Returns (None, None) if not found.
     """
     try:
-        data_bytes = pkgutil.get_data(__name__, "species_profiles.json")
+        data_bytes = pkgutil.get_data(__package__, "species_profiles.json")
         if not data_bytes:
             return None, None
         profiles = json.loads(data_bytes.decode("utf-8"))
