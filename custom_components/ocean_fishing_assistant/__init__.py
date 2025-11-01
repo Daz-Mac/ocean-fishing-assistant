@@ -15,7 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass, entry):
     """Set up integration from a config entry."""
     session = aiohttp_client.async_get_clientsession(hass)
-    # ensure a shared in-memory fetch cache exists so multiple entries at the same coords
+    # ensure a shared in-memory fetch cache exists so multiple entries at the coords
     # can reuse Open-Meteo responses and reduce API calls
     hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
     
