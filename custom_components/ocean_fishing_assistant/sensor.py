@@ -1,3 +1,5 @@
+from typing import Optional, List, Dict, Any
+
 from homeassistant.helpers.entity import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
 
@@ -12,41 +14,64 @@ class OFASensor(CoordinatorEntity):
         self._attr_name = name
 
     @property
-    def available(self):
+    def available(self) -> bool:
         return self.coordinator.last_update_success and self.coordinator.data is not None
 
+    def _get_current_forecast(self) -> Optional[Dict[str, Any]]:
+        """Return the precomputed forecast dict for index 0 if available, otherwise None."""
+        data = self.coordinator.data or {}
+        forecasts = data.get("forecasts") or []
+        if isinstance(forecasts, (list, tuple)) and len(forecasts) > 0:
+            return forecasts[0]
+        return None
+
     @property
-    def state(self):
-        # Return "score" as integer (0..100) or unknown (None) if missing
+    def state(self) -> Optional[int]:
+        """Return state as integer 0..100 or None."""
         if not self.coordinator.data:
             return None
+
+        # Prefer precomputed forecast (from DataFormatter)
+        forecast = self._get_current_forecast()
+        if forecast:
+            sc = forecast.get("score_100")
+            return int(sc) if sc is not None else None
+
+        # Fallback: compute from raw payload (index 0)
         try:
-            # compute current (index 0)
             result = compute_score(self.coordinator.data, use_index=0)
             return int(result["score_100"])
         except MissingDataError:
-            # Fail loudly: unknown state when required inputs missing
             return None
         except Exception:
             return None
 
     @property
-    def extra_state_attributes(self):
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose the precomputed forecasts and helpful raw data for debugging/automation."""
         if not self.coordinator.data:
             return {}
-        try:
-            result = compute_score(self.coordinator.data, use_index=0)
-            attrs = {
-                "score_10": result.get("score_10"),
-                "score_100": result.get("score_100"),
-                "components": result.get("components", {}),
-                "profile_used": result.get("profile_used"),
-                "raw": result.get("raw"),
-                ATTR_ATTRIBUTION: ATTRIBUTION,
-            }
-            return attrs
-        except Exception:
-            return {}
+
+        attrs: Dict[str, Any] = {}
+        # Expose the full forecasts list (index-aware, 5-day hourly)
+        forecasts = self.coordinator.data.get("forecasts")
+        if forecasts is not None:
+            attrs["forecasts"] = forecasts
+
+        # Also expose the current forecast (duplicate for convenience)
+        current = self._get_current_forecast()
+        if current is not None:
+            attrs["current_forecast"] = current
+
+        # Keep raw values used by scoring (tide, wind, wave, etc.) for troubleshooting
+        raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
+        attrs["raw_payload"] = raw
+
+        attrs["profile_used"] = current.get("components", {}).get("profile_used") if current else None
+        attrs["attribution"] = ATTRIBUTION
+        attrs[ATTR_ATTRIBUTION] = ATTRIBUTION
+        return attrs
+
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up sensor platform from a config entry."""
