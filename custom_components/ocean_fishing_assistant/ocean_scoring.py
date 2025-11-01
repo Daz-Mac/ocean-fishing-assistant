@@ -92,16 +92,43 @@ def _clamp_0_10(x: float) -> float:
     return max(0.0, min(10.0, float(x)))
 
 
-def _load_species_profile_by_name(name: str) -> Optional[Dict[str, Any]]:
+def resolve_species_profile(name: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Return (profile_dict, profile_key) for a given identifier.
+
+    Accepts either the profile key (e.g. "sea_bass") or a common name (e.g. "Sea Bass").
+    Matching is case-insensitive for common names. Returns (None, None) if not found.
+    """
     try:
         data_bytes = pkgutil.get_data(__name__, "species_profiles.json")
         if not data_bytes:
-            return None
+            return None, None
         profiles = json.loads(data_bytes.decode("utf-8"))
-        return profiles.get(name)
+        # direct key match
+        if name in profiles:
+            return profiles.get(name), name
+        # case-insensitive common_name match
+        lname = str(name).strip().lower()
+        for k, v in profiles.items():
+            try:
+                cn = str(v.get("common_name", "")).strip().lower()
+                if cn and cn == lname:
+                    return v, k
+            except Exception:
+                continue
+        # case-insensitive key match
+        for k in profiles.keys():
+            if k.lower() == lname:
+                return profiles.get(k), k
+        return None, None
     except Exception:
         _LOGGER.debug("Unable to load species profiles", exc_info=True)
-        return None
+        return None, None
+
+
+# backward compatible alias
+def _load_species_profile_by_name(name: str) -> Optional[Dict[str, Any]]:
+    prof, _ = resolve_species_profile(name)
+    return prof
 
 
 def compute_score(
