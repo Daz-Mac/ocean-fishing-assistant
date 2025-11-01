@@ -8,4 +8,15 @@ STORE_VERSION = 1
 STORE_KEY = f"{DOMAIN}_store"
 DEFAULT_FORECAST_MODE = "hourly"  # or 'daily'
 
+
+# Marine-specific Open-Meteo endpoint (provides wave / sea-surface variables)
+OM_MARINE_BASE = "https://marine-api.open-meteo.com/v1/marine"
+
+# Default safety limits applied per-config-entry when no species-specific limits exist.
+# These are conservative defaults and can be overridden by species profiles.
+DEFAULT_SAFETY_LIMITS = {
+    "max_wave_height_m": 2.5,
+    "max_wind_m_s": 15.0,
+}
+
 FETCH_CACHE_TTL = 600  # seconds for shared in-memory Open-Meteo fetch cache

@@ -2,7 +2,7 @@ import logging
 import aiohttp
 from typing import Dict, Any
 
-from .const import OM_BASE
+from .const import OM_BASE, OM_MARINE_BASE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,9 +13,10 @@ class OpenMeteoClient:
     returns canonical SI units. Accepts an optional base_url for testing.
     """
 
-    def __init__(self, session: aiohttp.ClientSession, base_url: str = OM_BASE):
+    def __init__(self, session: aiohttp.ClientSession, base_url: str = OM_BASE, marine_base: str = OM_MARINE_BASE):
         self._session = session
         self._base_url = base_url
+        self._marine_base = marine_base
 
     async def fetch(self, lat: float, lon: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
         params = {
