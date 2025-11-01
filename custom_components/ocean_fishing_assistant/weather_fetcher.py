@@ -10,22 +10,12 @@ _LOGGER = logging.getLogger(__name__)
 class OpenMeteoClient:
     """
     Minimal internal Open-Meteo client that requests specific fields and
-    returns canonical SI units:
-      - temperature: degrees Celsius (°C)
-      - wind speed: meters per second (m/s)
-      - wave height: meters (m)
-      - pressure: hectopascal (hPa)
-
-    Parameters
-    ----------
-    days : int
-        Number of forecast days to request when asking for hourly or daily
-        forecasts (default 5). When requesting hourly mode this yields an
-        hourly grid of approximately days * 24 entries (provider-dependent).
+    returns canonical SI units. Accepts an optional base_url for testing.
     """
 
-    def __init__(self, session: aiohttp.ClientSession):
+    def __init__(self, session: aiohttp.ClientSession, base_url: str = OM_BASE):
         self._session = session
+        self._base_url = base_url
 
     async def fetch(self, lat: float, lon: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
         params = {
@@ -48,7 +38,7 @@ class OpenMeteoClient:
             params["forecast_days"] = int(days)
 
         # increase timeout to allow larger responses for multi-day hourly grids
-        async with self._session.get(OM_BASE, params=params, timeout=60) as resp:
+        async with self._session.get(self._base_url, params=params, timeout=60) as resp:
             resp.raise_for_status()
             data = await resp.json()
 

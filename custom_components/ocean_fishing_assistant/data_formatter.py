@@ -1,119 +1,110 @@
-"""
-Thin wrapper to validate and canonicalize data immediately after fetch.
-This keeps the fetcher focused on retrieval and ensures downstream modules
-receive a stable SI-structured payload.
-"""
-from typing import Dict, Any
-from .ocean_scoring import compute_score, MissingDataError
+from datetime import timedelta
+import async_timeout
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.storage import Store
 
-class DataFormatter:
-    def _convert_imperial_to_metric(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert common imperial keys into canonical metric keys in-place on a shallow copy."""
-        out = dict(data)
-        # temperatures
-        if "temperature_c" not in out:
-            if "temperature_f" in out:
-                tf = out.get("temperature_f")
-                if isinstance(tf, (list, tuple)):
-                    out["temperature_c"] = [round((float(v) - 32.0) * 5.0 / 9.0, 2) if v is not None else None for v in tf]
-                else:
-                    try:
-                        out["temperature_c"] = float((float(tf) - 32.0) * 5.0 / 9.0)
-                    except Exception:
-                        pass
-        # wind
-        if "wind_m_s" not in out:
-            if "wind_mph" in out:
-                wm = out.get("wind_mph")
-                if isinstance(wm, (list, tuple)):
-                    out["wind_m_s"] = [round(float(v) * 0.44704, 3) if v is not None else None for v in wm]
-                else:
-                    try:
-                        out["wind_m_s"] = float(out.get("wind_mph") * 0.44704)
-                    except Exception:
-                        pass
-        # waves
-        if "wave_height_m" not in out:
-            if "wave_height_ft" in out:
-                wf = out.get("wave_height_ft")
-                if isinstance(wf, (list, tuple)):
-                    out["wave_height_m"] = [round(float(v) * 0.3048, 3) if v is not None else None for v in wf]
-                else:
-                    try:
-                        out["wave_height_m"] = float(out.get("wave_height_ft") * 0.3048)
-                    except Exception:
-                        pass
-        # tide
-        if "tide_height_m" not in out:
-            if "tide_height_ft" in out:
-                tf = out.get("tide_height_ft")
-                if isinstance(tf, (list, tuple)):
-                    out["tide_height_m"] = [round(float(v) * 0.3048, 3) if v is not None else None for v in tf]
-                else:
-                    try:
-                        out["tide_height_m"] = float(out.get("tide_height_ft") * 0.3048)
-                    except Exception:
-                        pass
-        # pressure
-        if "pressure_hpa" not in out:
-            if "pressure_inhg" in out:
-                p = out.get("pressure_inhg")
-                if isinstance(p, (list, tuple)):
-                    out["pressure_hpa"] = [round(float(v) * 33.8638866667, 2) if v is not None else None for v in p]
-                else:
-                    try:
-                        out["pressure_hpa"] = float(out.get("pressure_inhg") * 33.8638866667)
-                    except Exception:
-                        pass
-        return out
+from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL
+from .tide_proxy import TideProxy
 
-    def validate(self, data: Dict[str, Any], species_profile: Any = None, units: str = "metric") -> Dict[str, Any]:
-        """Validate and canonicalize remote payload, then build per-timestamp forecasts.
+class OFACoordinator(DataUpdateCoordinator):
+    def __init__(self, hass, entry_id, fetcher, formatter, lat, lon, update_interval, store_enabled=False, ttl=3600, species=None, units="metric"):
+        super().__init__(
+            hass,
+            _LOGGER := hass.helpers.logging.getLogger(__name__),
+            name="ocean_fishing_assistant",
+            update_interval=timedelta(seconds=update_interval),
+        )
+        self.entry_id = entry_id
+        self.fetcher = fetcher
+        self.formatter = formatter
+        self.lat = lat
+        self.lon = lon
+        # per-entry options
+        self.species = species
+        self.units = units or "metric"
+        # per-entry store key to avoid cross-entry collisions
+        self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
+        self._ttl = int(ttl)
+        # instantiate TideProxy for this sensor coords
+        self._tide_proxy = TideProxy(hass, self.lat, self.lon)
 
-        - units: 'metric' or 'imperial' (will be converted into canonical metric fields)
-        - species_profile: passed through to compute_score (string or dict)
-        """
-        # Preserve original payload for debugging
-        raw_payload = dict(data)
-
-        # Ensure timestamps present
-        if "timestamps" not in data:
-            raise ValueError("Missing timestamps in fetched data")
-        timestamps = data.get("timestamps") or []
-        if not isinstance(timestamps, (list, tuple)):
-            raise ValueError("timestamps must be a list of ISO strings")
-        n = len(timestamps)
-
-        # Convert units if requested
-        if units == "imperial":
-            data = self._convert_imperial_to_metric(data)
-
-        # Validate array lengths for known keys when present
-        keys_to_check = ["temperature_c", "wind_m_s", "pressure_hpa", "wave_height_m", "tide_height_m"]
-        for k in keys_to_check:
-            val = data.get(k)
-            if val is not None and isinstance(val, (list, tuple)) and len(val) != n:
-                raise ValueError(f"Length of {k} ({len(val)}) does not match timestamps ({n})")
-
-        # Build per-timestamp forecasts using compute_score (index-aware)
-        forecasts = []
-        for i in range(n):
+    async def _async_update_data(self):
+        # fetch weather -> fetch tide -> merge -> format -> return
+        async with async_timeout.timeout(60):
+            # Try in-memory shared fetch cache (keyed by rounded coords to reduce duplicates)
             try:
-                score = compute_score(data, species_profile=species_profile, use_index=i)
-                forecasts.append({
-                    "timestamp": timestamps[i],
-                    "score_10": score.get("score_10"),
-                    "score_100": score.get("score_100"),
-                    "components": score.get("components", {}),
-                })
-            except MissingDataError:
-                forecasts.append({"timestamp": timestamps[i], "score_10": None, "score_100": None, "components": {}, "error": "missing_inputs"})
+                import time
+                cache = getattr(self.hass.data.get("ocean_fishing_assistant"), "get", None)
             except Exception:
-                forecasts.append({"timestamp": timestamps[i], "score_10": None, "score_100": None, "components": {}, "error": "compute_error"})
+                cache = None
 
-        result = dict(data)
-        result["forecasts"] = forecasts
-        result["raw_payload"] = raw_payload
-        result["units"] = units
-        result["species_profile_used"] = species_profile
-        return result
+            # build robust cache access via hass.data
+            cache_dict = self.hass.data.setdefault("ocean_fishing_assistant", {}).setdefault("fetch_cache", {})
+            cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
+            cached = cache_dict.get(cache_key)
+            if cached:
+                try:
+                    import time
+                    if (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
+                        raw = cached.get("data")
+                    else:
+                        raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
+                        cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
+                except Exception:
+                    raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
+            else:
+                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
+                try:
+                    import time
+                    cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
+                except Exception:
+                    pass
+
+
+            raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
+            # attempt to align tide to weather timestamps if available
+            timestamps = raw.get("timestamps") or raw.get("time")
+            if timestamps:
+                try:
+                    tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
+                    # merge tide arrays into raw payload
+                    raw["tide_height_m"] = tide.get("tide_height_m")
+                    raw["tide_phase"] = tide.get("tide_phase")
+                    raw["tide_strength"] = tide.get("tide_strength")
+                except Exception:
+                    _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
+            data = self.formatter.validate(raw, species_profile=self.species, units=self.units)
+            # persist if store enabled (wrap with timestamp for TTL checks)
+            if self._store:
+                try:
+                    import time
+                    await self._store.async_save({"fetched_at": time.time(), "data": data})
+                except Exception:
+                    _LOGGER.debug("Failed to persist fetch to store", exc_info=True)
+            return data
+
+    async def async_load_from_store(self):
+        """Load persisted data from the per-entry store if within TTL.
+        Returns True if data restored, False otherwise.
+        """
+        if not self._store:
+            return False
+        try:
+            raw = await self._store.async_load()
+            if not raw:
+                return False
+            fetched_at = raw.get("fetched_at")
+            stored = raw.get("data")
+            if not fetched_at or not stored:
+                return False
+            import time
+            now = time.time()
+            if (now - float(fetched_at)) > float(self._ttl):
+                return False
+            # accept stored data and mark last_update_success
+            self._data = stored
+            self.last_update_success = True
+            return True
+        except Exception:
+            _LOGGER.debug("Failed to load from store", exc_info=True)
+            return False

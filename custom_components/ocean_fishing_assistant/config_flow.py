@@ -5,7 +5,6 @@ from homeassistant.helpers import config_validation as cv
 from typing import Any, Dict, Optional
 
 from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL
-from . import species_profiles  # NOTE: we'll validate by loading species_profiles.json via import if available
 
 class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1

@@ -7,3 +7,5 @@ OM_BASE = "https://api.open-meteo.com/v1/forecast"
 STORE_VERSION = 1
 STORE_KEY = f"{DOMAIN}_store"
 DEFAULT_FORECAST_MODE = "hourly"  # or 'daily'
+
+FETCH_CACHE_TTL = 600  # seconds for shared in-memory Open-Meteo fetch cache
