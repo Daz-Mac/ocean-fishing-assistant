@@ -2,7 +2,7 @@ from homeassistant.helpers.entity import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
 
 from .const import DEFAULT_NAME, DOMAIN
-from .ocean_scoring import compute_score
+from .ocean_scoring import compute_score, MissingDataError
 
 ATTRIBUTION = "Data provided by Open-Meteo"
 
@@ -17,12 +17,17 @@ class OFASensor(CoordinatorEntity):
 
     @property
     def state(self):
-        # Return "score" as integer or unknown (None) if missing
+        # Return "score" as integer (0..100) or unknown (None) if missing
+        if not self.coordinator.data:
+            return None
         try:
-            result = compute_score(self.coordinator.data)
-            return int(result["score"])
+            # compute current (index 0)
+            result = compute_score(self.coordinator.data, use_index=0)
+            return int(result["score_100"])
+        except MissingDataError:
+            # Fail loudly: unknown state when required inputs missing
+            return None
         except Exception:
-            # Fail loudly: unknown state when inputs missing
             return None
 
     @property
@@ -30,11 +35,16 @@ class OFASensor(CoordinatorEntity):
         if not self.coordinator.data:
             return {}
         try:
-            result = compute_score(self.coordinator.data)
-            return {
+            result = compute_score(self.coordinator.data, use_index=0)
+            attrs = {
+                "score_10": result.get("score_10"),
+                "score_100": result.get("score_100"),
                 "components": result.get("components", {}),
+                "profile_used": result.get("profile_used"),
+                "raw": result.get("raw"),
                 ATTR_ATTRIBUTION: ATTRIBUTION,
             }
+            return attrs
         except Exception:
             return {}
 

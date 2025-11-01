@@ -1,5 +1,5 @@
 """
-Document-accurate Ocean Fishing Scoring.
+Document-accurate Ocean Fishing Scoring (index-aware).
 
 Implements factor names and weights per OceanFishingScorer._get_factor_weights:
 - tide: 0.25
@@ -41,26 +41,22 @@ DEFAULT_PROFILE = {
     "max_wave_height_m": 2.0,
     "preferred_tide_m": [-1.0, 1.0],
     "preferred_tide_phase": [],
-    "preferred_times": [],  # list of {"start_hour":, "end_hour":} or empty
-    "preferred_months": [],  # ints 1..12
-    "moon_preference": [],  # e.g. ["full", "new"]
+    "preferred_times": [],
+    "preferred_months": [],
+    "moon_preference": [],
     "weights": FACTOR_WEIGHTS,
 }
 
 class MissingDataError(ValueError):
     pass
 
-def _first_numeric(values: Optional[Iterable]) -> Optional[float]:
-    if not values:
+def _to_float_safe(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
         return None
-    for v in values:
-        try:
-            if v is None:
-                continue
-            return float(v)
-        except Exception:
-            continue
-    return None
 
 def _linear_within_score_10(value: float, pref_min: float, pref_max: float, tolerance: float) -> float:
     """
@@ -105,14 +101,12 @@ def compute_score(
     use_index: int = 0,
 ) -> Dict[str, Any]:
     """
-    Compute scores with exact factor weights. Returns:
+    Compute scores with exact factor weights for a given index (timestamp).
+    Returns:
     {
       "score_10": float,
       "score_100": int,
-      "components": {
-         "tide": {"score_10":..., "score_100":..., ...},
-         ...
-      },
+      "components": { ... },
       "raw": {...},
       "profile_used": ...
     }
@@ -120,6 +114,10 @@ def compute_score(
 
     if not data or "timestamps" not in data:
         raise MissingDataError("Missing timestamps in data")
+
+    timestamps = data.get("timestamps", [])
+    if use_index < 0 or use_index >= len(timestamps):
+        raise MissingDataError(f"use_index {use_index} out of range for timestamps length {len(timestamps)}")
 
     # resolve profile
     if isinstance(species_profile, str):
@@ -142,45 +140,65 @@ def compute_score(
     total = sum(weights.values()) or 1.0
     weights = {k: float(v) / total for k, v in weights.items()}
 
-    # helper to extract value at index
-    def _get_at(key: str) -> Optional[float]:
+    # helper to extract value at index (safely)
+    def _get_at(key: str, index: int = 0) -> Optional[float]:
         arr = data.get(key)
-        return _first_numeric(arr)
+        if arr is None:
+            return None
+        # If it's a scalar, try to coerce
+        if not isinstance(arr, (list, tuple)):
+            return _to_float_safe(arr)
+        try:
+            return _to_float_safe(arr[index])
+        except Exception:
+            return None
 
-    # Extract values (prefer specific keys)
-    tide = _get_at("tide_height_m")
-    wind = _get_at("wind_m_s") or _get_at("wind_max_m_s") or _get_at("windspeed_10m")
-    wave = _get_at("wave_height_m")
+    # Extract values (index-aware)
+    tide = _get_at("tide_height_m", use_index)
+    wind = _get_at("wind_m_s", use_index) or _get_at("wind_max_m_s", use_index) or _get_at("windspeed_10m", use_index)
+    wave = _get_at("wave_height_m", use_index)
     pressure_arr = data.get("pressure_hpa")
     pressure = None
-    if pressure_arr:
-        try:
-            # use difference 1->0 if available
-            if len(pressure_arr) >= 2:
-                pressure = float(pressure_arr[1]) - float(pressure_arr[0])
+    try:
+        if isinstance(pressure_arr, (list, tuple)):
+            # compute next - current delta if possible
+            if len(pressure_arr) > use_index + 1:
+                p_next = _to_float_safe(pressure_arr[use_index + 1])
+                p_curr = _to_float_safe(pressure_arr[use_index])
+                if p_next is not None and p_curr is not None:
+                    pressure = float(p_next) - float(p_curr)
+                else:
+                    pressure = None
             else:
-                pressure = 0.0
-        except Exception:
+                pressure = None
+        else:
             pressure = None
-    temp = _get_at("temperature_c") or (_get_at("temperature_max_c") + _get_at("temperature_min_c") / 2.0 if _get_at("temperature_max_c") and _get_at("temperature_min_c") else None)
+    except Exception:
+        pressure = None
 
-    # time & moon & season info
-    # timestamp at index
-    timestamps = data.get("timestamps", [])
-    ts_str = timestamps[use_index] if len(timestamps) > use_index else None
+    # temperature: prefer direct hourly temperature, else average daily max/min (index-aware)
+    temp = _get_at("temperature_c", use_index)
+    if temp is None:
+        tmax = _get_at("temperature_max_c", use_index)
+        tmin = _get_at("temperature_min_c", use_index)
+        if tmax is not None and tmin is not None:
+            temp = (tmax + tmin) / 2.0
+
+    # time & moon & season info (derive hour/month from timestamp)
+    ts_str = timestamps[use_index]
     hour = None
     month = None
-    if ts_str:
-        try:
-            from datetime import datetime, timezone
-            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-            hour = dt.hour
-            month = dt.month
-        except Exception:
-            hour = None
-            month = None
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+        hour = dt.hour
+        month = dt.month
+    except Exception:
+        hour = None
+        month = None
 
-    moon_phase = data.get("moon_phase") or data.get("tide_phase") or None  # tide_phase from tide proxy can be used
+    moon_phase = data.get("moon_phase") or data.get("tide_phase") or None
+
     # compute component scores (0..10)
     comp: Dict[str, Any] = {}
 
@@ -194,13 +212,6 @@ def compute_score(
         else:
             tide_score = _linear_within_score_10(float(tide), tmin, tmax, tolerance=0.5)
             tide_reason = f"value={tide}"
-            # phase bonus
-            pref_phases = profile.get("preferred_tide_phase", [])
-            if pref_phases and moon_phase is not None:
-                # simplistic: if moon_phase near spring and pref_phases contains 'spring' or 'full' give +1
-                # allow textual matches too
-                # here we simply not implement phase textual matching in depth; it's optional
-                pass
     except Exception:
         tide_score = 5.0
         tide_reason = "error"
@@ -243,15 +254,13 @@ def compute_score(
         wave_reason = "error"
     comp["waves"] = {"score_10": round(_clamp_0_10(wave_score), 3), "score_100": int(round(_clamp_0_10(wave_score) * 10)), "reason": wave_reason}
 
-    # TIME (0..10) - preferred_times in profile
+    # TIME (0..10)
     try:
         pref_times = profile.get("preferred_times", [])
         if not pref_times:
-            # No preference -> neutral 5.0
             time_score = 5.0
             time_reason = "no_preference"
         else:
-            # pref_times can be list of dict windows: {"start_hour":6,"end_hour":8}
             matched = False
             if hour is None:
                 time_score = 5.0
@@ -279,7 +288,6 @@ def compute_score(
             pressure_score = 5.0
             pressure_reason = "missing"
         else:
-            # map delta -10..+10 hPa to 0..10 (midpoint 0 -> 5)
             p = float(pressure)
             pressure_score = 5.0 + (p / 10.0) * 5.0
             pressure_score = _clamp_0_10(pressure_score)
@@ -308,10 +316,8 @@ def compute_score(
         moon_score = 5.0
         moon_reason = "default"
         if moon_phase is not None:
-            # simple heuristic: near spring phases -> beneficial (higher)
             try:
                 p = float(moon_phase)
-                # map distance to nearest spring (0 or 0.5) -> 10..0 (0..0.25 -> 10..0)
                 dist_new = abs(p - 0.0)
                 dist_full = abs(p - 0.5)
                 dist = min(dist_new, dist_full)
@@ -341,16 +347,9 @@ def compute_score(
     comp["temperature"] = {"score_10": round(_clamp_0_10(temp_score), 3), "score_100": int(round(_clamp_0_10(temp_score) * 10)), "reason": temp_reason}
 
     # Weighted aggregation (on 0..10)
-    overall_10 = (
-        weights.get("tide", 0.0) * comp["tide"]["score_10"]
-        + weights.get("wind", 0.0) * comp["wind"]["score_10"]
-        + weights.get("waves", 0.0) * comp["waves"]["score_10"]
-        + weights.get("time", 0.0) * comp["time"]["score_10"]
-        + weights.get("pressure", 0.0) * comp["pressure"]["score_10"]
-        + weights.get("season", 0.0) * comp["season"]["score_10"]
-        + weights.get("moon", 0.0) * comp["moon"]["score_10"]
-        + weights.get("temperature", 0.0) * comp["temperature"]["score_10"]
-    )
+    overall_10 = 0.0
+    for k in weights:
+        overall_10 += weights.get(k, 0.0) * comp.get(k, {}).get("score_10", 5.0)
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
