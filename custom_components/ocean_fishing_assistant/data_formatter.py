@@ -15,53 +15,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .ocean_scoring import compute_score, MissingDataError
+from . import unit_helpers
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _ft_to_m(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        return float(v) * 0.3048
-    except Exception:
-        return None
-
-
-def _mph_to_m_s(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        return float(v) * 0.44704
-    except Exception:
-        return None
-
-
-def _kmh_to_m_s(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        return float(v) * 0.277777778
-    except Exception:
-        return None
-
-
-def _f_to_c(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        return (float(v) - 32.0) * (5.0 / 9.0)
-    except Exception:
-        return None
-
-
-def _inhg_to_hpa(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        return float(v) * 33.8638866667
-    except Exception:
-        return None
 
 
 class DataFormatter:
@@ -90,7 +46,7 @@ class DataFormatter:
         if "tide_height_m" in raw_tide:
             out["tide_height_m"] = raw_tide.get("tide_height_m")
         elif "tide_height_ft" in raw_tide:
-            out["tide_height_m"] = [_ft_to_m(x) for x in (raw_tide.get("tide_height_ft") or [])]
+            out["tide_height_m"] = [unit_helpers.ft_to_m(x) for x in (raw_tide.get("tide_height_ft") or [])]
         else:
             out["tide_height_m"] = [None] * len(out["timestamps"])
 
@@ -125,30 +81,30 @@ class DataFormatter:
         """
         # Temperature
         if "temperature_f" in payload and "temperature_c" not in payload:
-            payload["temperature_c"] = [_f_to_c(x) for x in payload.get("temperature_f") or []]
+            payload["temperature_c"] = [unit_helpers.f_to_c(x) for x in payload.get("temperature_f") or []]
 
         # Wind
         if "wind_mph" in payload and "wind_m_s" not in payload:
-            payload["wind_m_s"] = [_mph_to_m_s(x) for x in payload.get("wind_mph") or []]
+            payload["wind_m_s"] = [unit_helpers.mph_to_m_s(x) for x in payload.get("wind_mph") or []]
         if "wind_kmh" in payload and "wind_m_s" not in payload:
-            payload["wind_m_s"] = [_kmh_to_m_s(x) for x in payload.get("wind_kmh") or []]
+            payload["wind_m_s"] = [unit_helpers.kmh_to_m_s(x) for x in payload.get("wind_kmh") or []]
 
         # Wave
         if "wave_height_ft" in payload and "wave_height_m" not in payload:
-            payload["wave_height_m"] = [_ft_to_m(x) for x in payload.get("wave_height_ft") or []]
+            payload["wave_height_m"] = [unit_helpers.ft_to_m(x) for x in payload.get("wave_height_ft") or []]
 
         # Tide
         if "tide_height_ft" in payload and "tide_height_m" not in payload:
-            payload["tide_height_m"] = [_ft_to_m(x) for x in payload.get("tide_height_ft") or []]
+            payload["tide_height_m"] = [unit_helpers.ft_to_m(x) for x in payload.get("tide_height_ft") or []]
 
         # Pressure
         if "pressure_inhg" in payload and "pressure_hpa" not in payload:
-            payload["pressure_hpa"] = [_inhg_to_hpa(x) for x in payload.get("pressure_inhg") or []]
+            payload["pressure_hpa"] = [unit_helpers.inhg_to_hpa(x) for x in payload.get("pressure_inhg") or []]
 
         # Visibility (miles -> km)
         if "visibility_mi" in payload and "visibility_km" not in payload:
             try:
-                payload["visibility_km"] = [float(x) * 1.609344 for x in (payload.get("visibility_mi") or [])]
+                payload["visibility_km"] = [unit_helpers.miles_to_km(x) for x in (payload.get("visibility_mi") or [])]
             except Exception:
                 payload["visibility_km"] = payload.get("visibility_mi")
 

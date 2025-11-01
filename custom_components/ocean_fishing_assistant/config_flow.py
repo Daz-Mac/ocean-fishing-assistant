@@ -81,15 +81,26 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                     pass
 
             if not errors:
+                # Preserve and update safety limits from the options flow
+                new_safety = {
+                    "max_wind": float(user_input.get("safety_max_wind")) if user_input.get("safety_max_wind") is not None else current.get("safety_limits", {}).get("max_wind"),
+                    "max_wave_height": float(user_input.get("safety_max_wave_height")) if user_input.get("safety_max_wave_height") is not None else current.get("safety_limits", {}).get("max_wave_height"),
+                    "min_visibility": float(user_input.get("safety_min_visibility")) if user_input.get("safety_min_visibility") is not None else current.get("safety_limits", {}).get("min_visibility"),
+                    "max_swell_period": float(user_input.get("safety_max_swell_period")) if user_input.get("safety_max_swell_period") is not None else current.get("safety_limits", {}).get("max_swell_period"),
+                }
+
                 new_options = {
                     "update_interval": int(user_input.get("update_interval", current.get("update_interval", DEFAULT_UPDATE_INTERVAL))),
                     "persist_last_fetch": bool(user_input.get("persist_last_fetch", current.get("persist_last_fetch", False))),
                     "persist_ttl": int(user_input.get("persist_ttl", current.get("persist_ttl", 3600))),
                     "species": user_input.get("species", current.get("species")),
                     "units": user_input.get("units", current.get("units", "metric")),
+                    "safety_limits": new_safety,
                 }
                 return self.async_create_entry(title="", data=new_options)
 
+        # Build defaults for schema using currently saved options (if present)
+        saved_safety = current.get("safety_limits", {}) or {}
         schema = vol.Schema(
             {
                 vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
@@ -97,6 +108,10 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
                 vol.Optional("species", default=current.get("species", "")): cv.string,
                 vol.Optional("units", default=current.get("units", "metric")): vol.In(["metric", "imperial"]),
+                vol.Optional("safety_max_wind", default=saved_safety.get("max_wind")): vol.Any(vol.Coerce(float), None),
+                vol.Optional("safety_max_wave_height", default=saved_safety.get("max_wave_height")): vol.Any(vol.Coerce(float), None),
+                vol.Optional("safety_min_visibility", default=saved_safety.get("min_visibility")): vol.Any(vol.Coerce(float), None),
+                vol.Optional("safety_max_swell_period", default=saved_safety.get("max_swell_period")): vol.Any(vol.Coerce(float), None),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

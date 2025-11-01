@@ -5,10 +5,11 @@ from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, STORE_KEY, STORE_VERSION
+from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, STORE_KEY, STORE_VERSION, DEFAULT_SAFETY_LIMITS
 from .coordinator import OFACoordinator
 from .weather_fetcher import OpenMeteoClient
 from .data_formatter import DataFormatter
+from . import unit_helpers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +20,6 @@ async def async_setup_entry(hass, entry):
     # can reuse Open-Meteo responses and reduce API calls
     hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
     
-
     client = OpenMeteoClient(session)
     formatter = DataFormatter()
     # require explicit coordinates per the development guide (no fallback to global HA location)
@@ -33,48 +33,40 @@ async def async_setup_entry(hass, entry):
     raw_safety = entry.options.get("safety_limits") or {}
     units = entry.options.get("units", "metric") or "metric"
 
-    def _kmh_to_m_s(v):
-        try:
-            return float(v) * 0.277777778
-        except Exception:
-            return None
-    def _mph_to_m_s(v):
-        try:
-            return float(v) * 0.44704
-        except Exception:
-            return None
-    def _ft_to_m(v):
-        try:
-            return float(v) * 0.3048
-        except Exception:
-            return None
-    def _miles_to_km(v):
-        try:
-            return float(v) * 1.609344
-        except Exception:
-            return None
-
-    # Expected raw keys: max_wind, max_wave_height, min_visibility, max_swell_period
     safety_limits = {}
     try:
         # Wind: user input is km/h (metric) or mph (imperial) per UX decision
         raw_wind = raw_safety.get("max_wind")
         if raw_wind is not None:
-            safety_limits["max_wind_m_s"] = _kmh_to_m_s(raw_wind) if units == "metric" else _mph_to_m_s(raw_wind)
+            if units == "metric":
+                safety_limits["max_wind_m_s"] = unit_helpers.kmh_to_m_s(raw_wind)
+            else:
+                safety_limits["max_wind_m_s"] = unit_helpers.mph_to_m_s(raw_wind)
         # Wave height: meters (metric) or feet (imperial)
         raw_wave = raw_safety.get("max_wave_height")
         if raw_wave is not None:
-            safety_limits["max_wave_height_m"] = float(raw_wave) if units == "metric" else _ft_to_m(raw_wave)
+            if units == "metric":
+                safety_limits["max_wave_height_m"] = float(raw_wave)
+            else:
+                safety_limits["max_wave_height_m"] = unit_helpers.ft_to_m(raw_wave)
         # Visibility: km (metric) or miles (imperial)
         raw_vis = raw_safety.get("min_visibility")
         if raw_vis is not None:
-            safety_limits["min_visibility_km"] = float(raw_vis) if units == "metric" else _miles_to_km(raw_vis)
-        # Swell period: seconds
+            if units == "metric":
+                safety_limits["min_visibility_km"] = float(raw_vis)
+            else:
+                safety_limits["min_visibility_km"] = unit_helpers.miles_to_km(raw_vis)
+        # Swell period: seconds (user-facing units are seconds)
         raw_period = raw_safety.get("max_swell_period")
         if raw_period is not None:
             safety_limits["max_swell_period_s"] = float(raw_period)
     except Exception:
-        _LOGGER.debug("Failed to normalize safety limits; using raw options as fallback", exc_info=True)
+        _LOGGER.debug("Failed to normalize safety limits; falling back to defaults", exc_info=True)
+
+    # If after normalization we have no valid limits, fall back to conservative defaults
+    if not safety_limits:
+        safety_limits = DEFAULT_SAFETY_LIMITS.copy()
+        _LOGGER.debug("Using DEFAULT_SAFETY_LIMITS for entry %s", entry.entry_id)
 
     coord = OFACoordinator(
         hass,
