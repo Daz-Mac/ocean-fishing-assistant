@@ -7,7 +7,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, STORE_KEY, STORE_VERSION, DEFAULT_SAFETY_LIMITS
 from .coordinator import OFACoordinator
-from .weather_fetcher import OpenMeteoClient
+from .weather_fetcher import OpenMeteoClient, WeatherFetcher
 from .data_formatter import DataFormatter
 from . import unit_helpers
 
@@ -20,14 +20,18 @@ async def async_setup_entry(hass, entry):
     # can reuse Open-Meteo responses and reduce API calls
     hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
     
-    client = OpenMeteoClient(session)
-    formatter = DataFormatter()
     # require explicit coordinates per the development guide (no fallback to global HA location)
     lat = entry.data.get(CONF_LATITUDE)
     lon = entry.data.get(CONF_LONGITUDE)
     if lat is None or lon is None:
         _LOGGER.error("Config entry missing latitude/longitude; aborting setup")
         return False
+
+    # instantiate low-level client + higher-level fetcher for this entry
+    client = OpenMeteoClient(session)
+    fetcher = WeatherFetcher(hass, lat, lon, use_open_meteo=True, open_meteo_client=client)
+
+    formatter = DataFormatter()
 
     # Normalize and validate per-entry safety limits (convert to canonical metric internally)
     raw_safety = entry.options.get("safety_limits") or {}
@@ -74,7 +78,7 @@ async def async_setup_entry(hass, entry):
     coord = OFACoordinator(
         hass,
         entry.entry_id,
-        fetcher=client,
+        fetcher=fetcher,
         formatter=formatter,
         lat=lat,
         lon=lon,
@@ -97,10 +101,4 @@ async def async_setup_entry(hass, entry):
     hass.async_create_task(
         hass.config_entries.async_forward_entry_setup(entry, "sensor")
     )
-    return True
-
-async def async_unload_entry(hass, entry):
-    """Unload a config entry."""
-    await hass.config_entries.async_forward_entry_unload(entry, "sensor")
-    hass.data[DOMAIN].pop(entry.entry_id, None)
     return True

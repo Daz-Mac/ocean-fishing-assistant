@@ -87,6 +87,15 @@ class OFACoordinator(DataUpdateCoordinator):
                 except Exception:
                     _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
 
+            # Attach convenience 'current' snapshot if the fetcher can provide it
+            try:
+                if hasattr(self.fetcher, "get_weather_data"):
+                    current = await self.fetcher.get_weather_data()
+                    if current:
+                        raw["current"] = current
+            except Exception:
+                _LOGGER.debug("Failed to get current snapshot from fetcher", exc_info=True)
+
             # IMPORTANT: pass per-entry species, units and safety_limits into the formatter
             data = self.formatter.validate(
                 raw,
@@ -103,28 +112,3 @@ class OFACoordinator(DataUpdateCoordinator):
                     _LOGGER.debug("Failed to persist fetch to store", exc_info=True)
 
             return data
-
-    async def async_load_from_store(self) -> bool:
-        """Load persisted data from the per-entry store if within TTL.
-        Returns True if data restored, False otherwise.
-        """
-        if not self._store:
-            return False
-        try:
-            raw = await self._store.async_load()
-            if not raw:
-                return False
-            fetched_at = raw.get("fetched_at")
-            stored = raw.get("data")
-            if not fetched_at or stored is None:
-                return False
-            now = time.time()
-            if (now - float(fetched_at)) > float(self._ttl):
-                return False
-            # accept stored data and mark last_update_success
-            self._data = stored
-            self.last_update_success = True
-            return True
-        except Exception:
-            _LOGGER.debug("Failed to load from store", exc_info=True)
-            return False
