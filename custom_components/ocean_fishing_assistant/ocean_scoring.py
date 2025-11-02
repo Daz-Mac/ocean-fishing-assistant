@@ -1,21 +1,11 @@
 """
-Document-accurate Ocean Fishing Scoring (index-aware).
+Document-accurate Ocean Fishing Scoring (index-aware) — strict mode.
 
-Implements factor names and weights per OceanFishingScorer._get_factor_weights:
-- tide: 0.25
-- wind: 0.15
-- waves: 0.15
-- time: 0.15
-- pressure: 0.10
-- season: 0.10
-- moon: 0.05
-- temperature: 0.03
-
-All component scores are computed on 0..10 scale (score_10). The payload includes both
-score_10 and score_100 (rounded int) for each component and for overall.
-
-This module now also evaluates per-index safety flags when provided a `safety_limits`
-dictionary (canonical metric keys) and returns a `safety` dict in the result.
+This version enforces presence of all required inputs for an accurate score.
+Missing required inputs will be logged (ERROR) and result in a MissingDataError
+for that timestamp. compute_forecast will record the error on the per-timestamp
+entry (score fields become None) so callers can see which timestamps were
+incomplete.
 """
 from __future__ import annotations
 import json
@@ -23,6 +13,7 @@ import math
 from typing import Any, Dict, Optional, Iterable, List, Union, Tuple
 import pkgutil
 import logging
+from datetime import datetime, timezone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,6 +122,125 @@ def _load_species_profile_by_name(name: str) -> Optional[Dict[str, Any]]:
     return prof
 
 
+# Helper: coerce ISO-like timestamp to timezone-aware UTC datetime, or None
+def _coerce_datetime(v: Any) -> Optional[datetime]:
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    try:
+        # handle common ISO formats; fromisoformat tolerates offsets
+        s = str(v)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(s)
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        # fallback numeric epoch (seconds)
+        try:
+            if isinstance(v, (int, float)):
+                val = float(v)
+                if val > 1e12:
+                    val = val / 1000.0
+                return datetime.fromtimestamp(val, tz=timezone.utc)
+        except Exception:
+            pass
+    return None
+
+
+# Helper: find nearest index in a list of timestamps for a target datetime
+def _find_nearest_timestamp_index(timestamps: List[str], target_dt: datetime) -> Optional[int]:
+    if not timestamps or target_dt is None:
+        return None
+    best_idx = None
+    best_diff = None
+    for i, ts in enumerate(timestamps):
+        try:
+            dt = _coerce_datetime(ts)
+            if not dt:
+                continue
+            diff = abs((dt - target_dt).total_seconds())
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_idx = i
+        except Exception:
+            continue
+    return best_idx
+
+
+# Helper: try to extract a moon_phase for a given index from payload astro structures
+def _get_moon_phase_for_index(payload: Dict[str, Any], use_index: int) -> Optional[float]:
+    # 1) direct array keyed moon_phase (per-timestamp)
+    moon_arr = payload.get("moon_phase")
+    if isinstance(moon_arr, (list, tuple)):
+        try:
+            return _to_float_safe(moon_arr[use_index])
+        except Exception:
+            pass
+
+    # 2) payload may include 'astro' or 'astronomy' which can be dict keyed by date or list
+    for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast"):
+        astro = payload.get(key)
+        if astro is None:
+            continue
+        # if dict keyed by ISO dates, try to match by timestamp date
+        try:
+            ts = payload.get("timestamps", [])[use_index]
+            dt = _coerce_datetime(ts)
+            if dt is None:
+                continue
+            target_date = dt.date().isoformat()
+        except Exception:
+            target_date = None
+
+        if isinstance(astro, dict):
+            # try direct keys by date or fallback keys
+            if target_date and target_date in astro:
+                try:
+                    return _to_float_safe(astro[target_date].get("moon_phase") or astro[target_date].get("moon"))
+                except Exception:
+                    pass
+            # also try simple moon_phase key at top
+            try:
+                return _to_float_safe(astro.get("moon_phase") or astro.get("moon"))
+            except Exception:
+                pass
+        elif isinstance(astro, (list, tuple)):
+            # list of dicts with 'date' or 'iso' or per-entry moon info: find nearest by date
+            try:
+                # compute target datetime
+                ts = payload.get("timestamps", [])[use_index]
+                dt = _coerce_datetime(ts)
+                if dt is None:
+                    continue
+                # search list for matching date string or nearest
+                for entry in astro:
+                    if not isinstance(entry, dict):
+                        continue
+                    # try 'date' / 'iso_date' / 'day'
+                    cand = entry.get("date") or entry.get("iso_date") or entry.get("day")
+                    if cand and str(cand).startswith(dt.date().isoformat()):
+                        return _to_float_safe(entry.get("moon_phase") or entry.get("moon"))
+                # fallback: if there's a 'moon_phase' that’s scalar, return it
+                if len(astro) == 1 and isinstance(astro[0], dict):
+                    return _to_float_safe(astro[0].get("moon_phase") or astro[0].get("moon"))
+            except Exception:
+                pass
+    # 3) fall back to tide_phase if that was supplied per-timestamp or scalar (still treat as present)
+    tide_phase_arr = payload.get("tide_phase")
+    if isinstance(tide_phase_arr, (list, tuple)):
+        try:
+            return _to_float_safe(tide_phase_arr[use_index])
+        except Exception:
+            pass
+    if tide_phase_arr is not None and not isinstance(tide_phase_arr, (list, tuple)):
+        try:
+            return _to_float_safe(tide_phase_arr)
+        except Exception:
+            pass
+    return None
+
+
 def compute_score(
     data: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
@@ -139,17 +249,11 @@ def compute_score(
 ) -> Dict[str, Any]:
     """
     Compute scores with exact factor weights for a given index (timestamp).
-    Returns:
-    {
-      "score_10": float,
-      "score_100": int,
-      "components": { ... },
-      "raw": {...},
-      "profile_used": ...,
-      "safety": {"unsafe": bool, "caution": bool, "reasons": [...]}
-    }
-    """
+    This strict variant requires presence of all essential inputs and will raise
+    MissingDataError (after logging) when required inputs are absent.
 
+    Returns a dict with score_10, score_100, components, raw, profile_used, safety.
+    """
     if not data or "timestamps" not in data:
         raise MissingDataError("Missing timestamps in data")
 
@@ -178,7 +282,7 @@ def compute_score(
     total = sum(weights.values()) or 1.0
     weights = {k: float(v) / total for k, v in weights.items()}
 
-    # helper to extract value at index (safely)
+    # helper to extract value at index (safely) from arrays or scalars
     def _get_at(key: str, index: int = 0) -> Optional[float]:
         arr = data.get(key)
         if arr is None:
@@ -191,15 +295,40 @@ def compute_score(
         except Exception:
             return None
 
-    # Extract values (index-aware)
+    # Attempt to locate matching tide snapshot (tide structure may be separate)
+    tide_snapshot = None
+    try:
+        raw_tide = data.get("tide")
+        if isinstance(raw_tide, dict) and raw_tide.get("timestamps"):
+            ts = timestamps[use_index]
+            dt_target = _coerce_datetime(ts)
+            idx = _find_nearest_timestamp_index(raw_tide.get("timestamps", []), dt_target) if dt_target else None
+            if idx is not None:
+                tide_snapshot = {
+                    "tide_height_m": raw_tide.get("tide_height_m")[idx] if raw_tide.get("tide_height_m") else None,
+                    "tide_phase": (raw_tide.get("tide_phase")[idx] if isinstance(raw_tide.get("tide_phase"), (list, tuple)) else raw_tide.get("tide_phase")),
+                    "tide_strength": (raw_tide.get("tide_strength")[idx] if isinstance(raw_tide.get("tide_strength"), (list, tuple)) else raw_tide.get("tide_strength")),
+                }
+    except Exception:
+        tide_snapshot = None
+
+    # Extract values (index-aware, falling back to matching snapshot above)
     tide = _get_at("tide_height_m", use_index)
+    if tide is None and tide_snapshot is not None:
+        tide = _to_float_safe(tide_snapshot.get("tide_height_m"))
+
     wind = _get_at("wind_m_s", use_index) or _get_at("wind_max_m_s", use_index) or _get_at("windspeed_10m", use_index)
-    wave = _get_at("wave_height_m", use_index)
+    # also try tolerant keys (we still search several keys to find the real field)
+    if wind is None:
+        wind = _get_at("wind") or _get_at("wind_speed")
+
+    wave = _get_at("wave_height_m", use_index) or _get_at("swell_wave_height_m", use_index) or _get_at("wave_height", use_index)
+
+    # Pressure: compute delta next - current if array present
     pressure_arr = data.get("pressure_hpa")
     pressure = None
     try:
         if isinstance(pressure_arr, (list, tuple)):
-            # compute next - current delta if possible
             if len(pressure_arr) > use_index + 1:
                 p_next = _to_float_safe(pressure_arr[use_index + 1])
                 p_curr = _to_float_safe(pressure_arr[use_index])
@@ -222,36 +351,54 @@ def compute_score(
         if tmax is not None and tmin is not None:
             temp = (tmax + tmin) / 2.0
 
-    # time & moon & season info (derive hour/month from timestamp)
+    # derive hour/month from timestamp for time/season scoring
     ts_str = timestamps[use_index]
     hour = None
     month = None
     try:
-        from datetime import datetime, timezone
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-        hour = dt.hour
-        month = dt.month
+        dt = _coerce_datetime(ts_str)
+        if dt:
+            hour = dt.hour
+            month = dt.month
     except Exception:
         hour = None
         month = None
 
-    moon_phase = data.get("moon_phase") or data.get("tide_phase") or None
+    # get moon phase (prefer astro-derived)
+    moon_phase = _get_moon_phase_for_index(data, use_index)
 
-    # compute component scores (0..10)
+    # STRICT: require presence of essential inputs
+    missing = []
+    if tide is None:
+        missing.append("tide_height_m")
+    if wind is None:
+        missing.append("wind")
+    if wave is None:
+        missing.append("wave_height")
+    if moon_phase is None:
+        missing.append("moon_phase/astro")
+    if temp is None:
+        missing.append("temperature_c")
+    # pressure series presence check (we require enough points to compute a delta)
+    if not (isinstance(pressure_arr, (list, tuple)) and len(pressure_arr) > use_index + 1 and _to_float_safe(pressure_arr[use_index]) is not None and _to_float_safe(pressure_arr[use_index + 1]) is not None):
+        missing.append("pressure_hpa_series_with_future_point")
+
+    if missing:
+        msg = f"Missing required inputs for scoring at index={use_index} timestamp={ts_str}: {', '.join(missing)}"
+        _LOGGER.error(msg)
+        raise MissingDataError(msg)
+
+    # compute component scores (0..10) - now that required values are present
     comp: Dict[str, Any] = {}
 
     # TIDE (0..10)
     try:
         pref_tide = profile.get("preferred_tide_m", DEFAULT_PROFILE["preferred_tide_m"])
         tmin, tmax = float(pref_tide[0]), float(pref_tide[1])
-        if tide is None:
-            tide_score = 5.0
-            tide_reason = "missing"
-        else:
-            tide_score = _linear_within_score_10(float(tide), tmin, tmax, tolerance=0.5)
-            tide_reason = f"value={tide}"
+        tide_score = _linear_within_score_10(float(tide), tmin, tmax, tolerance=0.5)
+        tide_reason = f"value={tide}"
     except Exception:
-        tide_score = 5.0
+        tide_score = 0.0
         tide_reason = "error"
     comp["tide"] = {"score_10": round(_clamp_0_10(tide_score), 3), "score_100": int(round(_clamp_0_10(tide_score) * 10)), "reason": tide_reason}
 
@@ -259,36 +406,28 @@ def compute_score(
     try:
         pref_w = profile.get("preferred_wind_m_s", DEFAULT_PROFILE["preferred_wind_m_s"])
         wmin, wmax = float(pref_w[0]), float(pref_w[1])
-        if wind is None:
-            wind_score = 5.0
-            wind_reason = "missing"
-        else:
-            wind_score = _linear_within_score_10(float(wind), wmin, wmax, tolerance=4.0)
-            wind_reason = f"value={wind}"
+        wind_score = _linear_within_score_10(float(wind), wmin, wmax, tolerance=4.0)
+        wind_reason = f"value={wind}"
     except Exception:
-        wind_score = 5.0
+        wind_score = 0.0
         wind_reason = "error"
     comp["wind"] = {"score_10": round(_clamp_0_10(wind_score), 3), "score_100": int(round(_clamp_0_10(wind_score) * 10)), "reason": wind_reason}
 
     # WAVES (0..10)
     try:
         max_wave = float(profile.get("max_wave_height_m", DEFAULT_PROFILE["max_wave_height_m"]))
-        if wave is None:
-            wave_score = 5.0
-            wave_reason = "missing"
+        if wave <= max_wave:
+            wave_score = 10.0
+            wave_reason = f"ok (value={wave} <= max={max_wave})"
         else:
-            if wave <= max_wave:
-                wave_score = 10.0
-                wave_reason = f"ok (value={wave} <= max={max_wave})"
+            limit = max_wave * 2.0 if max_wave > 0 else max_wave + 1.0
+            if wave >= limit:
+                wave_score = 0.0
             else:
-                limit = max_wave * 2.0 if max_wave > 0 else max_wave + 1.0
-                if wave >= limit:
-                    wave_score = 0.0
-                else:
-                    wave_score = 10.0 * (limit - wave) / (limit - max_wave)
-                wave_reason = f"value={wave}"
+                wave_score = 10.0 * (limit - wave) / (limit - max_wave)
+            wave_reason = f"value={wave}"
     except Exception:
-        wave_score = 5.0
+        wave_score = 0.0
         wave_reason = "error"
     comp["waves"] = {"score_10": round(_clamp_0_10(wave_score), 3), "score_100": int(round(_clamp_0_10(wave_score) * 10)), "reason": wave_reason}
 
@@ -322,16 +461,12 @@ def compute_score(
 
     # PRESSURE (0..10) - use pressure delta (hPa)
     try:
-        if pressure is None:
-            pressure_score = 5.0
-            pressure_reason = "missing"
-        else:
-            p = float(pressure)
-            pressure_score = 5.0 + (p / 10.0) * 5.0
-            pressure_score = _clamp_0_10(pressure_score)
-            pressure_reason = f"delta={p}"
+        p = float(pressure)
+        pressure_score = 5.0 + (p / 10.0) * 5.0
+        pressure_score = _clamp_0_10(pressure_score)
+        pressure_reason = f"delta={p}"
     except Exception:
-        pressure_score = 5.0
+        pressure_score = 0.0
         pressure_reason = "error"
     comp["pressure"] = {"score_10": round(_clamp_0_10(pressure_score), 3), "score_100": int(round(_clamp_0_10(pressure_score) * 10)), "reason": pressure_reason}
 
@@ -349,23 +484,17 @@ def compute_score(
         season_reason = "error"
     comp["season"] = {"score_10": round(_clamp_0_10(season_score), 3), "score_100": int(round(_clamp_0_10(season_score) * 10)), "reason": season_reason}
 
-    # MOON (0..10)
+    # MOON (0..10) - requires moon_phase present (we enforced above)
     try:
-        moon_score = 5.0
-        moon_reason = "default"
-        if moon_phase is not None:
-            try:
-                p = float(moon_phase)
-                dist_new = abs(p - 0.0)
-                dist_full = abs(p - 0.5)
-                dist = min(dist_new, dist_full)
-                moon_score = max(0.0, 10.0 * (1.0 - (dist / 0.25)))
-                moon_reason = f"phase={p}"
-            except Exception:
-                moon_score = 5.0
-                moon_reason = "bad_phase"
+        p = float(moon_phase)
+        # distance to new moon (0) and full (~0.5). smaller distance => better
+        dist_new = abs(p - 0.0)
+        dist_full = abs(p - 0.5)
+        dist = min(dist_new, dist_full)
+        moon_score = max(0.0, 10.0 * (1.0 - (dist / 0.25)))  # 0..10
+        moon_reason = f"phase={p}"
     except Exception:
-        moon_score = 5.0
+        moon_score = 0.0
         moon_reason = "error"
     comp["moon"] = {"score_10": round(_clamp_0_10(moon_score), 3), "score_100": int(round(_clamp_0_10(moon_score) * 10)), "reason": moon_reason}
 
@@ -373,21 +502,17 @@ def compute_score(
     try:
         pref_temp = profile.get("preferred_temp_c", DEFAULT_PROFILE["preferred_temp_c"])
         tmin, tmax = float(pref_temp[0]), float(pref_temp[1])
-        if temp is None:
-            temp_score = 5.0
-            temp_reason = "missing"
-        else:
-            temp_score = _linear_within_score_10(float(temp), tmin, tmax, tolerance=10.0)
-            temp_reason = f"value={temp}"
+        temp_score = _linear_within_score_10(float(temp), tmin, tmax, tolerance=10.0)
+        temp_reason = f"value={temp}"
     except Exception:
-        temp_score = 5.0
+        temp_score = 0.0
         temp_reason = "error"
     comp["temperature"] = {"score_10": round(_clamp_0_10(temp_score), 3), "score_100": int(round(_clamp_0_10(temp_score) * 10)), "reason": temp_reason}
 
     # Weighted aggregation (on 0..10)
     overall_10 = 0.0
     for k in weights:
-        overall_10 += weights.get(k, 0.0) * comp.get(k, {}).get("score_10", 5.0)
+        overall_10 += weights.get(k, 0.0) * comp.get(k, {}).get("score_10", 0.0)
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
@@ -460,3 +585,159 @@ def compute_score(
         "safety": safety,
     }
     return result
+
+
+def compute_forecast(
+    payload: Dict[str, Any],
+    species_profile: Optional[Union[str, Dict[str, Any]]] = None,
+    safety_limits: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Produce a per-timestamp formatted forecast list.
+    Each entry includes:
+      - timestamp (ISO string from payload 'timestamps')
+      - index
+      - score_10 (0..10) or None
+      - score_100 (0..100) or None
+      - components (dict) or None
+      - forecast_raw: raw inputs used in scoring + matched astro/tide/marine snippets for debug
+    """
+    out: List[Dict[str, Any]] = []
+    if not payload or "timestamps" not in payload:
+        return out
+    timestamps = payload.get("timestamps") or []
+    # If the payload contains dedicated tide/marine/astro forecasts, keep them handy
+    tide_forecast = payload.get("tide")  # may be None or dict
+    marine_forecast = payload.get("marine") or payload.get("marine_forecast") or payload.get("marine_current")
+    astro_data = payload.get("astro") or payload.get("astronomy") or payload.get("astronomy_forecast") or payload.get("astro_forecast")
+
+    for idx, ts in enumerate(timestamps):
+        try:
+            # compute main score (compute_score will enforce presence of required inputs)
+            res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits)
+            # build forecast_raw: include raw inputs and, where possible, matched astro/tide/marine entries
+            dt_obj = _coerce_datetime(ts)
+            # find matched tide snapshot if tide_forecast exists and is dict-with-timestamps
+            matched_tide = None
+            try:
+                if isinstance(tide_forecast, dict) and tide_forecast.get("timestamps"):
+                    j = _find_nearest_timestamp_index(tide_forecast.get("timestamps", []), dt_obj) if dt_obj else None
+                    if j is not None:
+                        matched_tide = {k: (tide_forecast.get(k)[j] if isinstance(tide_forecast.get(k), (list, tuple)) else tide_forecast.get(k)) for k in ("tide_height_m", "tide_phase", "tide_strength")}
+            except Exception:
+                matched_tide = None
+            # matched marine
+            matched_marine = None
+            try:
+                if isinstance(marine_forecast, dict) and marine_forecast.get("timestamps"):
+                    k = _find_nearest_timestamp_index(marine_forecast.get("timestamps", []), dt_obj) if dt_obj else None
+                    if k is not None:
+                        # pull common marine fields if present
+                        keys = ("wave_height_m", "swell_period_s", "swell_height_m", "wind_speed", "visibility_km")
+                        matched_marine = {kk: (marine_forecast.get(kk)[k] if isinstance(marine_forecast.get(kk), (list, tuple)) else marine_forecast.get(kk)) for kk in keys if kk in marine_forecast}
+                # if marine_forecast is list of dicts, find nearest by timestamp
+                if isinstance(marine_forecast, (list, tuple)):
+                    # find nearest list item by matching its datetime-like field
+                    best = None
+                    best_diff = None
+                    for item in marine_forecast:
+                        if not isinstance(item, dict):
+                            continue
+                        cand_ts = item.get("datetime") or item.get("time") or item.get("timestamp")
+                        cand_dt = _coerce_datetime(cand_ts)
+                        if not cand_dt or dt_obj is None:
+                            continue
+                        diff = abs((cand_dt - dt_obj).total_seconds())
+                        if best_diff is None or diff < best_diff:
+                            best = item
+                            best_diff = diff
+                    if best:
+                        matched_marine = best
+            except Exception:
+                matched_marine = None
+
+            # matched astro (similar approach)
+            matched_astro = None
+            try:
+                if isinstance(astro_data, dict):
+                    # try keyed by date
+                    if dt_obj:
+                        dkey = dt_obj.date().isoformat()
+                        if dkey in astro_data:
+                            matched_astro = astro_data.get(dkey)
+                    # fallback to top-level scalar keys
+                    if matched_astro is None:
+                        # include moon_phase if present
+                        if "moon_phase" in astro_data:
+                            matched_astro = {"moon_phase": astro_data.get("moon_phase")}
+                elif isinstance(astro_data, (list, tuple)):
+                    # find nearest entry by date or 'date' key
+                    best = None
+                    best_diff = None
+                    for item in astro_data:
+                        if not isinstance(item, dict):
+                            continue
+                        cand = item.get("date") or item.get("iso_date") or item.get("day") or item.get("datetime") or item.get("time")
+                        cand_dt = _coerce_datetime(cand)
+                        if not cand_dt or dt_obj is None:
+                            continue
+                        diff = abs((cand_dt - dt_obj).total_seconds())
+                        if best_diff is None or diff < best_diff:
+                            best = item
+                            best_diff = diff
+                    if best:
+                        matched_astro = best
+            except Exception:
+                matched_astro = None
+
+            forecast_raw = {
+                "raw_input": payload,
+                "formatted_weather": {
+                    # convenient per-forecast weather hints (tolerant)
+                    "temperature": payload.get("temperature_c", [None] * len(timestamps))[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),
+                    "wind": payload.get("wind_m_s", [None] * len(timestamps))[idx] if isinstance(payload.get("wind_m_s"), (list, tuple)) else payload.get("wind_m_s"),
+                    "pressure_hpa": payload.get("pressure_hpa", [None] * len(timestamps))[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
+                },
+                "astro_used": matched_astro,
+                "tide_used": matched_tide,
+                "marine_used": matched_marine,
+                "score_calc": res,
+            }
+            entry = {
+                "timestamp": ts,
+                "index": idx,
+                "score_10": res.get("score_10"),
+                "score_100": res.get("score_100"),
+                "components": res.get("components"),
+                "forecast_raw": forecast_raw,
+                "profile_used": res.get("profile_used"),
+                "safety": res.get("safety"),
+            }
+        except MissingDataError as mde:
+            # Missing required inputs for this index — record the error so callers know why the score is absent.
+            err_text = str(mde)
+            _LOGGER.debug("compute_forecast: missing data for index %s (%s): %s", idx, ts, err_text)
+            entry = {
+                "timestamp": ts,
+                "index": idx,
+                "score_10": None,
+                "score_100": None,
+                "components": None,
+                "forecast_raw": {"error": "missing required data", "details": err_text},
+                "profile_used": None,
+                "safety": {"unsafe": False, "caution": False, "reasons": []},
+            }
+        except Exception:
+            _LOGGER.debug("Failed to compute forecast index %s", idx, exc_info=True)
+            entry = {
+                "timestamp": ts,
+                "index": idx,
+                "score_10": None,
+                "score_100": None,
+                "components": None,
+                "forecast_raw": {"error": "unexpected error"},
+                "profile_used": None,
+                "safety": {"unsafe": False, "caution": False, "reasons": []},
+            }
+        out.append(entry)
+    return out

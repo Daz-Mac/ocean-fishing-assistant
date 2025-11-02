@@ -14,7 +14,7 @@ import copy
 import logging
 from typing import Any, Dict, List, Optional
 
-from .ocean_scoring import compute_score, MissingDataError
+from .ocean_scoring import compute_score, MissingDataError, compute_forecast
 from . import unit_helpers
 
 _LOGGER = logging.getLogger(__name__)
@@ -160,51 +160,55 @@ class DataFormatter:
             payload["tide_phase"] = tide_norm.get("tide_phase")
             payload["tide_strength"] = tide_norm.get("tide_strength")
 
-        # Prepare forecasts list by computing score per timestamp
-        forecasts: List[Dict[str, Any]] = []
-        for idx, ts in enumerate(timestamps):
-            try:
-                res = compute_score(
-                    payload,
-                    species_profile=species_profile,
-                    use_index=idx,
-                    safety_limits=safety_limits,
-                )
-                # Attach index and timestamp to the forecast entry
-                entry: Dict[str, Any] = {
-                    "timestamp": ts,
-                    "index": idx,
-                    "score_10": res.get("score_10"),
-                    "score_100": res.get("score_100"),
-                    "components": res.get("components"),
-                    "raw": res.get("raw"),
-                    "profile_used": res.get("profile_used"),
-                    "safety": res.get("safety"),
-                }
-            except MissingDataError:
-                entry = {
-                    "timestamp": ts,
-                    "index": idx,
-                    "score_10": None,
-                    "score_100": None,
-                    "components": None,
-                    "raw": None,
-                    "profile_used": None,
-                    "safety": {"unsafe": False, "caution": False, "reasons": []},
-                }
-            except Exception:
-                _LOGGER.debug("Failed to compute score for index %s", idx, exc_info=True)
-                entry = {
-                    "timestamp": ts,
-                    "index": idx,
-                    "score_10": None,
-                    "score_100": None,
-                    "components": None,
-                    "raw": None,
-                    "profile_used": None,
-                    "safety": {"unsafe": False, "caution": False, "reasons": []},
-                }
-            forecasts.append(entry)
+        # Prefer compute_forecast to build rich per-timestamp forecasts (includes astro/tide/marine snippets)
+        try:
+            forecasts = compute_forecast(payload, species_profile=species_profile, safety_limits=safety_limits)
+        except Exception:
+            _LOGGER.debug("compute_forecast failed, falling back to per-index compute_score", exc_info=True)
+            forecasts = []
+            for idx, ts in enumerate(timestamps):
+                try:
+                    res = compute_score(
+                        payload,
+                        species_profile=species_profile,
+                        use_index=idx,
+                        safety_limits=safety_limits,
+                    )
+                    # Attach index and timestamp to the forecast entry (backward-compatible shape)
+                    entry: Dict[str, Any] = {
+                        "timestamp": ts,
+                        "index": idx,
+                        "score_10": res.get("score_10"),
+                        "score_100": res.get("score_100"),
+                        "components": res.get("components"),
+                        "raw": res.get("raw"),
+                        "profile_used": res.get("profile_used"),
+                        "safety": res.get("safety"),
+                    }
+                except MissingDataError:
+                    entry = {
+                        "timestamp": ts,
+                        "index": idx,
+                        "score_10": None,
+                        "score_100": None,
+                        "components": None,
+                        "raw": None,
+                        "profile_used": None,
+                        "safety": {"unsafe": False, "caution": False, "reasons": []},
+                    }
+                except Exception:
+                    _LOGGER.debug("Failed to compute score for index %s", idx, exc_info=True)
+                    entry = {
+                        "timestamp": ts,
+                        "index": idx,
+                        "score_10": None,
+                        "score_100": None,
+                        "components": None,
+                        "raw": None,
+                        "profile_used": None,
+                        "safety": {"unsafe": False, "caution": False, "reasons": []},
+                    }
+                forecasts.append(entry)
 
         out: Dict[str, Any] = {
             "timestamps": timestamps,
