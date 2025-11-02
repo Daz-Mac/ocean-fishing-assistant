@@ -1,21 +1,19 @@
-"""Weather data fetcher - Open-Meteo focused.
+"""Weather data fetcher - Open-Meteo REST-focused.
 
 Features:
-- Uses an injected Open-Meteo client when provided (will try many candidate methods).
-- Falls back to calling Open-Meteo / Marine endpoints directly (uses HA aiohttp client session).
-- Caching (global) for current & forecast.
+- Calls Open-Meteo REST endpoints (OM_BASE) directly for current & forecast.
+- Uses the Open-Meteo Marine endpoint (OM_MARINE_BASE) for marine/wave fields.
+- Global caching (shared across instances) for current & forecast.
 - Robust normalization for many shapes (dicts, lists, objects).
 - Unit coercion (m/s -> km/h) and safe numeric coercion helpers.
-- Forecast aggregation into flexible "periods" (default: 4 equal periods per day) or custom periods
-  (useful for Dusk/Dawn or arbitrary monitored periods).
+- Forecast aggregation into flexible "periods" (default: 4 equal periods per day) or custom periods.
 - Strict failure semantics: fails loudly when current/forecast critical fields are missing.
 """
 from __future__ import annotations
 
-import inspect
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import aiohttp
 
@@ -38,6 +36,18 @@ DEFAULT_WEATHER_VALUES = {
     "precipitation_probability": 0,  # percentage
     "pressure": 1013.0,  # hPa
 }
+
+# hourly params to request from Open-Meteo
+OM_PARAMS_HOURLY = ",".join(
+    [
+        "temperature_2m",
+        "wind_speed_10m",
+        "windgusts_10m",
+        "cloudcover",
+        "precipitation_probability",
+        "pressure_msl",
+    ]
+)
 
 
 def _safe_float(v: Any, default: float) -> float:
@@ -62,12 +72,10 @@ def _safe_int(v: Any, default: int) -> int:
 
 class WeatherFetcher:
     """
-    Fetch current weather and forecast using an injected Open-Meteo client when available.
-    If marine/wave fields are missing the fetcher will attempt a direct call to the Marine API
-    endpoint and merge results.
+    Fetch current weather and forecast via direct Open-Meteo REST calls.
+    Marine/waves remain fetched from the separate Marine endpoint.
 
-    aggregation_periods: optional parameter for get_forecast that defines how hourly points are
-    aggregated into monitoring periods. Expected shape:
+    Aggregation periods:
       [
         {"name": "dawn", "start_hour": 4, "end_hour": 6},
         {"name": "day",  "start_hour": 6, "end_hour": 18},
@@ -76,28 +84,19 @@ class WeatherFetcher:
     If None, a default 4-period split is used (00-06, 06-12, 12-18, 18-24).
     """
 
-    def __init__(
-        self,
-        hass,
-        latitude: float,
-        longitude: float,
-        use_open_meteo: bool = True,
-        open_meteo_client: Optional[Any] = None,
-    ) -> None:
+    def __init__(self, hass, latitude: float, longitude: float) -> None:
         self.hass = hass
         self.latitude = round(float(latitude), 4)
         self.longitude = round(float(longitude), 4)
-        self.use_open_meteo = use_open_meteo
-        self.open_meteo_client = open_meteo_client
 
-        self._cache_key = f"{self.latitude}_{self.longitude}_{'om' if use_open_meteo else 'none'}"
+        self._cache_key = f"{self.latitude}_{self.longitude}_om"
         self._cache_duration = timedelta(minutes=30)
 
     # -----------------------
     # Public: current weather
     # -----------------------
     async def get_weather_data(self) -> Dict[str, Any]:
-        """Get current normalized weather data. Uses cache -> Open-Meteo client -> raise on failure."""
+        """Get current normalized weather data via direct Open-Meteo REST call (no client fallback)."""
         now = dt_util.now()
         cache_entry = _GLOBAL_CACHE.get(self._cache_key)
         if cache_entry:
@@ -106,68 +105,84 @@ class WeatherFetcher:
                 _LOGGER.debug("Using cached weather data for %s", self._cache_key)
                 return cache_entry["data"]
 
-        if self.use_open_meteo and self.open_meteo_client:
-            try:
-                result = await self._call_open_meteo_current()
-                if result:
-                    # Validate critical metrics (temperature and wind required for scoring)
-                    if not isinstance(result, dict) or result.get("temperature") is None or result.get(
-                        "wind_speed"
-                    ) is None:
-                        _LOGGER.error("Open-Meteo returned incomplete current-weather data: %s", result)
-                        raise RuntimeError("Incomplete weather data from Open-Meteo")
-                    _LOGGER.info("Fetched current weather from Open-Meteo client for %s", self._cache_key)
-                    _GLOBAL_CACHE[self._cache_key] = {"data": result, "time": now}
-                    return result
-                _LOGGER.error("Open-Meteo client returned no usable current-weather data")
-            except Exception as exc:
-                _LOGGER.exception("Open-Meteo client current fetch failed: %s", exc)
+        result = await self.fetch_open_meteo_current_direct()
+        if not result:
+            _LOGGER.error("Unable to fetch current weather data from Open-Meteo for %s; aborting", self._cache_key)
+            raise RuntimeError("Unable to fetch current weather data from Open-Meteo")
 
-        _LOGGER.error("Unable to fetch current weather data from Open-Meteo for %s; aborting", self._cache_key)
-        raise RuntimeError("Unable to fetch current weather data from Open-Meteo")
+        # Normalize: prefer explicit current_weather block if present
+        mapped = None
+        if isinstance(result, dict) and "current_weather" in result and isinstance(result["current_weather"], dict):
+            mapped = self._map_to_current_shape(result["current_weather"])
+        else:
+            mapped = self._extract_current_from_rest_result(result)
 
-    async def _call_open_meteo_current(self) -> Optional[Dict[str, Any]]:
-        """Discover and call a suitable method on the injected client to obtain 'current' weather."""
-        client = self.open_meteo_client
-        if client is None:
-            return None
+        if not mapped or mapped.get("temperature") is None or mapped.get("wind_speed") is None:
+            _LOGGER.error("Open-Meteo returned incomplete current-weather data: %s", result)
+            raise RuntimeError("Incomplete weather data from Open-Meteo")
 
-        candidate_methods = [
-            "get_current",
-            "get_current_weather",
-            "fetch_current",
-            "fetch_current_weather",
-            "current",
-            "get_now",
-            "fetch_hourly_forecast",
-            "get_hourly",
-            "fetch_hourly",
-        ]
-        fn = None
-        for name in candidate_methods:
-            if hasattr(client, name):
-                fn = getattr(client, name)
-                break
-        if fn is None and hasattr(client, "fetch"):
-            fn = getattr(client, "fetch")
+        _LOGGER.info("Fetched current weather from Open-Meteo REST for %s", self._cache_key)
+        _GLOBAL_CACHE[self._cache_key] = {"data": mapped, "time": now}
+        return mapped
 
-        if fn is None:
-            _LOGGER.debug("Open-Meteo client has no recognized current-weather method")
-            return None
-
+    async def fetch_open_meteo_current_direct(self) -> Optional[Dict[str, Any]]:
+        """Call OM_BASE with current_weather=true and hourly as fallback."""
         try:
-            result = fn() if callable(fn) else None
-            if inspect.isawaitable(result):
-                result = await result
-            if not result:
-                return None
+            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+            params = {
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+                "timezone": "UTC",
+                "current_weather": "true",
+                "hourly": OM_PARAMS_HOURLY,
+                "forecast_days": 1,
+            }
+            async with session.get(OM_BASE, params=params, timeout=30) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+            return data
+        except Exception:
+            _LOGGER.exception("Open-Meteo current REST fetch failed for %s,%s", self.latitude, self.longitude)
+            return None
 
-            # If result is a list -> pick nearest hour entry
-            if isinstance(result, list):
+    def _extract_current_from_rest_result(self, rest_result: Any) -> Optional[Dict[str, Any]]:
+        """Extract nearest-hour-like entry from Open-Meteo REST result (hourly arrays) and map to current shape."""
+        try:
+            if isinstance(rest_result, dict) and "hourly" in rest_result and isinstance(rest_result["hourly"], dict):
+                hourly = rest_result["hourly"]
+                times = hourly.get("time") or []
+                if not times:
+                    return None
+                now = dt_util.now()
+                idx = 0
+                try:
+                    for i, t_raw in enumerate(times):
+                        t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
+                        if t and t.tzinfo is None:
+                            t = t.replace(tzinfo=timezone.utc)
+                        if t and abs((t - now).total_seconds()) < 3600:
+                            idx = i
+                            break
+                except Exception:
+                    idx = 0
+                candidate = {}
+                for k, arr in hourly.items():
+                    if k == "time":
+                        continue
+                    if isinstance(arr, list) and len(arr) > idx:
+                        candidate[k] = arr[idx]
+                    else:
+                        candidate[k] = None
+                return self._map_to_current_shape(candidate)
+            # If dict keyed by date or direct mapping, try mapping directly
+            if isinstance(rest_result, dict):
+                return self._map_to_current_shape(rest_result)
+            # If list, pick nearest hour-like entry
+            if isinstance(rest_result, list):
                 now = dt_util.now()
                 best = None
                 best_delta = None
-                for item in result:
+                for item in rest_result:
                     if not isinstance(item, dict):
                         continue
                     t_raw = item.get("time") or item.get("datetime") or item.get("timestamp")
@@ -185,40 +200,10 @@ class WeatherFetcher:
                         best_delta = delta
                 if best:
                     return self._map_to_current_shape(best)
-                return None
-
-            # If dict -> handle Open-Meteo style hourly => pick nearest hour
-            if isinstance(result, dict):
-                if "hourly" in result and isinstance(result.get("hourly"), dict):
-                    hourly = result.get("hourly")
-                    times = hourly.get("time") or []
-                    if isinstance(times, list) and len(times) > 0:
-                        idx = 0
-                        try:
-                            now = dt_util.now()
-                            for i, t_raw in enumerate(times):
-                                t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-                                if t and t.tzinfo is None:
-                                    t = t.replace(tzinfo=timezone.utc)
-                                if t and abs((t - now).total_seconds()) < 3600:
-                                    idx = i
-                                    break
-                        except Exception:
-                            idx = 0
-                        candidate = {}
-                        for k, arr in hourly.items():
-                            if isinstance(arr, list) and len(arr) > idx:
-                                candidate[k] = arr[idx]
-                            else:
-                                candidate[k] = None
-                        return self._map_to_current_shape(candidate)
-                # else try mapping dict directly
-                return self._map_to_current_shape(result)
-
-            # If object with attributes, attempt mapping via attribute access
-            return self._map_to_current_shape(result)
-        except Exception as exc:
-            _LOGGER.exception("Error calling Open-Meteo current method: %s", exc)
+            # else not recognized
+            return None
+        except Exception:
+            _LOGGER.exception("Error extracting current from REST result")
             return None
 
     def _map_to_current_shape(self, v: Any) -> Optional[Dict[str, Any]]:
@@ -274,7 +259,7 @@ class WeatherFetcher:
                 wind_f = wind_f * 3.6
                 wind_gust_f = wind_gust_f * 3.6
         except Exception as exc:
-            _LOGGER.exception("Error coercing Open-Meteo client current values: %s", exc)
+            _LOGGER.exception("Error coercing Open-Meteo current values: %s", exc)
             return None
 
         out: Dict[str, Any] = {
@@ -308,139 +293,75 @@ class WeatherFetcher:
                 _LOGGER.debug("Using cached forecast data for %s", forecast_cache_key)
                 return cache_entry["data"]
 
-        if self.use_open_meteo and self.open_meteo_client:
-            try:
-                result = await self._call_open_meteo_forecast(days)
-                if result:
-                    # result should be a dict keyed by date -> summary (we will optionally re-aggregate into periods)
-                    # If result looks hourly-list style, _call_open_meteo_forecast will already handle aggregation
-                    _LOGGER.info("Fetched forecast from Open-Meteo client for %s", self._cache_key)
-                    # Optionally aggregate hourly -> periods (if result has hourly-like list)
-                    if aggregation_periods:
-                        # If result is a dict of dates->hourly list, normalize; otherwise assume already summarized
-                        normalized = await self._ensure_period_aggregation(result, days, aggregation_periods)
-                        _GLOBAL_CACHE[forecast_cache_key] = {"data": normalized, "time": now}
-                        return normalized
-                    _GLOBAL_CACHE[forecast_cache_key] = {"data": result, "time": now}
-                    return result
-                _LOGGER.error("Open-Meteo client returned no usable forecast data")
-            except Exception as exc:
-                _LOGGER.exception("Open-Meteo client forecast fetch failed: %s", exc)
+        result = await self.fetch_open_meteo_forecast_direct(days)
+        if not result:
+            _LOGGER.error("Unable to fetch forecast from Open-Meteo for %s; aborting", self._cache_key)
+            raise RuntimeError("Unable to fetch forecast from Open-Meteo")
 
-        _LOGGER.error("Unable to fetch forecast from Open-Meteo for %s; aborting", self._cache_key)
-        raise RuntimeError("Unable to fetch forecast from Open-Meteo")
+        # If aggregation requested, attempt to aggregate hourly -> periods (helper handles many shapes)
+        if aggregation_periods:
+            normalized = await self._ensure_period_aggregation(result, days, aggregation_periods)
+            if not normalized:
+                _LOGGER.error("Open-Meteo returned no usable forecast data for aggregation")
+                raise RuntimeError("Unable to fetch forecast from Open-Meteo")
+            _GLOBAL_CACHE[forecast_cache_key] = {"data": normalized, "time": now}
+            return normalized
 
-    async def _call_open_meteo_forecast(self, days: int) -> Optional[Dict[str, Dict[str, Any]]]:
-        """
-        Try to call forecast methods on the injected client. Handles:
-         - Open-Meteo style dicts (hourly arrays)
-         - dict keyed by ISO dates
-         - list of dicts (hourly daily)
-         - objects with 'daily' attribute
-        """
-        client = self.open_meteo_client
-        if client is None:
-            return None
+        # No aggregation requested — normalize into date->daily-summary
+        normalized: Optional[Dict[str, Dict[str, Any]]] = None
 
-        candidate_methods = [
-            "get_forecast",
-            "get_daily_forecast",
-            "fetch_forecast",
-            "fetch_daily",
-            "get_weather_forecast",
-            "forecast",
-            "fetch_hourly_forecast",
-            "get_hourly",
-            "fetch_hourly",
-        ]
-        fn = None
-        for name in candidate_methods:
-            if hasattr(client, name):
-                fn = getattr(client, name)
-                break
-        if fn is None and hasattr(client, "fetch"):
-            fn = getattr(client, "fetch")
-        if fn is None:
-            _LOGGER.debug("Open-Meteo client has no recognized forecast method")
-            return None
-
-        try:
-            result = fn() if callable(fn) else None
-            if inspect.isawaitable(result):
-                result = await result
-            if not result:
-                return None
-
-            # If dict with 'hourly' arrays (Open-Meteo style) -> turn into hourly list then aggregate to days/periods
-            if isinstance(result, dict) and "hourly" in result and isinstance(result.get("hourly"), dict):
-                hourly = result.get("hourly")
-                times = hourly.get("time") or []
-                items: List[Dict[str, Any]] = []
-                for idx, t in enumerate(times):
-                    row = {"time": t}
-                    for k, arr in hourly.items():
-                        if k == "time":
-                            continue
-                        if isinstance(arr, list) and idx < len(arr):
-                            row[k] = arr[idx]
-                        else:
-                            row[k] = None
-                    items.append(row)
-                # Aggregate to daily summaries (by default) - caller may request custom periods when calling get_forecast
-                return self._normalize_hourly_list_to_daily(items, days)
-
-            # If dict keyed by dates -> normalize entries
-            if isinstance(result, dict):
-                normalized: Dict[str, Dict[str, Any]] = {}
-                for key, val in sorted(result.items()):
-                    date_key = str(key).split("T")[0]
-                    if isinstance(val, dict):
-                        try:
-                            temp = _safe_float(val.get("temperature") or val.get("temp") or val.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                            wind = _safe_float(val.get("wind_speed") or val.get("wind") or val.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                            gust = _safe_float(val.get("wind_gust") or val.get("gust") or wind, DEFAULT_WEATHER_VALUES["wind_gust"])
-                        except Exception:
-                            _LOGGER.debug("Skipping invalid forecast entry for date %s", date_key)
-                            continue
-                        cloud = _safe_int(val.get("cloud_cover") or val.get("clouds"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (val.get("cloud_cover") or val.get("clouds")) is not None else None
-                        pop = _safe_int(val.get("precipitation_probability") or val.get("pop") or val.get("precipitation"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (val.get("precipitation_probability") or val.get("pop") or val.get("precipitation")) is not None else None
-                        pressure = _safe_float(val.get("pressure") or val.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (val.get("pressure") or val.get("pressure_msl")) is not None else None
-                        normalized[date_key] = {"temperature": temp, "wind_speed": wind, "wind_gust": gust}
-                        if cloud is not None:
-                            normalized[date_key]["cloud_cover"] = cloud
-                        if pop is not None:
-                            normalized[date_key]["precipitation_probability"] = pop
-                        if pressure is not None:
-                            normalized[date_key]["pressure"] = pressure
-                if normalized:
-                    limited = dict(list(normalized.items())[:days])
-                    return limited or None
-                return None
-
-            # If a list -> hourly or daily entries
-            if isinstance(result, list):
-                first = next((it for it in result if isinstance(it, dict)), None)
-                if first:
-                    if "time" in first or "datetime" in first or "timestamp" in first:
-                        normalized = self._normalize_hourly_list_to_daily(result, days)
-                        return normalized or None
+        if isinstance(result, dict) and "hourly" in result and isinstance(result.get("hourly"), dict):
+            hourly = result.get("hourly")
+            times = hourly.get("time") or []
+            items: List[Dict[str, Any]] = []
+            for idx, t in enumerate(times):
+                row = {"time": t}
+                for k, arr in hourly.items():
+                    if k == "time":
+                        continue
+                    if isinstance(arr, list) and idx < len(arr):
+                        row[k] = arr[idx]
+                    else:
+                        row[k] = None
+                items.append(row)
+            normalized = self._normalize_hourly_list_to_daily(items, days)
+        elif isinstance(result, dict):
+            # Dict keyed by dates or similar shape
+            normalized = await self.hass.async_add_executor_job(self._call_sync_normalize_dict, result, days)
+        elif isinstance(result, list):
+            # list of hourly/daily entries
+            first = next((it for it in result if isinstance(it, dict)), None)
+            if first:
+                if "time" in first or "datetime" in first or "timestamp" in first:
+                    normalized = self._normalize_hourly_list_to_daily(result, days)
+                else:
                     normalized = self._normalize_forecast_list(result, days)
-                    return normalized or None
 
-            # If object with 'daily' attribute
-            if hasattr(result, "daily"):
-                daily = getattr(result, "daily")
-                if isinstance(daily, dict):
-                    # run sync normalizer in executor if needed
-                    return await self.hass.async_add_executor_job(self._call_sync_normalize_dict, daily, days)
-                if isinstance(daily, list):
-                    normalized = self._normalize_hourly_list_to_daily(daily, days)
-                    return normalized or None
+        if not normalized:
+            _LOGGER.error("Open-Meteo REST returned no usable forecast data")
+            raise RuntimeError("Unable to fetch forecast from Open-Meteo")
 
-            _LOGGER.debug("Unrecognized forecast shape from Open-Meteo client: %s", type(result))
-            return None
-        except Exception as exc:
-            _LOGGER.exception("Error calling Open-Meteo forecast method: %s", exc)
+        _LOGGER.info("Fetched forecast from Open-Meteo REST for %s", self._cache_key)
+        _GLOBAL_CACHE[forecast_cache_key] = {"data": normalized, "time": now}
+        return normalized
+
+    async def fetch_open_meteo_forecast_direct(self, days: int) -> Optional[Dict[str, Any]]:
+        """Call OM_BASE for forecast (hourly arrays)."""
+        try:
+            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+            params = {
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+                "timezone": "UTC",
+                "hourly": OM_PARAMS_HOURLY,
+                "forecast_days": int(days),
+            }
+            async with session.get(OM_BASE, params=params, timeout=60) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+            return data
+        except Exception:
+            _LOGGER.exception("Open-Meteo forecast REST fetch failed for %s,%s", self.latitude, self.longitude)
             return None
 
     def _call_sync_normalize_dict(self, d: Dict[str, Any], days: int) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -508,7 +429,7 @@ class WeatherFetcher:
                 _LOGGER.debug("Skipping invalid forecast list item for %s", date_key)
                 continue
             cloud = _safe_int(item.get("cloud_cover") or item.get("clouds"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (item.get("cloud_cover") or item.get("clouds")) is not None else None
-            pop = _safe_int(item.get("precipitation_probability") or item.get("pop") or item.get("precipitation"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (item.get("precipitation_probability") or item.get("pop") or item.get("precipitation")) is not None else None
+            pop = _safe_int(item.get("precipitation_probability") or item.get("pop") or item.get("precipitation") or item.get("precip"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (item.get("precipitation_probability") or item.get("pop") or item.get("precipitation") or item.get("precip")) is not None else None
             pressure = _safe_float(item.get("pressure") or item.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (item.get("pressure") or item.get("pressure_msl")) is not None else None
             final[date_key] = {"temperature": temp, "wind_speed": wind, "wind_gust": gust}
             if cloud is not None:
@@ -608,7 +529,7 @@ class WeatherFetcher:
         """
         If `data` is already date-keyed summaries, return as-is (truncated to days).
         If `data` is hourly list under special keys, attempt to aggregate into requested periods.
-        For simplicity this helper accepts the client-returned dict (possibly hourly arrays) and tries
+        For simplicity this helper accepts the REST-returned dict (possibly hourly arrays) and tries
         to make a best-effort aggregation.
         """
         # If already date keyed with metrics, truncate and return
