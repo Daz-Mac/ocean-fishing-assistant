@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -12,24 +13,15 @@ try:
 except Exception:
     DataFormatter = None  # optional
 
-# Skyfield is required for astronomical tide calculations. Import and initialize at module load.
-# This will fail-fast if skyfield is not installed.
-from skyfield.api import load, wgs84  # type: ignore
+# Skyfield is required for astronomical tide calculations. Import at module load so missing
+# dependency surfaces quickly during integration setup.
+from skyfield.api import Loader, wgs84  # type: ignore
 from skyfield import almanac as _almanac  # type: ignore
 import skyfield  # for version reporting
 
-# Initialize shared Skyfield resources once (fail fast on import/initialization errors)
-_sf_ts = load.timescale()
-_sf_eph = load("de421.bsp")
-_sf_wgs = wgs84
-_sf_almanac = _almanac
-
 _LOGGER = logging.getLogger(__name__)
 
-# Log Skyfield version at startup (helps debugging install issues)
-_skyfield_version = getattr(skyfield, "__version__", "unknown")
-_LOGGER.info("Ocean Fishing Assistant: Skyfield %s loaded — using Skyfield for tide calculations", _skyfield_version)
-
+# constants
 _DEFAULT_TTL = 15 * 60  # seconds
 _TIDE_HALF_DAY_HOURS = 12.42
 _SECONDS_PER_HOUR = 3600.0
@@ -39,6 +31,9 @@ _ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
 class TideProxy:
     """
     Astronomical tide proxy using Skyfield only (no fallbacks).
+    Skyfield data (ephemeris) will be stored in:
+      <config_dir>/custom_components/ocean_fishing_assistant/data
+    The Loader will download missing files into that directory on first use.
     """
 
     def __init__(self, hass, latitude: float, longitude: float, ttl: int = _DEFAULT_TTL):
@@ -48,6 +43,38 @@ class TideProxy:
         self._ttl = int(ttl)
         self._last_calc: Optional[datetime] = None
         self._cache: Optional[Dict[str, Any]] = None
+
+        # Prepare a dedicated data directory under the integration folder so Skyfield files
+        # are consolidated and easy to pre-populate or inspect.
+        try:
+            data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
+        except Exception:
+            # Fallback to joining paths if hass.config.path signature varies
+            from homeassistant.const import CONFIG_DIR  # type: ignore
+            data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
+
+        os.makedirs(data_dir, exist_ok=True)
+        self._data_dir = data_dir
+
+        # Create a Loader bound to the data directory. This will download timescale and ephemeris
+        # files into that folder on demand (if they are missing).
+        try:
+            loader = Loader(self._data_dir)
+            # Initialize shared resources for this instance
+            self._loader = loader
+            self._sf_ts = self._loader.timescale()
+            self._sf_eph = self._loader("de421.bsp")
+            self._sf_wgs = wgs84
+            self._sf_almanac = _almanac
+            _skyfield_version = getattr(skyfield, "__version__", "unknown")
+            _LOGGER.info(
+                "Ocean Fishing Assistant: Skyfield %s loaded — using data directory: %s",
+                _skyfield_version,
+                self._data_dir,
+            )
+        except Exception:
+            _LOGGER.exception("Failed to initialize Skyfield Loader/ephemeris. Ensure 'skyfield' is installed.")
+            raise
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
         """
@@ -77,16 +104,16 @@ class TideProxy:
             }
             return empty
 
-        # Use Skyfield (module-level initialized objects)
-        sf_ts = _sf_ts
-        sf_eph = _sf_eph
-        sf_wgs = _sf_wgs
-        sf_almanac = _sf_almanac
+        # Use Skyfield instance resources (initialized in __init__)
+        sf_ts = self._sf_ts
+        sf_eph = self._sf_eph
+        sf_wgs = self._sf_wgs
+        sf_almanac = self._sf_almanac
 
         # Find precise moon transit after now (fail loudly on Skyfield errors)
         try:
             moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now)
-        except Exception as exc:
+        except Exception:
             _LOGGER.exception("Skyfield transit-finding failed")
             raise
 
