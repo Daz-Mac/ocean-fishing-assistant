@@ -3,7 +3,7 @@
   "name": "Ocean Fishing Assistant",
   "version": "0.1.0",
   "documentation": "https://example.com/ocean-fishing-assistant",
-  "requirements": ["aiohttp", "skyfield"],
+  "requirements": ["skyfield"],
   "config_flow": true,
   "dependencies": [],
   "codeowners": ["@Daz-Mac"]
