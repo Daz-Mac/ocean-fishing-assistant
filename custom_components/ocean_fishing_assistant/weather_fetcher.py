@@ -5,7 +5,7 @@ Features:
 - Uses the Open-Meteo Marine endpoint (OM_MARINE_BASE) for marine/wave fields.
 - Global caching (shared across instances) for current & forecast.
 - Robust normalization for many shapes (dicts, lists, objects).
-- Unit coercion (m/s -> km/h) and safe numeric coercion helpers.
+- Unit coercion via unit_helpers (canonical m/s internal, output in km/h/mph/m/s).
 - Forecast aggregation into flexible "periods" (default: 4 equal periods per day) or custom periods.
 - Strict failure semantics: fails loudly when current/forecast critical fields are missing.
 """
@@ -21,6 +21,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import OM_BASE, OM_MARINE_BASE
+from . import unit_helpers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,8 +31,8 @@ _GLOBAL_CACHE: Dict[str, Dict[str, Any]] = {}
 # Defaults for diagnostics only (we fail loudly instead of silently using these)
 DEFAULT_WEATHER_VALUES = {
     "temperature": 15.0,
-    "wind_speed": 10.0,  # km/h
-    "wind_gust": 15.0,  # km/h
+    "wind_speed": 10.0,  # km/h (diagnostic)
+    "wind_gust": 15.0,  # km/h (diagnostic)
     "cloud_cover": 50,  # percentage
     "precipitation_probability": 0,  # percentage
     "pressure": 1013.0,  # hPa
@@ -73,7 +74,6 @@ def _safe_int(v: Any, default: int) -> int:
 class WeatherFetcher:
     """
     Fetch current weather and forecast via direct Open-Meteo REST calls.
-    Marine/waves remain fetched from the separate Marine endpoint.
 
     Aggregation periods:
       [
@@ -84,13 +84,72 @@ class WeatherFetcher:
     If None, a default 4-period split is used (00-06, 06-12, 12-18, 18-24).
     """
 
-    def __init__(self, hass, latitude: float, longitude: float) -> None:
+    def __init__(self, hass, latitude: float, longitude: float, speed_unit: Optional[str] = None) -> None:
         self.hass = hass
         self.latitude = round(float(latitude), 4)
         self.longitude = round(float(longitude), 4)
 
+        # Determine default output speed unit: derive from HA units if possible
+        if speed_unit:
+            self.speed_unit = str(speed_unit).lower()
+        else:
+            # Try to detect HA system units (fallback to km/h)
+            try:
+                units_obj = getattr(self.hass.config, "units", None)
+                if units_obj is not None and getattr(units_obj, "is_metric", True) is False:
+                    self.speed_unit = "mph"
+                else:
+                    self.speed_unit = "km/h"
+            except Exception:
+                self.speed_unit = "km/h"
+
         self._cache_key = f"{self.latitude}_{self.longitude}_om"
         self._cache_duration = timedelta(minutes=30)
+
+    # -----------------------
+    # Unit helpers
+    # -----------------------
+    def _incoming_wind_to_m_s(self, value: Any, unit_hint: Optional[str] = None) -> Optional[float]:
+        """Convert incoming wind value to m/s (internal canonical). If unit_hint provided, use it; otherwise assume m/s."""
+        if value is None:
+            return None
+        try:
+            v = float(value)
+        except Exception:
+            return None
+
+        if unit_hint:
+            u = str(unit_hint).strip().lower()
+            if u in ("km/h", "kph", "kmh", "km per h"):
+                return unit_helpers.kmh_to_m_s(v)
+            if u in ("mph", "mi/h", "miles/h"):
+                return unit_helpers.mph_to_m_s(v)
+            # if hint says m/s:
+            if u in ("m/s", "mps", "m s-1"):
+                return v
+        # default: assume m/s (Open-Meteo default)
+        return v
+
+    def _m_s_to_output(self, v: Optional[float]) -> Optional[float]:
+        """Convert m/s value to configured output unit (km/h, mph, or m/s)."""
+        if v is None:
+            return None
+        try:
+            vf = float(v)
+        except Exception:
+            return None
+        su = (self.speed_unit or "km/h").lower()
+        if su in ("km/h", "kph", "kmh"):
+            return unit_helpers.m_s_to_kmh(vf)
+        if su in ("mph",):
+            return unit_helpers.m_s_to_mph(vf)
+        # default m/s
+        return vf
+
+    def _to_output_wind(self, value: Any, incoming_unit_hint: Optional[str] = None) -> Optional[float]:
+        """Convenience: convert incoming value (with optional hint) to output unit."""
+        m_s = self._incoming_wind_to_m_s(value, incoming_unit_hint)
+        return self._m_s_to_output(m_s)
 
     # -----------------------
     # Public: current weather
@@ -209,7 +268,7 @@ class WeatherFetcher:
     def _map_to_current_shape(self, v: Any) -> Optional[Dict[str, Any]]:
         """Normalize various shapes into expected current-weather dict.
 
-        Returned wind values are normalized to km/h (m/s -> km/h conversion applied if reported units).
+        Returned wind values are normalized to the configured output unit.
         """
         if isinstance(v, dict):
             d = v
@@ -245,27 +304,32 @@ class WeatherFetcher:
             _LOGGER.debug("Mapping produced no temperature or wind (temp=%s wind=%s); returning None", temp_raw, wind_raw)
             return None
 
-        wind_unit = pick("wind_unit", "wind_speed_unit", None)
+        # unit hint if present
+        wind_unit_hint = pick("wind_unit", "wind_speed_unit", None)
 
         try:
             temp_f = _safe_float(temp_raw, DEFAULT_WEATHER_VALUES["temperature"])
-            wind_f = _safe_float(wind_raw, DEFAULT_WEATHER_VALUES["wind_speed"])
-            wind_gust_f = _safe_float(wind_gust_raw, DEFAULT_WEATHER_VALUES["wind_gust"])
+
+            # Interpret incoming wind into m/s, then convert to configured output
+            wind_m_s = self._incoming_wind_to_m_s(wind_raw, wind_unit_hint)
+            wind_gust_m_s = self._incoming_wind_to_m_s(wind_gust_raw, wind_unit_hint) if wind_gust_raw is not None else wind_m_s
+
+            wind_out = self._m_s_to_output(wind_m_s) if wind_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_speed"], DEFAULT_WEATHER_VALUES["wind_speed"])
+            wind_gust_out = self._m_s_to_output(wind_gust_m_s) if wind_gust_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_gust"], DEFAULT_WEATHER_VALUES["wind_gust"])
+
             cloud_i = _safe_int(cloud_raw, DEFAULT_WEATHER_VALUES["cloud_cover"]) if cloud_raw is not None else None
             precip_i = _safe_int(precip_raw, DEFAULT_WEATHER_VALUES["precipitation_probability"]) if precip_raw is not None else None
             pressure_f = _safe_float(pressure_raw, DEFAULT_WEATHER_VALUES["pressure"]) if pressure_raw is not None else None
 
-            if wind_unit and str(wind_unit).strip().lower() in ("m/s", "mps"):
-                wind_f = wind_f * 3.6
-                wind_gust_f = wind_gust_f * 3.6
         except Exception as exc:
             _LOGGER.exception("Error coercing Open-Meteo current values: %s", exc)
             return None
 
         out: Dict[str, Any] = {
             "temperature": temp_f,
-            "wind_speed": wind_f,
-            "wind_gust": wind_gust_f,
+            "wind_speed": wind_out,
+            "wind_gust": wind_gust_out,
+            "wind_unit": self.speed_unit,
         }
         if cloud_i is not None:
             out["cloud_cover"] = cloud_i
@@ -374,15 +438,19 @@ class WeatherFetcher:
                     continue
                 try:
                     temp = _safe_float(entry.get("temperature") or entry.get("temp"), DEFAULT_WEATHER_VALUES["temperature"])
-                    wind = _safe_float(entry.get("wind_speed") or entry.get("wind"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                    gust = _safe_float(entry.get("wind_gust") or entry.get("gust") or wind, DEFAULT_WEATHER_VALUES["wind_gust"])
+                    wind_m_s = _safe_float(entry.get("wind_speed") or entry.get("wind"), None)
+                    gust_m_s = _safe_float(entry.get("wind_gust") or entry.get("gust") or wind_m_s, None)
                 except Exception:
                     _LOGGER.debug("Skipping invalid sync-normalize entry for %s", date_key)
                     continue
                 cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds")) is not None else None
                 pop = _safe_int(entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation")) is not None else None
                 pressure = _safe_float(entry.get("pressure") or entry.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (entry.get("pressure") or entry.get("pressure_msl")) is not None else None
-                final[date_key] = {"temperature": temp, "wind_speed": wind, "wind_gust": gust}
+
+                wind_out = self._m_s_to_output(wind_m_s) if wind_m_s is not None else None
+                gust_out = self._m_s_to_output(gust_m_s) if gust_m_s is not None else None
+
+                final[date_key] = {"temperature": temp, "wind_speed": wind_out, "wind_gust": gust_out}
                 if cloud is not None:
                     final[date_key]["cloud_cover"] = cloud
                 if pop is not None:
@@ -423,15 +491,20 @@ class WeatherFetcher:
                 continue
             try:
                 temp = _safe_float(item.get("temperature") or item.get("temp") or item.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                wind = _safe_float(item.get("wind_speed") or item.get("wind") or item.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                gust = _safe_float(item.get("wind_gust") or item.get("gust") or wind, DEFAULT_WEATHER_VALUES["wind_gust"])
+                wind_m_s = _safe_float(item.get("wind_speed") or item.get("wind") or item.get("wind_speed_10m"), None)
+                gust_m_s = _safe_float(item.get("wind_gust") or item.get("gust") or wind_m_s, None)
             except Exception:
                 _LOGGER.debug("Skipping invalid forecast list item for %s", date_key)
                 continue
             cloud = _safe_int(item.get("cloud_cover") or item.get("clouds"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (item.get("cloud_cover") or item.get("clouds")) is not None else None
             pop = _safe_int(item.get("precipitation_probability") or item.get("pop") or item.get("precipitation") or item.get("precip"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (item.get("precipitation_probability") or item.get("pop") or item.get("precipitation") or item.get("precip")) is not None else None
             pressure = _safe_float(item.get("pressure") or item.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (item.get("pressure") or item.get("pressure_msl")) is not None else None
-            final[date_key] = {"temperature": temp, "wind_speed": wind, "wind_gust": gust}
+
+            final[date_key] = {
+                "temperature": temp,
+                "wind_speed": self._m_s_to_output(wind_m_s) if wind_m_s is not None else None,
+                "wind_gust": self._m_s_to_output(gust_m_s) if gust_m_s is not None else None,
+            }
             if cloud is not None:
                 final[date_key]["cloud_cover"] = cloud
             if pop is not None:
@@ -451,6 +524,7 @@ class WeatherFetcher:
         - cloud_cover: mean (rounded)
         - precipitation_probability: max
         - pressure: mean
+        Returned wind values are in configured output unit.
         """
         per_date: Dict[str, Dict[str, Any]] = {}
         for entry in hourly_list:
@@ -476,8 +550,8 @@ class WeatherFetcher:
             date_key = t.date().isoformat()
             try:
                 temp = _safe_float(entry.get("temperature") or entry.get("temp") or entry.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                wind = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                gust = _safe_float(entry.get("wind_gust") or entry.get("gust"), wind or DEFAULT_WEATHER_VALUES["wind_gust"])
+                wind_m_s = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])  # assume m/s
+                gust_m_s = _safe_float(entry.get("wind_gust") or entry.get("gust"), wind_m_s or DEFAULT_WEATHER_VALUES["wind_gust"])
             except Exception:
                 continue
             cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover")) is not None else None
@@ -488,20 +562,20 @@ class WeatherFetcher:
             if not agg:
                 per_date[date_key] = {
                     "temperature_sum": temp,
-                    "wind_speed_sum": wind,
+                    "wind_speed_sum": wind_m_s or 0.0,
                     "pressure_sum": pressure or 0.0,
                     "cloud_sum": cloud or 0,
                     "precip_max": pop or 0,
-                    "gust_max": gust,
+                    "gust_max": gust_m_s,
                     "count": 1,
                 }
             else:
                 agg["temperature_sum"] += temp
-                agg["wind_speed_sum"] += wind
+                agg["wind_speed_sum"] += (wind_m_s or 0.0)
                 agg["pressure_sum"] += (pressure or 0.0)
                 agg["cloud_sum"] += (cloud or 0)
                 agg["precip_max"] = max(agg["precip_max"], pop or 0)
-                agg["gust_max"] = max(agg["gust_max"], gust)
+                agg["gust_max"] = max(agg["gust_max"], gust_m_s)
                 agg["count"] += 1
 
         if not per_date:
@@ -512,10 +586,12 @@ class WeatherFetcher:
             agg = per_date[date_key]
             cnt = agg.get("count", 1) or 1
             try:
+                mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt
+                gust_m_s = float(agg["gust_max"])
                 final[date_key] = {
                     "temperature": float(agg["temperature_sum"]) / cnt,
-                    "wind_speed": float(agg["wind_speed_sum"]) / cnt,
-                    "wind_gust": float(agg["gust_max"]),
+                    "wind_speed": self._m_s_to_output(mean_wind_m_s),
+                    "wind_gust": self._m_s_to_output(gust_m_s),
                     "cloud_cover": int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None,
                     "precipitation_probability": int(round(float(agg["precip_max"]))),
                     "pressure": float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None,
@@ -534,7 +610,25 @@ class WeatherFetcher:
         """
         # If already date keyed with metrics, truncate and return
         if all(isinstance(v, dict) and ("temperature" in v or "wind_speed" in v) for v in data.values()):
-            return dict(list(data.items())[:days])
+            # ensure wind units present (if numeric assumed m/s -> convert)
+            out: Dict[str, Dict[str, Any]] = {}
+            for k, v in list(data.items())[:days]:
+                if isinstance(v, dict) and v.get("wind_speed") is not None:
+                    # assume v["wind_speed"] is in m/s if it looks small (< 50) or no unit provided
+                    # We conservatively assume incoming daily summaries are already in m/s and convert
+                    try:
+                        wind_m_s = float(v.get("wind_speed"))
+                        gust_m_s = float(v.get("wind_gust")) if v.get("wind_gust") is not None else None
+                        vv = dict(v)
+                        vv["wind_speed"] = self._m_s_to_output(wind_m_s)
+                        vv["wind_gust"] = self._m_s_to_output(gust_m_s) if gust_m_s is not None else None
+                        vv["wind_unit"] = self.speed_unit
+                        out[k] = vv
+                    except Exception:
+                        out[k] = v
+                else:
+                    out[k] = v
+            return out
 
         # If dict has 'hourly' arrays, convert to list first
         hourly_list = None
@@ -544,30 +638,27 @@ class WeatherFetcher:
             items: List[Dict[str, Any]] = []
             for idx, t in enumerate(times):
                 row = {"time": t}
-                for k, arr in hourly.items():
-                    if k == "time":
+                for key, arr in hourly.items():
+                    if key == "time":
                         continue
                     if isinstance(arr, list) and idx < len(arr):
-                        row[k] = arr[idx]
+                        row[key] = arr[idx]
                     else:
-                        row[k] = None
+                        row[key] = None
                 items.append(row)
             hourly_list = items
         # If dict is a mapping of date->list, or contains an 'entries' key, try to find an hourly list
         if hourly_list is None:
-            # look for list-like values
             values = [v for v in data.values() if isinstance(v, list)]
             if values:
                 first = values[0]
                 if first and isinstance(first[0], dict) and ("time" in first[0] or "datetime" in first[0]):
                     hourly_list = first
 
-        # If still not found, maybe caller passed a plain list
         if hourly_list is None and isinstance(data, list):
             hourly_list = data
 
         if hourly_list is None:
-            # fallback: try to normalize to daily
             return self._normalize_forecast_list(list(data.values()) if isinstance(data, dict) else [], days)
 
         # Aggregate hourly_list into periods per day
@@ -588,7 +679,6 @@ class WeatherFetcher:
         Returns dict keyed by date -> { period_name: {metrics...}, ... }
         """
         if not aggregation_periods:
-            # default 4 x 6-hour windows
             aggregation_periods = [
                 {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
                 {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
@@ -625,7 +715,6 @@ class WeatherFetcher:
             for p in aggregation_periods:
                 start = int(p["start_hour"])
                 end = int(p["end_hour"])
-                # handle end == 24
                 if start <= hour < end:
                     pname = p["name"]
                     per_date_periods.setdefault(date_key, {}).setdefault(pname, {
@@ -640,8 +729,8 @@ class WeatherFetcher:
                     agg = per_date_periods[date_key][pname]
                     try:
                         temp = _safe_float(entry.get("temperature") or entry.get("temp") or entry.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                        wind = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                        gust = _safe_float(entry.get("wind_gust") or entry.get("gust") or entry.get("wind") or DEFAULT_WEATHER_VALUES["wind_gust"])
+                        wind_m_s = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
+                        gust_m_s = _safe_float(entry.get("wind_gust") or entry.get("gust") or entry.get("wind") or DEFAULT_WEATHER_VALUES["wind_gust"])
                     except Exception:
                         continue
                     cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover")) is not None else None
@@ -649,11 +738,11 @@ class WeatherFetcher:
                     pressure = _safe_float(entry.get("pressure") or entry.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (entry.get("pressure") or entry.get("pressure_msl")) is not None else None
 
                     agg["temperature_sum"] += temp
-                    agg["wind_speed_sum"] += wind
+                    agg["wind_speed_sum"] += (wind_m_s or 0.0)
                     agg["pressure_sum"] += (pressure or 0.0)
                     agg["cloud_sum"] += (cloud or 0)
                     agg["precip_max"] = max(agg["precip_max"], pop or 0)
-                    agg["gust_max"] = max(agg["gust_max"], gust)
+                    agg["gust_max"] = max(agg["gust_max"], gust_m_s)
                     agg["count"] += 1
                     break
 
@@ -664,10 +753,12 @@ class WeatherFetcher:
             for pname, agg in per_date_periods[date_key].items():
                 cnt = agg.get("count", 1) or 1
                 try:
+                    mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt
+                    gust_m_s = float(agg["gust_max"])
                     final[date_key][pname] = {
                         "temperature": float(agg["temperature_sum"]) / cnt,
-                        "wind_speed": float(agg["wind_speed_sum"]) / cnt,
-                        "wind_gust": float(agg["gust_max"]),
+                        "wind_speed": self._m_s_to_output(mean_wind_m_s),
+                        "wind_gust": self._m_s_to_output(gust_m_s),
                         "cloud_cover": int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None,
                         "precipitation_probability": int(round(float(agg["precip_max"]))),
                         "pressure": float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None,
