@@ -442,9 +442,21 @@ class WeatherFetcher:
           - canonical arrays useful for DataFormatter / scoring:
                 temperature_c, wind_m_s, wind_gust_m_s, pressure_hpa,
                 cloud_cover, precipitation_probability
+          - 'marine' (if available) containing marine.hourly and marine.timestamps
         """
         if mode != "hourly":
             _LOGGER.warning("WeatherFetcher.fetch called with unsupported mode=%s; treating as 'hourly'", mode)
+
+        # caching keyed by provided latitude/longitude/mode/days to avoid repeated REST calls
+        now = dt_util.now()
+        cache_key = f"fetch_{round(float(latitude),4)}_{round(float(longitude),4)}_{mode}_{int(days)}"
+        cache_entry = _GLOBAL_CACHE.get(cache_key)
+        if cache_entry:
+            cached_time = cache_entry.get("time")
+            if isinstance(cached_time, datetime) and (now - cached_time) < self._cache_duration:
+                _LOGGER.debug("Using cached fetch data for %s", cache_key)
+                return cache_entry["data"]
+
         try:
             session: aiohttp.ClientSession = async_get_clientsession(self.hass)
             params = {
@@ -500,7 +512,32 @@ class WeatherFetcher:
                 else:
                     out.setdefault("timestamps", [])
 
+        # Attempt to fetch marine data and merge it into the payload under 'marine'
+        try:
+            marine_params = {
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "timezone": "UTC",
+                "hourly": ",".join(["wave_height", "wave_direction", "wave_period", "swell_height", "swell_period"]),
+                "forecast_days": int(days),
+            }
+            async with session.get(OM_MARINE_BASE, params=marine_params, timeout=60) as mresp:
+                mresp.raise_for_status()
+                marine_data = await mresp.json()
+            if isinstance(marine_data, dict) and "hourly" in marine_data and isinstance(marine_data.get("hourly"), dict):
+                marine_hourly = marine_data.get("hourly") or {}
+                marine_times = marine_hourly.get("time") or []
+                out["marine"] = dict(marine_hourly)
+                # add marine timestamps under a clear key for consumers
+                out["marine"]["timestamps"] = list(marine_times)
+            else:
+                out["marine"] = marine_data or {}
+        except Exception:
+            _LOGGER.debug("Marine API fetch failed for %s,%s; continuing without marine data", latitude, longitude)
+
         _LOGGER.info("WeatherFetcher.fetch: returning forecast payload for %s,%s (days=%s)", latitude, longitude, days)
+        # cache the result
+        _GLOBAL_CACHE[cache_key] = {"data": out, "time": now}
         return out
 
     def _call_sync_normalize_dict(self, d: Dict[str, Any], days: int) -> Optional[Dict[str, Dict[str, Any]]]:
