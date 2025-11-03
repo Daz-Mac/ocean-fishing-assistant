@@ -145,13 +145,60 @@ class DataFormatter:
             if "tide_height_m" in t and "tide_height_m" not in payload:
                 payload["tide_height_m"] = t.get("tide_height_m")
 
-        # Convert known imperial keys if requested or present
-        # Always attempt to canonicalize any imperial keys we find (defensive)
-        self._convert_imperial_to_metric(payload)
+        # If the fetcher returned a strict Open-Meteo payload (hourly arrays under 'hourly'),
+        # translate those arrays into the canonical keys expected by the scoring/forecast
+        # engine. This keeps the translator behavior explicit and avoids heuristics.
+        if "hourly" in payload and isinstance(payload.get("hourly"), dict):
+            hourly = payload.get("hourly") or {}
+            # timestamps
+            timestamps = list(hourly.get("time") or [])
+            payload["timestamps"] = timestamps
 
-        # Ensure timestamps exist (some payloads use 'time' or nested structures)
-        timestamps = payload.get("timestamps") or payload.get("time") or []
-        payload["timestamps"] = timestamps
+            # Map Open-Meteo keys to canonical arrays (do not mutate original hourly dict)
+            def _as_list_from_hourly(key: str) -> List[Any]:
+                v = hourly.get(key)
+                return list(v) if isinstance(v, (list, tuple)) else []
+
+            # Temperature (C)
+            if "temperature_2m" in hourly and "temperature_c" not in payload:
+                payload["temperature_c"] = _as_list_from_hourly("temperature_2m")
+
+            # Wind (Open-Meteo provides m/s for wind_speed_10m)
+            if "wind_speed_10m" in hourly and "wind_m_s" not in payload:
+                payload["wind_m_s"] = _as_list_from_hourly("wind_speed_10m")
+            if "windgusts_10m" in hourly and "wind_gust_m_s" not in payload:
+                payload["wind_gust_m_s"] = _as_list_from_hourly("windgusts_10m")
+
+            # Pressure (hPa)
+            if "pressure_msl" in hourly and "pressure_hpa" not in payload:
+                payload["pressure_hpa"] = _as_list_from_hourly("pressure_msl")
+
+            # Cloud cover (percent)
+            if "cloudcover" in hourly and "cloud_cover" not in payload:
+                payload["cloud_cover"] = _as_list_from_hourly("cloudcover")
+
+            # Precipitation probability (percent)
+            if "precipitation_probability" in hourly and "precipitation_probability" not in payload:
+                payload["precipitation_probability"] = _as_list_from_hourly("precipitation_probability")
+
+            # Marine/wave fields (map common OM marine keys to our canonical names)
+            if "wave_height" in hourly and "wave_height_m" not in payload:
+                payload["wave_height_m"] = _as_list_from_hourly("wave_height")
+            if "wave_period" in hourly and "wave_period_s" not in payload:
+                payload["wave_period_s"] = _as_list_from_hourly("wave_period")
+            if "swell_height" in hourly and "swell_height_m" not in payload:
+                payload["swell_height_m"] = _as_list_from_hourly("swell_height")
+            if "swell_period" in hourly and "swell_period_s" not in payload:
+                payload["swell_period_s"] = _as_list_from_hourly("swell_period")
+
+        else:
+            # Convert known imperial keys if requested or present
+            # Always attempt to canonicalize any imperial keys we find (defensive)
+            self._convert_imperial_to_metric(payload)
+
+            # Ensure timestamps exist (some payloads use 'time' or nested structures)
+            timestamps = payload.get("timestamps") or payload.get("time") or []
+            payload["timestamps"] = timestamps
 
         # If TideProxy attached a normalized tide structure under 'tide' key, normalize it
         if "tide" in payload and isinstance(payload.get("tide"), dict):

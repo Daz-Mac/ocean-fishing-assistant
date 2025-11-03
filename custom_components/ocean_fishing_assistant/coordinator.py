@@ -74,16 +74,24 @@ class OFACoordinator(DataUpdateCoordinator):
                 raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
 
             # attempt to align tide to weather timestamps if available
-            timestamps = raw.get("timestamps") or raw.get("time")
+            timestamps = None
+            if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
+                timestamps = raw.get("hourly", {}).get("time") or raw.get("timestamps") or raw.get("time") or []
+            else:
+                timestamps = raw.get("timestamps") or raw.get("time") or []
+
             if timestamps:
                 try:
                     tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
-                    # merge tide arrays into raw payload
-                    raw["tide_height_m"] = tide.get("tide_height_m")
-                    raw["tide_phase"] = tide.get("tide_phase")
-                    raw["tide_strength"] = tide.get("tide_strength")
-                    # include tide sub-dict for downstream formatting if present
+                    # Keep a top-level tide dict for the formatter to consume
                     raw.setdefault("tide", {}).update(tide)
+                    # Backwards-compatible convenience keys
+                    if "tide_height_m" not in raw and tide.get("tide_height_m") is not None:
+                        raw["tide_height_m"] = tide.get("tide_height_m")
+                    if "tide_phase" not in raw and tide.get("tide_phase") is not None:
+                        raw["tide_phase"] = tide.get("tide_phase")
+                    if "tide_strength" not in raw and tide.get("tide_strength") is not None:
+                        raw["tide_strength"] = tide.get("tide_strength")
                 except Exception:
                     _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
 
