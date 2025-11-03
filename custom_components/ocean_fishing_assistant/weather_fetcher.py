@@ -428,6 +428,81 @@ class WeatherFetcher:
             _LOGGER.exception("Open-Meteo forecast REST fetch failed for %s,%s", self.latitude, self.longitude)
             return None
 
+    async def fetch(self, latitude: float, longitude: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
+        """
+        Unified fetch method expected by the coordinator.
+
+        - latitude, longitude: coordinates to request (coordinator passes these)
+        - mode: currently only 'hourly' is supported (keeps the same signature for extensibility)
+        - days: forecast_days to request from Open-Meteo
+
+        Returns a dict with:
+          - 'hourly' (the original Open-Meteo hourly dict, if present)
+          - 'timestamps' (list of ISO strings)
+          - canonical arrays useful for DataFormatter / scoring:
+                temperature_c, wind_m_s, wind_gust_m_s, pressure_hpa,
+                cloud_cover, precipitation_probability
+        """
+        if mode != "hourly":
+            _LOGGER.warning("WeatherFetcher.fetch called with unsupported mode=%s; treating as 'hourly'", mode)
+        try:
+            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+            params = {
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "timezone": "UTC",
+                "hourly": OM_PARAMS_HOURLY,
+                "forecast_days": int(days),
+            }
+            async with session.get(OM_BASE, params=params, timeout=60) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except Exception:
+            _LOGGER.exception("Open-Meteo fetch failed for %s,%s", latitude, longitude)
+            raise RuntimeError("Open-Meteo fetch failed")
+
+        out: Dict[str, Any] = {}
+        # Preserve original hourly structure if present
+        if isinstance(data, dict) and "hourly" in data and isinstance(data.get("hourly"), dict):
+            hourly = data.get("hourly") or {}
+            # timestamps - Open-Meteo uses 'time' for hourly times
+            times = hourly.get("time") or []
+            out["hourly"] = dict(hourly)  # shallow copy to avoid mutating original
+            out["timestamps"] = list(times)
+
+            # helper to safely copy arrays (coerce to simple lists)
+            def _as_list(key: str) -> List[Any]:
+                v = hourly.get(key)
+                if isinstance(v, list):
+                    return list(v)
+                return []
+
+            # Canonical arrays expected by scoring/formatter
+            # Open-Meteo keys we requested: temperature_2m, wind_speed_10m, windgusts_10m, pressure_msl, cloudcover, precipitation_probability
+            out["temperature_c"] = _as_list("temperature_2m")
+            out["wind_m_s"] = _as_list("wind_speed_10m")
+            out["wind_gust_m_s"] = _as_list("windgusts_10m")
+            # pressure_msl from Open-Meteo is in hPa already; expose as pressure_hpa for scoring
+            out["pressure_hpa"] = _as_list("pressure_msl")
+            # normalize a few keys to expected names
+            out["cloud_cover"] = _as_list("cloudcover")
+            out["precipitation_probability"] = _as_list("precipitation_probability")
+        else:
+            # If data isn't hourly-shaped, attempt the best-effort normalization used elsewhere
+            # Keep original payload and try to expose timestamps if possible
+            out = data or {}
+            # attempt to set timestamps key if not present
+            if "timestamps" not in out:
+                if isinstance(out, dict) and "time" in out:
+                    out["timestamps"] = out.get("time")
+                elif isinstance(out, dict) and "hourly" in out and isinstance(out.get("hourly"), dict):
+                    out["timestamps"] = out.get("hourly", {}).get("time", [])
+                else:
+                    out.setdefault("timestamps", [])
+
+        _LOGGER.info("WeatherFetcher.fetch: returning forecast payload for %s,%s (days=%s)", latitude, longitude, days)
+        return out
+
     def _call_sync_normalize_dict(self, d: Dict[str, Any], days: int) -> Optional[Dict[str, Dict[str, Any]]]:
         """Helper for sync normalization paths executed in executor."""
         try:
