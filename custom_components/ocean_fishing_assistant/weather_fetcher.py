@@ -430,32 +430,18 @@ class WeatherFetcher:
 
     async def fetch(self, latitude: float, longitude: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
         """
-        Unified fetch method expected by the coordinator.
+        Fetch raw Open-Meteo response strictly according to the Open-Meteo API.
 
-        - latitude, longitude: coordinates to request (coordinator passes these)
-        - mode: currently only 'hourly' is supported (keeps the same signature for extensibility)
-        - days: forecast_days to request from Open-Meteo
+        This function performs a direct REST call to the Open-Meteo endpoint and
+        returns the parsed JSON response exactly as returned by the API (a dict).
 
-        Returns a dict with:
-          - 'hourly' (the original Open-Meteo hourly dict, if present)
-          - 'timestamps' (list of ISO strings)
-          - canonical arrays useful for DataFormatter / scoring:
-                temperature_c, wind_m_s, wind_gust_m_s, pressure_hpa,
-                cloud_cover, precipitation_probability
-          - 'marine' (if available) containing marine.hourly and marine.timestamps
+        No heuristics, no normalization, and no shape guessing is performed here.
+        The coordinator and DataFormatter are expected to consume the Open-Meteo
+        payload shape (for example, using the 'hourly' dict with 'time' and the
+        requested parameter arrays).
         """
         if mode != "hourly":
-            _LOGGER.warning("WeatherFetcher.fetch called with unsupported mode=%s; treating as 'hourly'", mode)
-
-        # caching keyed by provided latitude/longitude/mode/days to avoid repeated REST calls
-        now = dt_util.now()
-        cache_key = f"fetch_{round(float(latitude),4)}_{round(float(longitude),4)}_{mode}_{int(days)}"
-        cache_entry = _GLOBAL_CACHE.get(cache_key)
-        if cache_entry:
-            cached_time = cache_entry.get("time")
-            if isinstance(cached_time, datetime) and (now - cached_time) < self._cache_duration:
-                _LOGGER.debug("Using cached fetch data for %s", cache_key)
-                return cache_entry["data"]
+            _LOGGER.warning("WeatherFetcher.fetch called with unsupported mode=%s; only 'hourly' is supported", mode)
 
         try:
             session: aiohttp.ClientSession = async_get_clientsession(self.hass)
@@ -473,72 +459,14 @@ class WeatherFetcher:
             _LOGGER.exception("Open-Meteo fetch failed for %s,%s", latitude, longitude)
             raise RuntimeError("Open-Meteo fetch failed")
 
-        out: Dict[str, Any] = {}
-        # Preserve original hourly structure if present
-        if isinstance(data, dict) and "hourly" in data and isinstance(data.get("hourly"), dict):
-            hourly = data.get("hourly") or {}
-            # timestamps - Open-Meteo uses 'time' for hourly times
-            times = hourly.get("time") or []
-            out["hourly"] = dict(hourly)  # shallow copy to avoid mutating original
-            out["timestamps"] = list(times)
+        # Return the Open-Meteo payload unchanged (caller will validate/normalize).
+        if not isinstance(data, dict):
+            # If the API returned unexpected shape, surface this as an error to the caller.
+            _LOGGER.error("Open-Meteo returned unexpected non-dict payload for %s,%s", latitude, longitude)
+            raise RuntimeError("Open-Meteo returned unexpected payload shape")
 
-            # helper to safely copy arrays (coerce to simple lists)
-            def _as_list(key: str) -> List[Any]:
-                v = hourly.get(key)
-                if isinstance(v, list):
-                    return list(v)
-                return []
-
-            # Canonical arrays expected by scoring/formatter
-            # Open-Meteo keys we requested: temperature_2m, wind_speed_10m, windgusts_10m, pressure_msl, cloudcover, precipitation_probability
-            out["temperature_c"] = _as_list("temperature_2m")
-            out["wind_m_s"] = _as_list("wind_speed_10m")
-            out["wind_gust_m_s"] = _as_list("windgusts_10m")
-            # pressure_msl from Open-Meteo is in hPa already; expose as pressure_hpa for scoring
-            out["pressure_hpa"] = _as_list("pressure_msl")
-            # normalize a few keys to expected names
-            out["cloud_cover"] = _as_list("cloudcover")
-            out["precipitation_probability"] = _as_list("precipitation_probability")
-        else:
-            # If data isn't hourly-shaped, attempt the best-effort normalization used elsewhere
-            # Keep original payload and try to expose timestamps if possible
-            out = data or {}
-            # attempt to set timestamps key if not present
-            if "timestamps" not in out:
-                if isinstance(out, dict) and "time" in out:
-                    out["timestamps"] = out.get("time")
-                elif isinstance(out, dict) and "hourly" in out and isinstance(out.get("hourly"), dict):
-                    out["timestamps"] = out.get("hourly", {}).get("time", [])
-                else:
-                    out.setdefault("timestamps", [])
-
-        # Attempt to fetch marine data and merge it into the payload under 'marine'
-        try:
-            marine_params = {
-                "latitude": float(latitude),
-                "longitude": float(longitude),
-                "timezone": "UTC",
-                "hourly": ",".join(["wave_height", "wave_direction", "wave_period", "swell_height", "swell_period"]),
-                "forecast_days": int(days),
-            }
-            async with session.get(OM_MARINE_BASE, params=marine_params, timeout=60) as mresp:
-                mresp.raise_for_status()
-                marine_data = await mresp.json()
-            if isinstance(marine_data, dict) and "hourly" in marine_data and isinstance(marine_data.get("hourly"), dict):
-                marine_hourly = marine_data.get("hourly") or {}
-                marine_times = marine_hourly.get("time") or []
-                out["marine"] = dict(marine_hourly)
-                # add marine timestamps under a clear key for consumers
-                out["marine"]["timestamps"] = list(marine_times)
-            else:
-                out["marine"] = marine_data or {}
-        except Exception:
-            _LOGGER.debug("Marine API fetch failed for %s,%s; continuing without marine data", latitude, longitude)
-
-        _LOGGER.info("WeatherFetcher.fetch: returning forecast payload for %s,%s (days=%s)", latitude, longitude, days)
-        # cache the result
-        _GLOBAL_CACHE[cache_key] = {"data": out, "time": now}
-        return out
+        _LOGGER.debug("WeatherFetcher.fetch: returning raw Open-Meteo payload for %s,%s (days=%s)", latitude, longitude, days)
+        return data
 
     def _call_sync_normalize_dict(self, d: Dict[str, Any], days: int) -> Optional[Dict[str, Dict[str, Any]]]:
         """Helper for sync normalization paths executed in executor."""
