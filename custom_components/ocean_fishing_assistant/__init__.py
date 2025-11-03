@@ -7,7 +7,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, STORE_KEY, STORE_VERSION, DEFAULT_SAFETY_LIMITS
 from .coordinator import OFACoordinator
-from .weather_fetcher import OpenMeteoClient, WeatherFetcher
+from .weather_fetcher import WeatherFetcher
 from .data_formatter import DataFormatter
 from . import unit_helpers
 
@@ -27,53 +27,22 @@ async def async_setup_entry(hass, entry):
         _LOGGER.error("Config entry missing latitude/longitude; aborting setup")
         return False
 
-    # instantiate low-level client + higher-level fetcher for this entry
-    client = OpenMeteoClient(session)
-    fetcher = WeatherFetcher(hass, lat, lon, use_open_meteo=True, open_meteo_client=client)
-
+    # Instantiate formatter; fetcher will be constructed after options are read
     formatter = DataFormatter()
 
-    # Normalize and validate per-entry safety limits (convert to canonical metric internally)
-    raw_safety = entry.options.get("safety_limits") or {}
+    # Read canonical safety_limits already normalized by config flow; fall back to defaults
     units = entry.options.get("units", "metric") or "metric"
-
-    safety_limits = {}
-    try:
-        # Wind: user input is km/h (metric) or mph (imperial) per UX decision
-        raw_wind = raw_safety.get("max_wind")
-        if raw_wind is not None:
-            if units == "metric":
-                safety_limits["max_wind_m_s"] = unit_helpers.kmh_to_m_s(raw_wind)
-            else:
-                safety_limits["max_wind_m_s"] = unit_helpers.mph_to_m_s(raw_wind)
-        # Wave height: meters (metric) or feet (imperial)
-        raw_wave = raw_safety.get("max_wave_height")
-        if raw_wave is not None:
-            if units == "metric":
-                safety_limits["max_wave_height_m"] = float(raw_wave)
-            else:
-                safety_limits["max_wave_height_m"] = unit_helpers.ft_to_m(raw_wave)
-        # Visibility: km (metric) or miles (imperial)
-        raw_vis = raw_safety.get("min_visibility")
-        if raw_vis is not None:
-            if units == "metric":
-                safety_limits["min_visibility_km"] = float(raw_vis)
-            else:
-                safety_limits["min_visibility_km"] = unit_helpers.miles_to_km(raw_vis)
-        # Swell period: seconds (user-facing units are seconds)
-        raw_period = raw_safety.get("max_swell_period")
-        if raw_period is not None:
-            safety_limits["max_swell_period_s"] = float(raw_period)
-    except Exception:
-        _LOGGER.debug("Failed to normalize safety limits; falling back to defaults", exc_info=True)
-
-    # Merge with defaults for any missing canonical keys; if none successfully parsed, fall back to defaults
+    safety_limits = entry.options.get("safety_limits") or {}
     if safety_limits:
         for k, v in DEFAULT_SAFETY_LIMITS.items():
             safety_limits.setdefault(k, v)
     else:
         safety_limits = DEFAULT_SAFETY_LIMITS.copy()
         _LOGGER.debug("Using DEFAULT_SAFETY_LIMITS for entry %s", entry.entry_id)
+
+    # Determine wind unit preference: prefer explicit per-entry option, else follow units
+    speed_unit = entry.options.get("wind_unit") or ("km/h" if units == "metric" else "mph")
+    fetcher = WeatherFetcher(hass, lat, lon, speed_unit=speed_unit)
 
     coord = OFACoordinator(
         hass,

@@ -44,6 +44,7 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "persist_ttl": user_input.get("persist_ttl", 3600),
                 "species": user_input.get("species"),
                 "units": entry_units,
+                "wind_unit": user_input.get("wind_unit", ("km/h" if entry_units == "metric" else "mph")),
                 "safety_limits": normalized_safety,
             }
             return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
@@ -58,6 +59,7 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,
                 vol.Optional("species", default=""): cv.string,
                 vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
+                vol.Required("wind_unit", default="km/h"): vol.In(["km/h", "mph", "m/s"]),
                 vol.Required("safety_max_wind"): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement="km/h", mode="slider")
                 ),
@@ -122,6 +124,7 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                     "persist_ttl": int(user_input.get("persist_ttl", current.get("persist_ttl", 3600))),
                     "species": user_input.get("species", current.get("species")),
                     "units": entry_units,
+                    "wind_unit": user_input.get("wind_unit", current.get("wind_unit", ("km/h" if entry_units == "metric" else "mph"))),
                     "safety_limits": normalized_safety,
                 }
                 return self.async_create_entry(title="", data=new_options)
@@ -183,6 +186,7 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
                 vol.Optional("species", default=current.get("species", "")): cv.string,
                 vol.Optional("units", default=entry_units): vol.In(["metric", "imperial"]),
+                vol.Optional("wind_unit", default=current.get("wind_unit", wind_unit)): vol.In(["km/h", "mph", "m/s"]),
                 vol.Optional("safety_max_wind", default=wind_default): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement=wind_unit, mode="slider")
                 ),
