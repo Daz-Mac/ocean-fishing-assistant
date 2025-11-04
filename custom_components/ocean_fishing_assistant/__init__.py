@@ -71,3 +71,16 @@ async def async_setup_entry(hass, entry):
         hass.config_entries.async_forward_entry_setup(entry, "sensor")
     )
     return True
+
+
+
+async def async_unload_entry(hass, entry):
+    """Unload a config entry."""
+    # forward unload to platform
+    unload_ok = await hass.config_entries.async_forward_entry_unload(entry, "sensor")
+    # cleanup coordinator from hass.data
+    try:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    except Exception:
+        pass
+    return unload_ok
