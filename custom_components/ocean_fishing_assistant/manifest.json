@@ -3,6 +3,7 @@
   "name": "Ocean Fishing Assistant",
   "version": "0.1.0",
   "documentation": "https://example.com/ocean-fishing-assistant",
+  "issue_tracker": "https://github.com/Daz-Mac/ocean-fishing-assistant/issues",
   "requirements": ["skyfield==0.53.0"],
   "config_flow": true,
   "dependencies": [],
