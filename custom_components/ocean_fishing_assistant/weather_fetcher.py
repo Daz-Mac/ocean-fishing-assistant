@@ -816,24 +816,45 @@ class WeatherFetcher:
         """
         Attempt to fetch marine-specific variables directly from the Open-Meteo Marine endpoint.
         Returns normalized structure similar to Open-Meteo client output (hourly dicts).
+
+        NOTE: use only documented parameter names. See Open‑Meteo docs:
+        https://open-meteo.com/en/docs/marine-weather-api
         """
         try:
             session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+            # Use documented marine variable names (correct parameter names: e.g. 'swell_wave_height')
+            hourly_vars = ",".join([
+                "wave_height",
+                "wave_direction",
+                "wave_period",
+                "swell_wave_height",
+                "swell_wave_period",
+            ])
             params = {
                 "latitude": self.latitude,
                 "longitude": self.longitude,
                 "timezone": "UTC",
-                # request common marine fields — callers may merge as needed
-                "hourly": ",".join(["wave_height", "wave_direction", "wave_period", "swell_height", "swell_period"]),
+                "hourly": hourly_vars,
                 "forecast_days": int(days),
             }
             async with session.get(OM_MARINE_BASE, params=params, timeout=60) as resp:
+                # If the API returns 400, the parameters were invalid (or the request malformed).
+                # Log at debug and return None so upstream logic can continue without marine data.
+                if resp.status == 400:
+                    try:
+                        body = await resp.text()
+                    except Exception:
+                        body = "<no body>"
+                    _LOGGER.debug("Marine API returned 400 Bad Request for %s,%s (params=%s): %s", self.latitude, self.longitude, hourly_vars, body)
+                    return None
                 resp.raise_for_status()
                 data = await resp.json()
             # leave raw structure (caller will extract hourly arrays)
             return data
         except Exception:
-            _LOGGER.exception("Direct Marine API fetch failed for %s,%s", self.latitude, self.longitude)
+            # Log at debug to avoid flooding logs when marine data is unavailable; caller can decide
+            # whether to treat missing marine payload as fatal or not.
+            _LOGGER.debug("Direct Marine API fetch failed for %s,%s", self.latitude, self.longitude, exc_info=True)
             return None
 
     # -----------------------
