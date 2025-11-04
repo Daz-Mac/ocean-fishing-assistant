@@ -1,10 +1,9 @@
 from typing import Optional, List, Dict, Any
 
-from homeassistant.helpers.entity import CoordinatorEntity
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
 
 from .const import DEFAULT_NAME, DOMAIN
-from .ocean_scoring import compute_score, MissingDataError
 
 ATTRIBUTION = "Data provided by Open-Meteo"
 
@@ -40,7 +39,15 @@ class OFASensor(CoordinatorEntity):
 
         # Fallback: compute from raw payload (index 0)
         try:
-            result = compute_score(self.coordinator.data, species_profile=getattr(self.coordinator, "species", None), use_index=0, safety_limits=getattr(self.coordinator, "safety_limits", None))
+            # Defer heavy import to runtime to avoid import-time failures / blocking
+            from .ocean_scoring import compute_score, MissingDataError
+
+            result = compute_score(
+                self.coordinator.data,
+                species_profile=getattr(self.coordinator, "species", None),
+                use_index=0,
+                safety_limits=getattr(self.coordinator, "safety_limits", None),
+            )
             return int(result["score_100"])
         except MissingDataError:
             return None
