@@ -4,7 +4,11 @@
   "version": "0.1.0",
   "documentation": "https://example.com/ocean-fishing-assistant",
   "issue_tracker": "https://github.com/Daz-Mac/ocean-fishing-assistant/issues",
-  "requirements": ["skyfield==0.53.0"],
+  "requirements": [
+    "skyfield==0.56.0",
+    "jplephem==2.40",
+    "pandas==2.2.2"
+  ],
   "config_flow": true,
   "dependencies": [],
   "codeowners": ["@Daz-Mac"]
