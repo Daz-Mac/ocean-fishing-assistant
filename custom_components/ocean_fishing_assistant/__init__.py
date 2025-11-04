@@ -92,9 +92,9 @@ async def async_setup_entry(hass, entry):
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
 
-    # forward entry to sensors
+    # forward entry to sensors (use plural API that accepts a list of platforms)
     hass.async_create_task(
-        hass.config_entries.async_forward_entry_setup(entry, "sensor")
+        hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
     )
 
     return True

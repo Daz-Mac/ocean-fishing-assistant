@@ -34,7 +34,7 @@ class TideProxy:
     Astronomical tide proxy using Skyfield only (no fallbacks).
     Skyfield data (ephemeris) will be stored in:
       <config_dir>/custom_components/ocean_fishing_assistant/data
-    The Loader will download missing files into that directory on first use — but
+    The Loader will download missing files into that folder on first use — but
     downloads and other blocking work are executed in the executor to avoid blocking
     Home Assistant's event loop.
     """
@@ -183,12 +183,12 @@ class TideProxy:
         # Compute moon altitudes for timestamps (used for state heuristics)
         moon_altitudes: List[Optional[float]] = []
         try:
-            earth = sf_eph["earth"]
+            # Use topocentric observer location (loc.at(t)) so altaz() works correctly
             moon = sf_eph["moon"]
             times_list = [sf_ts.utc(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) for dt in dt_objs]
             loc = sf_wgs.latlon(self.latitude, self.longitude)
             for t in times_list:
-                astrom = earth.at(t).observe(moon).apparent()
+                astrom = loc.at(t).observe(moon).apparent()
                 alt, az, dist = astrom.altaz()
                 moon_altitudes.append(float(getattr(alt, "degrees", alt.degrees)))
         except Exception:

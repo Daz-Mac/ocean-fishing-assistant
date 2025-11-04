@@ -73,6 +73,38 @@ class OFACoordinator(DataUpdateCoordinator):
                 # fallback to fetching directly if cache logic fails
                 raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
 
+            # Attempt to fetch marine/wave variables and merge them into the hourly payload if available.
+            try:
+                marine = None
+                if hasattr(self.fetcher, "fetch_marine_direct"):
+                    marine = await self.fetcher.fetch_marine_direct(days=5)
+                if isinstance(marine, dict) and isinstance(marine.get("hourly"), dict):
+                    marine_hourly = marine.get("hourly", {})
+                    # If raw contains hourly arrays, merge keys that are missing. Prefer existing keys in raw.
+                    if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
+                        raw_hourly = raw["hourly"]
+                        # If time arrays are present and lengths differ, do not try to realign here;
+                        # only add missing keys that appear to have same length as existing 'time'.
+                        ref_time = raw_hourly.get("time") or []
+                        ref_len = len(ref_time) if isinstance(ref_time, list) else None
+                        for k, arr in marine_hourly.items():
+                            if k == "time":
+                                continue
+                            if k not in raw_hourly:
+                                # If lengths match (or we have no reference), attach the array
+                                if ref_len is None or (isinstance(arr, list) and len(arr) == ref_len):
+                                    raw_hourly[k] = arr
+                                else:
+                                    _LOGGER.debug("Marine key %s length != reference time length; skipping merge", k)
+                    else:
+                        # Raw had no hourly dict — attach marine hourly as the hourly payload
+                        raw.setdefault("hourly", {}).update(marine_hourly)
+                        # Also, if top-level time/timestamps missing, try convenience keys
+                        if "time" not in raw and "time" in marine_hourly:
+                            raw["time"] = marine_hourly.get("time")
+            except Exception:
+                _LOGGER.debug("Marine merge failed; continuing without marine data", exc_info=True)
+
             # attempt to align tide to weather timestamps if available
             timestamps = None
             if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
