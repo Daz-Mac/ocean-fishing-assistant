@@ -4,6 +4,7 @@ import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import asyncio
 
 from homeassistant.util import dt as dt_util
 
@@ -33,7 +34,9 @@ class TideProxy:
     Astronomical tide proxy using Skyfield only (no fallbacks).
     Skyfield data (ephemeris) will be stored in:
       <config_dir>/custom_components/ocean_fishing_assistant/data
-    The Loader will download missing files into that directory on first use.
+    The Loader will download missing files into that directory on first use — but
+    downloads and other blocking work are executed in the executor to avoid blocking
+    Home Assistant's event loop.
     """
 
     def __init__(self, hass, latitude: float, longitude: float, ttl: int = _DEFAULT_TTL):
@@ -44,37 +47,81 @@ class TideProxy:
         self._last_calc: Optional[datetime] = None
         self._cache: Optional[Dict[str, Any]] = None
 
-        # Prepare a dedicated data directory under the integration folder so Skyfield files
+        # prepare a dedicated data directory under the integration folder so Skyfield files
         # are consolidated and easy to pre-populate or inspect.
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
         except Exception:
             # Fallback to joining paths if hass.config.path signature varies
             from homeassistant.const import CONFIG_DIR  # type: ignore
+
             data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
 
         os.makedirs(data_dir, exist_ok=True)
         self._data_dir = data_dir
 
-        # Create a Loader bound to the data directory. This will download timescale and ephemeris
-        # files into that folder on demand (if they are missing).
+        # Create a Loader bound to the data directory. Do NOT call loader(...) or loader.timescale()
+        # synchronously here because they may block on network/SSL operations.
         try:
-            loader = Loader(self._data_dir)
-            # Initialize shared resources for this instance
-            self._loader = loader
-            self._sf_ts = self._loader.timescale()
-            self._sf_eph = self._loader("de421.bsp")
-            self._sf_wgs = wgs84
-            self._sf_almanac = _almanac
-            _skyfield_version = getattr(skyfield, "__version__", "unknown")
-            _LOGGER.info(
-                "Ocean Fishing Assistant: Skyfield %s loaded — using data directory: %s",
-                _skyfield_version,
-                self._data_dir,
-            )
+            self._loader = Loader(self._data_dir)
         except Exception:
-            _LOGGER.exception("Failed to initialize Skyfield Loader/ephemeris. Ensure 'skyfield' is installed.")
+            # If Loader construction itself fails, log and re-raise so setup fails early.
+            _LOGGER.exception("Failed to create Skyfield Loader. Ensure 'skyfield' is installed.")
             raise
+
+        # Skyfield resources (populated lazily in executor)
+        self._sf_ts = None
+        self._sf_eph = None
+        self._sf_wgs = None
+        self._sf_almanac = None
+
+        # lock to prevent concurrent background loads
+        self._load_lock = asyncio.Lock()
+
+        _LOGGER.debug("TideProxy initialized, data_dir=%s (Skyfield resources will load lazily)", self._data_dir)
+
+    async def _ensure_loaded(self) -> None:
+        """
+        Ensure Skyfield resources are loaded. This method runs the actual blocking
+        loader calls in an executor to avoid blocking the event loop.
+        """
+        # fast path
+        if self._sf_eph is not None and self._sf_ts is not None:
+            return
+
+        async with self._load_lock:
+            # double-check inside lock
+            if self._sf_eph is not None and self._sf_ts is not None:
+                return
+
+            _LOGGER.debug("Loading Skyfield resources in executor (this may download ephemeris files)...")
+
+            def _blocking_load():
+                try:
+                    sf_ts = self._loader.timescale()
+                    sf_eph = self._loader("de421.bsp")
+                    sf_wgs = wgs84
+                    sf_almanac = _almanac
+                    version = getattr(skyfield, "__version__", "unknown")
+                    return sf_ts, sf_eph, sf_wgs, sf_almanac, version
+                except Exception:
+                    _LOGGER.exception("Blocking Skyfield load failed")
+                    raise
+
+            try:
+                sf_ts, sf_eph, sf_wgs, sf_almanac, version = await self.hass.async_add_executor_job(_blocking_load)
+                self._sf_ts = sf_ts
+                self._sf_eph = sf_eph
+                self._sf_wgs = sf_wgs
+                self._sf_almanac = sf_almanac
+                _LOGGER.info(
+                    "Ocean Fishing Assistant: Skyfield %s loaded — using data directory: %s",
+                    version,
+                    self._data_dir,
+                )
+            except Exception:
+                _LOGGER.exception("Failed to initialize Skyfield Loader/ephemeris. Ensure 'skyfield' is installed and network access is available or pre-populate the data directory.")
+                raise
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
         """
@@ -104,7 +151,23 @@ class TideProxy:
             }
             return empty
 
-        # Use Skyfield instance resources (initialized in __init__)
+        # Ensure skyfield resources are available (loads in executor if needed)
+        try:
+            await self._ensure_loaded()
+        except Exception:
+            # If loading failed, return a safe empty tide payload rather than crashing Home Assistant
+            _LOGGER.exception("Skyfield resources not available; returning empty tide data")
+            empty = {
+                "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
+                "tide_height_m": [None] * len(dt_objs),
+                "tide_phase": None,
+                "tide_strength": 0.5,
+                "confidence": "none",
+                "source": "astronomical_unavailable",
+            }
+            return empty
+
+        # Use Skyfield instance resources (initialized in _ensure_loaded)
         sf_ts = self._sf_ts
         sf_eph = self._sf_eph
         sf_wgs = self._sf_wgs
