@@ -126,12 +126,10 @@ class TideProxy:
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
         """
         Compute tide data for the given ISO timestamps (expects UTC with trailing Z).
-        Uses Skyfield for moon transits, phase and altitude. Raises/logs on Skyfield runtime errors
-        rather than silently falling back.
+        Uses Skyfield for moon transits, phase and altitude. Returns a normalized dict.
         """
         now = dt_util.now()
 
-        fingerprint = (tuple(timestamps), round(self.latitude, 6), round(self.longitude, 6))
         if self._last_calc and self._cache and (now - self._last_calc).total_seconds() < self._ttl:
             cached = self._cache
             if cached.get("timestamps") == list(timestamps):
@@ -155,14 +153,13 @@ class TideProxy:
         try:
             await self._ensure_loaded()
         except Exception:
-            # If loading failed, return a safe empty tide payload rather than crashing Home Assistant
             _LOGGER.exception("Skyfield resources not available; returning empty tide data")
             empty = {
                 "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
                 "tide_height_m": [None] * len(dt_objs),
                 "tide_phase": None,
                 "tide_strength": 0.5,
-                "confidence": "none",
+                "confidence": "astronomical_unavailable",
                 "source": "astronomical_unavailable",
             }
             return empty
@@ -173,29 +170,34 @@ class TideProxy:
         sf_wgs = self._sf_wgs
         sf_almanac = self._sf_almanac
 
-        # Find precise moon transit after now (fail loudly on Skyfield errors)
+        # Attempt to find moon transit; tolerate failure and continue with fallback anchor
         try:
             moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now)
         except Exception:
-            _LOGGER.exception("Skyfield transit-finding failed")
-            raise
+            _LOGGER.debug("Failed to find next moon transit; continuing with fallback anchor", exc_info=True)
+            moon_transit_dt = None
 
         # Compute moon altitudes for timestamps (used for state heuristics)
         moon_altitudes: List[Optional[float]] = []
         try:
-            # Use topocentric observer location (loc.at(t)) so altaz() works correctly
             moon = sf_eph["moon"]
+            # prepare times as skyfield Time objects
             times_list = [sf_ts.utc(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) for dt in dt_objs]
-            loc = sf_wgs.latlon(self.latitude, self.longitude)
+            # Topos (a topos object) for almanac functions; for actual observations we compose with earth so .at() works
+            topos = sf_wgs.latlon(self.latitude, self.longitude)
+            earth = sf_eph["earth"]
             for t in times_list:
-                astrom = loc.at(t).observe(moon).apparent()
+                # Use earth + topos to get a Topos-relative observer with .at(t)
+                astrom = (earth + topos).at(t).observe(moon).apparent()
                 alt, az, dist = astrom.altaz()
+                # alt is an Angle; access degrees
                 moon_altitudes.append(float(getattr(alt, "degrees", alt.degrees)))
         except Exception:
-            _LOGGER.exception("Skyfield altitude calculation failed")
-            raise
+            _LOGGER.exception("Skyfield altitude calculation failed; returning None altitudes for timestamps")
+            moon_altitudes = [None] * len(dt_objs)
 
-        # Derive moon phase via elongation using Skyfield (0..1 where 0 new moon, 0.5 full)
+        # Derive moon phase via elongation using Skyfield (tolerate failure and set None)
+        moon_phase: Optional[float] = None
         try:
             sample_dt = dt_objs[0] if dt_objs else now
             t0 = sf_ts.utc(sample_dt.year, sample_dt.month, sample_dt.day, sample_dt.hour, sample_dt.minute, sample_dt.second)
@@ -214,14 +216,14 @@ class TideProxy:
             angle = math.degrees(math.acos(cos_ang))  # 0..180
             moon_phase = (angle / 180.0) * 0.5
         except Exception:
-            _LOGGER.exception("Skyfield phase calculation failed")
-            raise
+            _LOGGER.debug("Skyfield phase calculation failed; proceeding with moon_phase=None", exc_info=True)
+            moon_phase = None
 
         tide_strength = _compute_tide_strength(moon_phase)
 
         # Anchor: use precise moon_transit_dt if found, otherwise first timestamp or now
         anchor_dt = moon_transit_dt or (dt_objs[0] if dt_objs else now)
-        anchor_epoch = anchor_dt.timestamp()
+        anchor_epoch = anchor_dt.timestamp() if anchor_dt else now.timestamp()
 
         base_amp = 1.0
         amp = base_amp * (0.5 + 0.5 * tide_strength)
@@ -232,8 +234,11 @@ class TideProxy:
             sec = dt.timestamp()
             lon_shift = (self.longitude / 360.0) * period_seconds
             x = 2.0 * math.pi * ((sec - anchor_epoch + lon_shift) / period_seconds)
-            value = amp * math.sin(x)
-            tide_heights.append(round(float(value), 3))
+            try:
+                value = amp * math.sin(x)
+                tide_heights.append(round(float(value), 3))
+            except Exception:
+                tide_heights.append(None)
 
         next_high_dt, next_low_dt = _predict_next_high_low(anchor_dt if anchor_dt else now)
 
@@ -244,7 +249,7 @@ class TideProxy:
             "tide_strength": float(round(tide_strength, 3)),
             "next_high": next_high_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if next_high_dt else "",
             "next_low": next_low_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if next_low_dt else "",
-            "confidence": "astronomical",
+            "confidence": "astronomical" if moon_phase is not None else "astronomical_low_confidence",
             "source": "astronomical_skyfield",
         }
 
@@ -253,8 +258,8 @@ class TideProxy:
             try:
                 normalized = DataFormatter.format_tide_data(raw_tide)
             except Exception:
-                _LOGGER.exception("DataFormatter failed to normalize tide data")
-                raise
+                _LOGGER.exception("DataFormatter failed to normalize tide data; returning raw tide payload", exc_info=True)
+                normalized = raw_tide
         else:
             normalized = raw_tide
 
@@ -265,31 +270,35 @@ class TideProxy:
     async def _async_find_next_moon_transit(self, sf_eph, sf_ts, sf_almanac, sf_wgs, start_dt: datetime) -> Optional[datetime]:
         """
         Find the next moon meridian transit (local transit) after start_dt using skyfield.almanac.
-        Returns timezone-aware UTC datetime or raises on Skyfield errors.
+        Returns timezone-aware UTC datetime or None on failure.
         """
-        # define search window
-        t0 = sf_ts.utc(start_dt.year, start_dt.month, start_dt.day, start_dt.hour, start_dt.minute, start_dt.second)
-        end_dt = start_dt + timedelta(days=_ALMANAC_SEARCH_DAYS)
-        t1 = sf_ts.utc(end_dt.year, end_dt.month, end_dt.day, end_dt.hour, end_dt.minute, end_dt.second)
+        try:
+            # define search window
+            t0 = sf_ts.utc(start_dt.year, start_dt.month, start_dt.day, start_dt.hour, start_dt.minute, start_dt.second)
+            end_dt = start_dt + timedelta(days=_ALMANAC_SEARCH_DAYS)
+            t1 = sf_ts.utc(end_dt.year, end_dt.month, end_dt.day, end_dt.hour, end_dt.minute, end_dt.second)
 
-        # build observer/location
-        loc = sf_wgs.latlon(self.latitude, self.longitude)
+            # Topos for the location (used by almanac)
+            topos = sf_wgs.latlon(self.latitude, self.longitude)
 
-        # build function for meridian transits of the moon
-        f = sf_almanac.meridian_transits(sf_eph, sf_eph["moon"], loc)
+            # build function for meridian transits of the moon
+            f = sf_almanac.meridian_transits(sf_eph, sf_eph["moon"], topos)
 
-        # find discrete events
-        times, events = sf_almanac.find_discrete(t0, t1, f)
+            # find discrete events
+            times, events = sf_almanac.find_discrete(t0, t1, f)
 
-        # choose first time that is strictly after start_dt
-        for t in times:
-            try:
-                dt = t.utc_datetime().replace(tzinfo=timezone.utc)
-            except Exception:
-                dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
-            if dt and dt > start_dt:
-                return dt
-        return None
+            # choose first time that is strictly after start_dt
+            for t in times:
+                try:
+                    dt = t.utc_datetime().replace(tzinfo=timezone.utc)
+                except Exception:
+                    dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
+                if dt and dt > start_dt:
+                    return dt
+            return None
+        except Exception:
+            _LOGGER.debug("Moon transit search failed", exc_info=True)
+            return None
 
     def _calculate_tide_state(self, moon_data: Dict[str, Optional[float]], sun_data: Dict[str, Optional[float]], now: datetime) -> str:
         try:
