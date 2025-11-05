@@ -857,6 +857,120 @@ class WeatherFetcher:
             _LOGGER.debug("Direct Marine API fetch failed for %s,%s", self.latitude, self.longitude, exc_info=True)
             return None
 
+class DataFormatter:
+    """
+    Minimal DataFormatter that converts an Open‑Meteo-like payload (or a merged payload
+    with 'hourly' dict) into the canonical keys expected by the rest of the integration
+    and by ocean_scoring.
+
+    Notes:
+    - This implements the marine key compatibility mapping (maps documented OM marine
+      keys to our canonical keys) and does NOT attempt tolerant fallbacks.
+    - It does not mutate the original payload (works on a shallow copy) and only
+      copies keys that exist in the incoming 'hourly' dict.
+    """
+
+    # mapping of Open-Meteo hourly keys -> canonical keys used by scoring/formatting
+    HOURLY_KEY_MAP = {
+        "time": "timestamps",  # special-case: 'time' -> 'timestamps'
+        # standard weather keys
+        "temperature_2m": "temperature_c",
+        "wind_speed_10m": "wind_m_s",
+        "windgusts_10m": "wind_max_m_s",
+        "pressure_msl": "pressure_hpa",
+        "cloudcover": "cloud_cover",
+        "precipitation_probability": "precipitation_probability",
+        # marine keys (documented OM marine names -> canonical names)
+        "wave_height": "wave_height_m",
+        "wave_direction": "wave_direction",
+        "wave_period": "wave_period_s",
+        "swell_wave_height": "swell_height_m",
+        "swell_wave_period": "swell_period_s",
+        # Accept alternative but documented names (kept explicit)
+        "swell_height": "swell_height_m",
+        "swell_period": "swell_period_s",
+    }
+
+    def __init__(self) -> None:
+        pass
+
+    def _copy_if_list(self, src: dict, key: str):
+        """Return a shallow copy of the list for key if present and a list; else None."""
+        val = src.get(key)
+        if isinstance(val, (list, tuple)):
+            return list(val)
+        return None
+
+    def validate(self, raw_payload: dict, species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None) -> dict:
+        """
+        Validate/normalize the incoming payload.
+
+        Parameters:
+        - raw_payload: the dict provided by OFACoordinator (often an Open-Meteo payload possibly
+          merged with marine and tide data).
+        - species_profile, units, safety_limits: accepted for API compatibility but not used here.
+
+        Returns:
+        - canonical_payload: dict with at least the canonical arrays pulled from hourly when present.
+        """
+        if not isinstance(raw_payload, dict):
+            # nothing to do — return empty canonical payload
+            return {}
+
+        canonical: dict = {}
+
+        # If there is an 'hourly' dict, prefer that as the source of per-timestamp arrays.
+        hourly = raw_payload.get("hourly") if isinstance(raw_payload.get("hourly"), dict) else None
+
+        # If there is a top-level 'timestamps' or 'time' at top-level, allow pass-through too.
+        if hourly:
+            # Map known hourly keys to canonical names when present.
+            for om_key, canon_key in self.HOURLY_KEY_MAP.items():
+                if om_key in hourly:
+                    arr = self._copy_if_list(hourly, om_key)
+                    if arr is not None:
+                        canonical[canon_key] = arr
+
+            # Ensure we set 'timestamps' -> prefer hourly['time']
+            if "timestamps" not in canonical and "time" in hourly:
+                ts = self._copy_if_list(hourly, "time")
+                if ts is not None:
+                    canonical["timestamps"] = ts
+
+        # If not hourly or some keys still missing, accept top-level documented keys without trying fallbacks.
+        # (This is deliberate: do not do tolerant guessing here.)
+        for om_key, canon_key in self.HOURLY_KEY_MAP.items():
+            if canon_key not in canonical and om_key in raw_payload:
+                arr = self._copy_if_list(raw_payload, om_key)
+                if arr is not None:
+                    canonical[canon_key] = arr
+
+        # Top-level convenience keys that the scoring code expects (tide/astro/marine) — pass through if present.
+        for top_key in ("tide", "astro", "astronomy", "marine", "astronomy_forecast", "astro_forecast"):
+            v = raw_payload.get(top_key)
+            if v is not None:
+                canonical[top_key] = v
+
+        # Also keep any existing top-level convenience keys like 'tide_height_m', 'tide_phase', etc.
+        for k in ("tide_height_m", "tide_phase", "tide_strength", "moon_phase"):
+            if k in raw_payload:
+                canonical.setdefault(k, raw_payload.get(k))
+
+        # Keep a 'current' snapshot if provided (useful for instant sensor/current values)
+        if "current" in raw_payload:
+            canonical["current"] = raw_payload.get("current")
+
+        # Finally, if no explicit timestamps key but we have a top-level 'time' or 'timestamps' scalar,
+        # accept it only if it's already in list form; we do NOT attempt to synthesize timestamps.
+        if "timestamps" not in canonical:
+            if isinstance(raw_payload.get("timestamps"), (list, tuple)):
+                canonical["timestamps"] = list(raw_payload.get("timestamps"))
+            elif isinstance(raw_payload.get("time"), (list, tuple)):
+                canonical["timestamps"] = list(raw_payload.get("time"))
+
+        # Return canonical mapping (caller will enforce strict presence of required arrays)
+        return canonical        
+
     # -----------------------
     # End
     # -----------------------
