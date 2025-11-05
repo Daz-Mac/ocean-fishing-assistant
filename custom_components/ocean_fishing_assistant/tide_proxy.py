@@ -256,7 +256,11 @@ class TideProxy:
         # DataFormatter remains optional
         if DataFormatter:
             try:
-                normalized = DataFormatter.format_tide_data(raw_tide)
+                # DataFormatter implements a validate() instance method that returns
+                # the canonical mapping. Instantiate and call validate rather than
+                # calling a non-existent classmethod.
+                formatter = DataFormatter()
+                normalized = formatter.validate(raw_tide)
             except Exception:
                 _LOGGER.exception("DataFormatter failed to normalize tide data; returning raw tide payload", exc_info=True)
                 normalized = raw_tide

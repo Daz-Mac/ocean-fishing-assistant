@@ -968,6 +968,14 @@ class DataFormatter:
             elif isinstance(raw_payload.get("time"), (list, tuple)):
                 canonical["timestamps"] = list(raw_payload.get("time"))
 
+        # Backwards-compatibility aliases: some callers expect both 'swell_height_m' and
+        # 'swell_wave_height_m' keys. If one is present, expose the other as an alias so
+        # downstream code (and tests) can find swell heights under either name.
+        if "swell_height_m" in canonical and "swell_wave_height_m" not in canonical:
+            canonical["swell_wave_height_m"] = list(canonical["swell_height_m"]) if isinstance(canonical["swell_height_m"], list) else canonical["swell_height_m"]
+        if "swell_wave_height_m" in canonical and "swell_height_m" not in canonical:
+            canonical["swell_height_m"] = list(canonical["swell_wave_height_m"]) if isinstance(canonical["swell_wave_height_m"], list) else canonical["swell_wave_height_m"]
+
         # Return canonical mapping (caller will enforce strict presence of required arrays)
         return canonical        
 
