@@ -194,7 +194,7 @@ class WeatherFetcher:
                 "timezone": "UTC",
                 "current_weather": "true",
                 "hourly": OM_PARAMS_HOURLY,
-                "forecast_days": 1,
+                "forecast_days": 2,
             }
             async with session.get(OM_BASE, params=params, timeout=30) as resp:
                 resp.raise_for_status()
@@ -418,7 +418,7 @@ class WeatherFetcher:
                 "longitude": self.longitude,
                 "timezone": "UTC",
                 "hourly": OM_PARAMS_HOURLY,
-                "forecast_days": int(days),
+                "forecast_days": int(days) + 1,
             }
             async with session.get(OM_BASE, params=params, timeout=60) as resp:
                 resp.raise_for_status()
@@ -450,7 +450,7 @@ class WeatherFetcher:
                 "longitude": float(longitude),
                 "timezone": "UTC",
                 "hourly": OM_PARAMS_HOURLY,
-                "forecast_days": int(days),
+                "forecast_days": int(days) + 1,
             }
             async with session.get(OM_BASE, params=params, timeout=60) as resp:
                 resp.raise_for_status()
