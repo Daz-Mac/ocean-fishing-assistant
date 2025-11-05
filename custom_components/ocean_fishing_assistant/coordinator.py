@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, datetime
 import async_timeout
 import logging
 import time
@@ -77,28 +77,70 @@ class OFACoordinator(DataUpdateCoordinator):
             try:
                 marine = None
                 if hasattr(self.fetcher, "fetch_marine_direct"):
+                    _LOGGER.debug("Fetching marine variables via fetch_marine_direct")
                     marine = await self.fetcher.fetch_marine_direct(days=5)
                 if isinstance(marine, dict) and isinstance(marine.get("hourly"), dict):
                     marine_hourly = marine.get("hourly", {})
                     # If raw contains hourly arrays, merge keys that are missing. Prefer existing keys in raw.
                     if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
                         raw_hourly = raw["hourly"]
-                        # If time arrays are present and lengths differ, do not try to realign here;
-                        # only add missing keys that appear to have same length as existing 'time'.
+                        # Reference times from the primary weather payload
                         ref_time = raw_hourly.get("time") or []
                         ref_len = len(ref_time) if isinstance(ref_time, list) else None
+                        marine_time = marine_hourly.get("time") or []
+                        # helper to parse ISO timestamps to epoch seconds
+                        def _iso_to_ts(s):
+                            try:
+                                if s is None:
+                                    return None
+                                ss = str(s)
+                                if ss.endswith("Z"):
+                                    ss = ss[:-1] + "+00:00"
+                                return datetime.fromisoformat(ss).timestamp()
+                            except Exception:
+                                return None
+                        # pre-parse marine timestamps if available
+                        marine_ts = [ _iso_to_ts(t) for t in marine_time ] if isinstance(marine_time, list) else []
                         for k, arr in marine_hourly.items():
                             if k == "time":
                                 continue
-                            if k not in raw_hourly:
-                                # If lengths match (or we have no reference), attach the array
-                                if ref_len is None or (isinstance(arr, list) and len(arr) == ref_len):
-                                    raw_hourly[k] = arr
-                                else:
-                                    _LOGGER.debug("Marine key %s length != reference time length; skipping merge", k)
+                            if k in raw_hourly:
+                                # Prefer existing keys from primary payload
+                                continue
+                            if not isinstance(arr, list):
+                                _LOGGER.debug("Marine key %s is not a list; skipping", k)
+                                continue
+                            # If we have no reference times, attach as-is
+                            if ref_len is None:
+                                raw_hourly[k] = arr
+                                _LOGGER.debug("Attached marine key %s (no reference time available)", k)
+                                continue
+                            # If lengths match, attach directly
+                            if len(arr) == ref_len:
+                                raw_hourly[k] = arr
+                                _LOGGER.debug("Attached marine key %s (length matched)", k)
+                                continue
+                            # Attempt nearest-timestamp alignment if possible
+                            if not marine_ts or any(v is None for v in marine_ts):
+                                _LOGGER.debug("Marine key %s length mismatch and marine timestamps unavailable or unparsable; skipping", k)
+                                continue
+                            # parse reference timestamps
+                            ref_ts = [ _iso_to_ts(t) for t in ref_time ]
+                            if any(v is None for v in ref_ts):
+                                _LOGGER.debug("Reference timestamps unparsable; skipping alignment for key %s", k)
+                                continue
+                            # build aligned array using nearest-neighbor
+                            aligned = []
+                            for r in ref_ts:
+                                # find nearest marine index
+                                j = min(range(len(marine_ts)), key=lambda idx: abs(marine_ts[idx] - r))
+                                aligned.append(arr[j] if j < len(arr) else None)
+                            raw_hourly[k] = aligned
+                            _LOGGER.debug("Aligned marine key %s to reference timestamps (src_len=%d ref_len=%d)", k, len(arr), ref_len)
                     else:
                         # Raw had no hourly dict — attach marine hourly as the hourly payload
                         raw.setdefault("hourly", {}).update(marine_hourly)
+                        _LOGGER.debug("Attached marine hourly payload as primary hourly data")
                         # Also, if top-level time/timestamps missing, try convenience keys
                         if "time" not in raw and "time" in marine_hourly:
                             raw["time"] = marine_hourly.get("time")
