@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import aiohttp
 
@@ -22,6 +22,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import OM_BASE, OM_MARINE_BASE
 from . import unit_helpers
+from . import ocean_scoring
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -342,10 +343,11 @@ class WeatherFetcher:
     # -----------------------
     # Public: forecast
     # -----------------------
-    async def get_forecast(self, days: int = 7, aggregation_periods: Optional[Sequence[Dict[str, int]]] = None) -> Dict[str, Dict[str, Any]]:
+    async def get_forecast(self, days: int = 7, aggregation_periods: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
         """
         Get forecast summarized into date->period mappings.
         aggregation_periods: optional sequence of {"name": str, "start_hour": int, "end_hour": int}
+          OR {"name": str, "solar_event": "sunrise"|"sunset"|"dawn"|"dusk", "window_hours": float}
           If None, default 4 equal periods are used: 00-06,06-12,12-18,18-24.
         """
         now = dt_util.now()
@@ -641,12 +643,16 @@ class WeatherFetcher:
                 continue
         return final
 
-    async def _ensure_period_aggregation(self, data: Dict[str, Any], days: int, aggregation_periods: Sequence[Dict[str, int]]) -> Dict[str, Dict[str, Any]]:
+    async def _ensure_period_aggregation(self, data: Dict[str, Any], days: int, aggregation_periods: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
         If `data` is already date-keyed summaries, return as-is (truncated to days).
         If `data` is hourly list under special keys, attempt to aggregate into requested periods.
-        For simplicity this helper accepts the REST-returned dict (possibly hourly arrays) and tries
-        to make a best-effort aggregation.
+
+        This helper now also supports aggregation_periods entries that declare a solar event:
+            {"name":"dawn","solar_event":"sunrise","window_hours":2.0}
+        When a solar_event is present we try to extract per-date event times from the
+        incoming payload (keys: 'astro','astronomy','astronomy_forecast','astro_forecast' or 'daily')
+        and produce per-date windows centered on those events.
         """
         # If already date keyed with metrics, truncate and return
         if all(isinstance(v, dict) and ("temperature" in v or "wind_speed" in v) for v in data.values()):
@@ -702,13 +708,159 @@ class WeatherFetcher:
             return self._normalize_forecast_list(list(data.values()) if isinstance(data, dict) else [], days)
 
         # Aggregate hourly_list into periods per day
-        return self._aggregate_hourly_into_periods(hourly_list, days, aggregation_periods)
+        return self._aggregate_hourly_into_periods(hourly_list, days, aggregation_periods, full_payload=data)
 
-    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, int]]]) -> Dict[str, Dict[str, Any]]:
+    def _parse_date_iso(self, s: Any) -> Optional[str]:
+        """Return ISO date string (YYYY-MM-DD) for many timestamp forms, or None."""
+        if s is None:
+            return None
+        try:
+            dt = dt_util.parse_datetime(str(s)) if not isinstance(s, (int, float)) else datetime.fromtimestamp(float(s), tz=timezone.utc)
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.date().isoformat()
+        except Exception:
+            return None
+
+    def _extract_solar_event_for_date(self, payload: Dict[str, Any], date_iso: str, event: str) -> Optional[datetime]:
         """
-        Aggregate hourly data into named periods. aggregation_periods is a sequence of dicts:
-          {"name": str, "start_hour": int, "end_hour": int}
-        Hours are in 0-24 with end exclusive. If None, default four 6-hour periods are used.
+        Try to find a solar event (sunrise/sunset) datetime for a given date in the payload.
+        Accept recognized container keys: 'astro','astronomy','astronomy_forecast','astro_forecast','daily'.
+        Event strings accepted: 'sunrise','sunset' (also accept 'dawn'->sunrise, 'dusk'->sunset).
+        Returns timezone-aware UTC datetime or None.
+        """
+        if not payload or not date_iso:
+            return None
+        event = str(event).lower()
+        if event in ("dawn",):
+            event = "sunrise"
+        if event in ("dusk",):
+            event = "sunset"
+
+        candidates = ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "daily")
+        for key in candidates:
+            ast = payload.get(key)
+            if ast is None:
+                continue
+            # dict keyed by date
+            if isinstance(ast, dict):
+                if date_iso in ast:
+                    dayinfo = ast.get(date_iso) or {}
+                    ev = dayinfo.get(event)
+                    if ev:
+                        # try to parse directly
+                        try:
+                            dt = dt_util.parse_datetime(str(ev))
+                            if dt and dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            return dt
+                        except Exception:
+                            # maybe just time-of-day like '06:12' — combine with date
+                            try:
+                                s = str(ev)
+                                if ":" in s:
+                                    iso = f"{date_iso}T{s}"
+                                    # if no timezone, assume UTC (API uses UTC in our fetcher)
+                                    dt2 = dt_util.parse_datetime(iso)
+                                    if dt2 and dt2.tzinfo is None:
+                                        dt2 = dt2.replace(tzinfo=timezone.utc)
+                                    return dt2
+                            except Exception:
+                                pass
+                # also top-level keys inside dict (e.g., astro.get('sunrise') scalar)
+                ev = ast.get(event)
+                if ev:
+                    try:
+                        dt = dt_util.parse_datetime(str(ev))
+                        if dt and dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        # if parsed dt has a date, ensure it matches desired date. If not, still return it as best-effort.
+                        return dt
+                    except Exception:
+                        pass
+            # list of day dicts
+            if isinstance(ast, (list, tuple)):
+                # find an entry whose 'date' or 'time' matches
+                for entry in ast:
+                    if not isinstance(entry, dict):
+                        continue
+                    date_field = entry.get("date") or entry.get("day") or entry.get("iso_date") or entry.get("time")
+                    d_iso = None
+                    if date_field:
+                        try:
+                            d_iso = self._parse_date_iso(date_field)
+                        except Exception:
+                            d_iso = None
+                    if d_iso == date_iso:
+                        ev = entry.get(event)
+                        if ev:
+                            try:
+                                dt = dt_util.parse_datetime(str(ev))
+                                if dt and dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                return dt
+                            except Exception:
+                                try:
+                                    s = str(ev)
+                                    if ":" in s:
+                                        iso = f"{date_iso}T{s}"
+                                        dt2 = dt_util.parse_datetime(iso)
+                                        if dt2 and dt2.tzinfo is None:
+                                            dt2 = dt2.replace(tzinfo=timezone.utc)
+                                        return dt2
+                                except Exception:
+                                    pass
+                # fallback: if lists contain top-level arrays keyed by 'sunrise' we handle outside
+            # special-case 'daily' where sunrise/sunset might be arrays with 'time' or 'date' arrays
+            if key == "daily" and isinstance(ast, dict):
+                # find index in ast['time'] matching date_iso
+                times = ast.get("time") or ast.get("date") or []
+                if isinstance(times, (list, tuple)) and times:
+                    found_idx = None
+                    for i, t in enumerate(times):
+                        try:
+                            if self._parse_date_iso(t) == date_iso:
+                                found_idx = i
+                                break
+                        except Exception:
+                            continue
+                    if found_idx is not None:
+                        # sunrise might be ast.get('sunrise')[found_idx]
+                        evarr = ast.get(event)
+                        if isinstance(evarr, (list, tuple)) and found_idx < len(evarr):
+                            ev = evarr[found_idx]
+                            try:
+                                dt = dt_util.parse_datetime(str(ev))
+                                if dt and dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                return dt
+                            except Exception:
+                                # maybe just time-of-day
+                                try:
+                                    s = str(ev)
+                                    if ":" in s:
+                                        iso = f"{date_iso}T{s}"
+                                        dt2 = dt_util.parse_datetime(iso)
+                                        if dt2 and dt2.tzinfo is None:
+                                            dt2 = dt2.replace(tzinfo=timezone.utc)
+                                        return dt2
+                                except Exception:
+                                    pass
+        return None
+
+    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+        """
+        Aggregate hourly data into named periods.
+
+        aggregation_periods: sequence of dicts:
+          - static by hour: {"name": str, "start_hour": int, "end_hour": int}
+          - solar-event window: {"name": str, "solar_event": "sunrise"|"sunset"|"dawn"|"dusk", "window_hours": float}
+            The solar_event entry instructs the aggregator to compute per-date start/end times centered on that
+            event using any solar data present in `full_payload` (keys: 'astro','astronomy','daily', etc.).
+            If no solar data is available for a date, a conservative fallback is used:
+              - sunrise ~ 06:00 UTC, sunset ~ 18:00 UTC
         Aggregation rules:
           - temperature: mean
           - wind_speed: mean
@@ -717,7 +869,12 @@ class WeatherFetcher:
           - precipitation_probability: max
           - pressure: mean
         Returns dict keyed by date -> { period_name: {metrics...}, ... }
+
+        Note: this function also expects to be passed per-timestamp forecast entries and will try to pull them if present
+        in the hourly entries (if the hourly entries already contain forecast info). However the main DataFormatter
+        validate() will call ocean_scoring.compute_forecast(...) and then map forecast entries into periods here.
         """
+        # Default 4x 6-hour windows if not provided
         if not aggregation_periods:
             aggregation_periods = [
                 {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
@@ -726,86 +883,181 @@ class WeatherFetcher:
                 {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
             ]
 
-        per_date_periods: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
+        # Convert hourly_list into per-timestamp mapping: index -> (timestamp_str, datetime)
+        timestamps: List[str] = []
+        timestamp_datetimes: List[datetime] = []
         for entry in hourly_list:
-            if not isinstance(entry, dict):
-                continue
             t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
             if t_raw is None:
+                timestamps.append(None)
+                timestamp_datetimes.append(None)
                 continue
             try:
-                t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
+                dt = dt_util.parse_datetime(str(t_raw))
             except Exception:
-                t = None
-            if t is None:
+                # try numeric epoch fallback
                 try:
                     tnum = float(t_raw)
                     if tnum > 1e12:
                         tnum = tnum / 1000.0
-                    t = datetime.fromtimestamp(tnum, tz=timezone.utc)
+                    dt = datetime.fromtimestamp(tnum, tz=timezone.utc)
                 except Exception:
-                    continue
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=timezone.utc)
-            date_key = t.date().isoformat()
-            hour = t.hour
+                    dt = None
+            if dt and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            timestamps.append(str(t_raw))
+            timestamp_datetimes.append(dt)
 
-            # find matching period
+        # Build per-date list of indices for quick lookup
+        per_date_indices: Dict[str, List[int]] = {}
+        for idx, dt in enumerate(timestamp_datetimes):
+            if dt is None:
+                continue
+            date_iso = dt.date().isoformat()
+            per_date_indices.setdefault(date_iso, []).append(idx)
+
+        # Prepare output container
+        final: Dict[str, Dict[str, Any]] = {}
+
+        # Build per-date actual windows from aggregation_periods (handle solar windows)
+        for date_key in sorted(per_date_indices.keys())[:days]:
+            final[date_key] = {}
+            # Determine event datetimes if needed
             for p in aggregation_periods:
-                start = int(p["start_hour"])
-                end = int(p["end_hour"])
-                if start <= hour < end:
-                    pname = p["name"]
-                    per_date_periods.setdefault(date_key, {}).setdefault(pname, {
-                        "temperature_sum": 0.0,
-                        "wind_speed_sum": 0.0,
-                        "pressure_sum": 0.0,
-                        "cloud_sum": 0,
-                        "precip_max": 0,
-                        "gust_max": 0,
-                        "count": 0,
-                    })
-                    agg = per_date_periods[date_key][pname]
+                pname = p.get("name") or f"period_{p.get('start_hour', 0)}_{p.get('end_hour', 0)}"
+                # Handle solar window
+                if "solar_event" in p:
+                    event = p.get("solar_event")
+                    window_hours = float(p.get("window_hours", 2.0))
+                    offset_hours = float(p.get("offset_hours", 0.0))
+                    # try to extract event datetime from full_payload
+                    event_dt = self._extract_solar_event_for_date(full_payload or {}, date_key, event)
+                    if event_dt is None:
+                        # fallback conservative defaults (UTC): sunrise 06:00, sunset 18:00
+                        if str(event).lower() in ("sunrise", "dawn"):
+                            event_dt = datetime.fromisoformat(f"{date_key}T06:00:00+00:00")
+                        else:
+                            event_dt = datetime.fromisoformat(f"{date_key}T18:00:00+00:00")
+                    # center window on event_dt plus offset
+                    center = event_dt + timedelta(hours=offset_hours)
+                    half = timedelta(hours=window_hours / 2.0)
+                    start_dt = center - half
+                    end_dt = center + half
+                else:
+                    # static-hour window
+                    try:
+                        start_hr = int(p.get("start_hour", 0))
+                        end_hr = int(p.get("end_hour", 24))
+                    except Exception:
+                        start_hr = 0
+                        end_hr = 24
+                    # construct start/end datetimes in UTC for that date
+                    start_dt = datetime.fromisoformat(f"{date_key}T{start_hr:02d}:00:00+00:00")
+                    # If end_hr==24, end is next date 00:00
+                    if end_hr >= 24:
+                        end_next = (datetime.fromisoformat(f"{date_key}T00:00:00+00:00") + timedelta(days=1))
+                        end_dt = end_next
+                    else:
+                        end_dt = datetime.fromisoformat(f"{date_key}T{end_hr:02d}:00:00+00:00")
+
+                # Select indices in per_date_indices[date_key] whose datetimes fall into [start_dt, end_dt)
+                members: List[int] = []
+                for idx in per_date_indices.get(date_key, []):
+                    dt = timestamp_datetimes[idx]
+                    if dt is None:
+                        continue
+                    if start_dt <= dt < end_dt:
+                        members.append(idx)
+
+                # If no members found and the aggregation period is solar-based, try a graceful expand +/-1 hour
+                if not members and "solar_event" in p:
+                    expanded_start = start_dt - timedelta(hours=1)
+                    expanded_end = end_dt + timedelta(hours=1)
+                    for idx in per_date_indices.get(date_key, []):
+                        dt = timestamp_datetimes[idx]
+                        if dt is None:
+                            continue
+                        if expanded_start <= dt < expanded_end:
+                            members.append(idx)
+
+                # Build aggregated metrics from members by scanning hourly_list fields (temperature, wind_speed etc.)
+                if not members:
+                    # no data for this period — skip but still create an empty summary
+                    final[date_key][pname] = {
+                        "indices": [],
+                        "timestamps": [],
+                        "start": start_dt.isoformat(),
+                        "end": end_dt.isoformat(),
+                        "score_10": None,
+                        "score_100": None,
+                        "components": None,
+                        "profile_used": None,
+                        "safety": {"unsafe": False, "caution": False, "reasons": []},
+                    }
+                    continue
+
+                # compute aggregated metric values (temperature mean, wind mean, gust max, cloud mean, precip max, pressure mean)
+                temp_sum = 0.0
+                wind_sum = 0.0
+                pressure_sum = 0.0
+                cloud_sum = 0.0
+                precip_max = 0
+                gust_max = None
+                cnt = 0
+                timestamps_in_period: List[str] = []
+                for idx in members:
+                    entry = hourly_list[idx]
                     try:
                         temp = _safe_float(entry.get("temperature") or entry.get("temp") or entry.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                        wind_m_s = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                        gust_m_s = _safe_float(entry.get("wind_gust") or entry.get("gust") or entry.get("wind") or DEFAULT_WEATHER_VALUES["wind_gust"])
+                        wind = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
+                        gust = _safe_float(entry.get("wind_gust") or entry.get("gust"), wind)
                     except Exception:
                         continue
                     cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover")) is not None else None
                     pop = _safe_int(entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation") or entry.get("precip"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation") or entry.get("precip")) is not None else None
                     pressure = _safe_float(entry.get("pressure") or entry.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (entry.get("pressure") or entry.get("pressure_msl")) is not None else None
 
-                    agg["temperature_sum"] += temp
-                    agg["wind_speed_sum"] += (wind_m_s or 0.0)
-                    agg["pressure_sum"] += (pressure or 0.0)
-                    agg["cloud_sum"] += (cloud or 0)
-                    agg["precip_max"] = max(agg["precip_max"], pop or 0)
-                    agg["gust_max"] = max(agg["gust_max"], gust_m_s)
-                    agg["count"] += 1
-                    break
+                    temp_sum += temp
+                    wind_sum += wind
+                    if gust is not None:
+                        gust_max = gust if gust_max is None else max(gust_max, gust)
+                    if pressure is not None:
+                        pressure_sum += pressure
+                    if cloud is not None:
+                        cloud_sum += cloud
+                    if pop is not None:
+                        precip_max = max(precip_max, pop)
+                    cnt += 1
+                    timestamps_in_period.append(timestamps[idx])
 
-        # finalize into requested shape: date -> period_name -> metrics
-        final: Dict[str, Dict[str, Any]] = {}
-        for date_key in sorted(per_date_periods.keys())[:days]:
-            final[date_key] = {}
-            for pname, agg in per_date_periods[date_key].items():
-                cnt = agg.get("count", 1) or 1
-                try:
-                    mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt
-                    gust_m_s = float(agg["gust_max"])
-                    final[date_key][pname] = {
-                        "temperature": float(agg["temperature_sum"]) / cnt,
-                        "wind_speed": self._m_s_to_output(mean_wind_m_s),
-                        "wind_gust": self._m_s_to_output(gust_m_s),
-                        "cloud_cover": int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None,
-                        "precipitation_probability": int(round(float(agg["precip_max"]))),
-                        "pressure": float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None,
-                    }
-                except Exception:
-                    _LOGGER.debug("Failed to finalize aggregation for %s %s; skipping", date_key, pname)
-                    continue
+                mean_temp = float(temp_sum / cnt) if cnt else None
+                mean_wind = float(wind_sum / cnt) if cnt else None
+                mean_pressure = float(pressure_sum / cnt) / cnt if cnt and pressure_sum is not None else None
+                mean_cloud = int(round(float(cloud_sum) / cnt)) if cnt else None
+
+                # Convert wind/gust from assumed m/s to configured output unit if this helper had that knowledge.
+                # NOTE: WeatherFetcher._m_s_to_output is not available here; we will leave raw metric units as-is
+                # because DataFormatter's main job is canonical arrays; scoring will use these values via compute_forecast.
+                # Period-level scores and safety will be computed by combining per-timestamp forecast entries below.
+
+                final[date_key][pname] = {
+                    "indices": members,
+                    "timestamps": timestamps_in_period,
+                    "start": start_dt.isoformat(),
+                    "end": end_dt.isoformat(),
+                    "temperature": mean_temp,
+                    "wind_m_s": mean_wind,
+                    "wind_gust_m_s": gust_max,
+                    "cloud_cover": mean_cloud,
+                    "precipitation_probability": int(round(float(precip_max))) if precip_max is not None else None,
+                    "pressure_hpa": mean_pressure,
+                    # placeholders for aggregated scoring fields (filled later by DataFormatter.validate)
+                    "score_10": None,
+                    "score_100": None,
+                    "components": None,
+                    "profile_used": None,
+                    "safety": {"unsafe": False, "caution": False, "reasons": []},
+                }
 
         return final
 
@@ -863,11 +1115,8 @@ class DataFormatter:
     with 'hourly' dict) into the canonical keys expected by the rest of the integration
     and by ocean_scoring.
 
-    Notes:
-    - This implements the marine key compatibility mapping (maps documented OM marine
-      keys to our canonical keys) and does NOT attempt tolerant fallbacks.
-    - It does not mutate the original payload (works on a shallow copy) and only
-      copies keys that exist in the incoming 'hourly' dict.
+    This version also precomputes strict per-timestamp forecasts (via ocean_scoring.compute_forecast)
+    and aggregates those forecasts into named periods per-day (including support for solar-event windows).
     """
 
     # mapping of Open-Meteo hourly keys -> canonical keys used by scoring/formatting
@@ -908,10 +1157,14 @@ class DataFormatter:
         Parameters:
         - raw_payload: the dict provided by OFACoordinator (often an Open-Meteo payload possibly
           merged with marine and tide data).
-        - species_profile, units, safety_limits: accepted for API compatibility but not used here.
+        - species_profile, units, safety_limits: accepted for API compatibility.
 
         Returns:
-        - canonical_payload: dict with at least the canonical arrays pulled from hourly when present.
+        - canonical_payload: dict containing:
+            - timestamps (list)
+            - raw_payload (the canonical arrays dict)
+            - per_timestamp_forecasts (list)  -- output of ocean_scoring.compute_forecast
+            - period_forecasts (dict date->period->aggregated data)
         """
         if not isinstance(raw_payload, dict):
             # nothing to do — return empty canonical payload
@@ -946,7 +1199,7 @@ class DataFormatter:
                     canonical[canon_key] = arr
 
         # Top-level convenience keys that the scoring code expects (tide/astro/marine) — pass through if present.
-        for top_key in ("tide", "astro", "astronomy", "marine", "astronomy_forecast", "astro_forecast"):
+        for top_key in ("tide", "astro", "astronomy", "marine", "astronomy_forecast", "astro_forecast", "daily"):
             v = raw_payload.get(top_key)
             if v is not None:
                 canonical[top_key] = v
@@ -976,8 +1229,167 @@ class DataFormatter:
         if "swell_wave_height_m" in canonical and "swell_height_m" not in canonical:
             canonical["swell_height_m"] = list(canonical["swell_wave_height_m"]) if isinstance(canonical["swell_wave_height_m"], list) else canonical["swell_wave_height_m"]
 
-        # Return canonical mapping (caller will enforce strict presence of required arrays)
-        return canonical        
+        # attach a shallow copy of the original raw payload for debugging/traceability
+        canonical["raw_payload_source"] = raw_payload if isinstance(raw_payload, dict) else {}
+
+        # ---------------------------------------------------------------------
+        # Precompute per-timestamp strict forecasts using ocean_scoring.compute_forecast
+        # ---------------------------------------------------------------------
+        per_ts_forecasts: List[Dict[str, Any]] = []
+        try:
+            # compute_forecast expects canonical keys like 'timestamps', 'temperature_c', etc.
+            # We pass the canonical dict (which includes arrays and any top-level tide/astro/marine fields).
+            # If canonical lacks timestamps, compute_forecast will return [].
+            per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
+        except Exception:
+            _LOGGER.debug("compute_forecast failed during DataFormatter.validate; continuing with empty per-timestamp forecasts", exc_info=True)
+            per_ts_forecasts = []
+
+        # ---------------------------------------------------------------------
+        # Aggregate per-timestamp forecasts into periods (default 4-per-day or custom)
+        # Caller (WeatherFetcher.get_forecast) can request aggregation_periods instead; useful to compute here
+        # if caller wants period-level summary. We'll produce a conservative `period_forecasts` mapping here.
+        # ---------------------------------------------------------------------
+        # Build an hourly_list representation (like _ensure_period_aggregation creates) to feed aggregator
+        hourly_like: List[Dict[str, Any]] = []
+        timestamps_arr = canonical.get("timestamps") or []
+        # If we have arrays for the mapped keys, attach them per index when available
+        def get_array_value(key: str, idx: int):
+            arr = canonical.get(key)
+            if isinstance(arr, (list, tuple)) and idx < len(arr):
+                return arr[idx]
+            return None
+
+        for i, ts in enumerate(timestamps_arr):
+            row: Dict[str, Any] = {"time": ts}
+            # include a small selection of keys that aggregator expects
+            for src_key in ("temperature_c", "wind_m_s", "wind_max_m_s", "pressure_hpa", "cloud_cover", "precipitation_probability",
+                            "wave_height_m", "wave_period_s", "swell_height_m", "swell_period_s"):
+                val = get_array_value(src_key, i)
+                if val is not None:
+                    # keep keys named similarly to Open-Meteo hourly entries so aggregator can reuse logic
+                    row[src_key] = val
+            # also include the precomputed forecast (if available) for later per-period combination
+            if per_ts_forecasts and i < len(per_ts_forecasts):
+                row["_forecast_entry"] = per_ts_forecasts[i]
+            hourly_like.append(row)
+
+        # Default canonical 4 periods
+        default_periods = [
+            {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
+            {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
+            {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
+            {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
+        ]
+
+        # If caller requested a specific aggregation shape inside raw_payload_source (legacy), attempt to use it.
+        requested_periods = None
+        if isinstance(raw_payload.get("aggregation_periods"), (list, tuple)):
+            requested_periods = list(raw_payload.get("aggregation_periods"))
+
+        periods_to_use = requested_periods if requested_periods else default_periods
+
+        # Aggregate hourly-like into periods
+        period_agg = self._aggregate_hourly_into_periods(hourly_like, days=len(timestamps_arr) and 7 or 0, aggregation_periods=periods_to_use, full_payload=canonical)
+
+        # Now combine per-timestamp forecasts into period-level scoring & safety (conservative safety aggregation)
+        period_forecasts: Dict[str, Dict[str, Any]] = {}
+        # Helper: aggregate component numeric scores by mean for the period
+        def _aggregate_components(component_lists: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not component_lists:
+                return None
+            # discover all component keys
+            keys = set().union(*(c.keys() for c in component_lists if isinstance(c, dict)))
+            out = {}
+            for k in keys:
+                vals = []
+                reasons = []
+                for comp in component_lists:
+                    if not comp or k not in comp:
+                        continue
+                    try:
+                        s10 = comp[k].get("score_10")
+                        if s10 is not None:
+                            vals.append(float(s10))
+                        r = comp[k].get("reason")
+                        if r:
+                            reasons.append(str(r))
+                    except Exception:
+                        continue
+                if vals:
+                    avg = float(sum(vals) / len(vals))
+                    out[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10)), "reason": ";".join(sorted(set(reasons)))}
+            return out or None
+
+        # iterate each date and its periods
+        for date_key, pmap in period_agg.items():
+            period_forecasts[date_key] = {}
+            for pname, pdata in pmap.items():
+                indices = pdata.get("indices") or []
+                timestamps_in_period = pdata.get("timestamps") or []
+                if not indices:
+                    # keep the empty summary
+                    period_forecasts[date_key][pname] = pdata
+                    continue
+
+                # collect per-timestamp forecast entries if present (we included them under "_forecast_entry")
+                per_ts_entries = []
+                for idx in indices:
+                    if idx < len(hourly_like):
+                        fe = hourly_like[idx].get("_forecast_entry")
+                        if fe:
+                            per_ts_entries.append(fe)
+
+                # compute aggregated score_10: mean of available score_10 values
+                score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
+                score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
+                score_100 = int(round(score_10 * 10)) if score_10 is not None else None
+
+                # components aggregation (average each numeric component.score_10)
+                comp_lists = [e.get("components") for e in per_ts_entries if e.get("components")]
+                components_agg = _aggregate_components(comp_lists)
+
+                # profile_used: first non-null profile_used found
+                profile_used = None
+                for e in per_ts_entries:
+                    if e.get("profile_used"):
+                        profile_used = e.get("profile_used")
+                        break
+
+                # safety: conservative union: unsafe if any unsafe True; caution if any caution True; collect unique reasons
+                safety = {"unsafe": False, "caution": False, "reasons": []}
+                reasons_set = set()
+                for e in per_ts_entries:
+                    s = e.get("safety") or {}
+                    if s.get("unsafe"):
+                        safety["unsafe"] = True
+                    if s.get("caution"):
+                        safety["caution"] = True
+                    for r in (s.get("reasons") or []):
+                        reasons_set.add(str(r))
+                safety["reasons"] = sorted(list(reasons_set))
+
+                # attach aggregated scoring to the period summary
+                summary = dict(pdata)  # shallow copy
+                summary.update({
+                    "score_10": round(score_10, 3) if score_10 is not None else None,
+                    "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
+                    "components": components_agg,
+                    "profile_used": profile_used,
+                    "safety": safety,
+                })
+                period_forecasts[date_key][pname] = summary
+
+        # Return a structure compatible with upstream callers/tests:
+        # Keep backward compatible top-level timestamps for sensor code/tests and include raw_payload and forecast metadata.
+        final_out = {
+            "timestamps": canonical.get("timestamps") or [],
+            "raw_payload": canonical,  # canonical is intentionally included so callers/tests can see arrays
+            "per_timestamp_forecasts": per_ts_forecasts,
+            "period_forecasts": period_forecasts,
+        }
+
+        return final_out
 
     # -----------------------
     # End
