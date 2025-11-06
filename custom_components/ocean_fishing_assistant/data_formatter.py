@@ -885,7 +885,7 @@ class WeatherFetcher:
 
         # Convert hourly_list into per-timestamp mapping: index -> (timestamp_str, datetime)
         timestamps: List[str] = []
-        timestamp_datetimes: List[datetime] = []
+        timestamp_datetimes: List[Optional[datetime]] = []
         for entry in hourly_list:
             t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
             if t_raw is None:
@@ -1393,4 +1393,3 @@ class DataFormatter:
 
     # -----------------------
     # End
-    # -----------------------
