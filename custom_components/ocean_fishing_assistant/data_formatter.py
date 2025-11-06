@@ -852,29 +852,28 @@ class WeatherFetcher:
 
     def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
         """
-        Aggregate hourly data into named periods.
+        STRICT aggregator: aggregate hourly entries into named periods per-date.
 
-        aggregation_periods: sequence of dicts:
-          - static by hour: {"name": str, "start_hour": int, "end_hour": int}
-          - solar-event window: {"name": str, "solar_event": "sunrise"|"sunset"|"dawn"|"dusk", "window_hours": float}
-            The solar_event entry instructs the aggregator to compute per-date start/end times centered on that
-            event using any solar data present in `full_payload` (keys: 'astro','astronomy','daily', etc.).
-            If no solar data is available for a date, a conservative fallback is used:
-              - sunrise ~ 06:00 UTC, sunset ~ 18:00 UTC
-        Aggregation rules:
-          - temperature: mean
-          - wind_speed: mean
-          - wind_gust: max
-          - cloud_cover: mean (rounded)
-          - precipitation_probability: max
-          - pressure: mean
-        Returns dict keyed by date -> { period_name: {metrics...}, ... }
-
-        Note: this function also expects to be passed per-timestamp forecast entries and will try to pull them if present
-        in the hourly entries (if the hourly entries already contain forecast info). However the main DataFormatter
-        validate() will call ocean_scoring.compute_forecast(...) and then map forecast entries into periods here.
+        - Requires hourly_list to contain dicts with a parsable 'time' (ISO-like).
+        - Requires numeric fields to be present where used; otherwise raises ValueError.
+        - For solar-event windows, requires full_payload to expose per-date solar event datetimes
+          (keys: 'astro','astronomy','daily','astronomy_forecast', or similar). If solar times for a
+          requested date/event are missing the function raises ValueError (no fallback).
+        - Aggregation rules:
+            temperature -> mean
+            wind_m_s -> mean
+            wind_gust_m_s -> max
+            cloud_cover -> mean (rounded)
+            precipitation_probability -> max
+            pressure_hpa -> mean
+        Returns:
+            { date_iso: { period_name: { indices, timestamps, start, end, temperature, wind_m_s, wind_gust_m_s, cloud_cover, precipitation_probability, pressure_hpa, score_10: None, score_100: None, components: None, profile_used: None, safety: {...} } } }
         """
-        # Default 4x 6-hour windows if not provided
+        # Validate input shape
+        if not isinstance(hourly_list, list) or not hourly_list:
+            raise ValueError("hourly_list must be a non-empty list of dicts")
+
+        # Use default 4x6h periods when none provided
         if not aggregation_periods:
             aggregation_periods = [
                 {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
@@ -883,163 +882,185 @@ class WeatherFetcher:
                 {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
             ]
 
-        # Convert hourly_list into per-timestamp mapping: index -> (timestamp_str, datetime)
-        timestamps: List[str] = []
+        # Parse timestamps, keep parallel arrays
+        timestamps: List[Optional[str]] = []
         timestamp_datetimes: List[Optional[datetime]] = []
         for entry in hourly_list:
+            if not isinstance(entry, dict):
+                raise ValueError("each hourly_list element must be a dict")
             t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
             if t_raw is None:
-                timestamps.append(None)
-                timestamp_datetimes.append(None)
-                continue
+                raise ValueError("hourly entry missing required 'time' field: %r" % (entry,))
+            # parse using homeassistant dt helper for robust ISO handling
             try:
                 dt = dt_util.parse_datetime(str(t_raw))
             except Exception:
-                # try numeric epoch fallback
+                # numeric epoch fallback
                 try:
                     tnum = float(t_raw)
                     if tnum > 1e12:
                         tnum = tnum / 1000.0
                     dt = datetime.fromtimestamp(tnum, tz=timezone.utc)
-                except Exception:
-                    dt = None
-            if dt and dt.tzinfo is None:
+                except Exception as exc:
+                    raise ValueError(f"Unable to parse timestamp {t_raw!r}: {exc}") from exc
+            if dt is None:
+                raise ValueError(f"Unable to parse timestamp {t_raw!r}")
+            if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             timestamps.append(str(t_raw))
             timestamp_datetimes.append(dt)
 
-        # Build per-date list of indices for quick lookup
+        # group indices by ISO date in UTC
         per_date_indices: Dict[str, List[int]] = {}
         for idx, dt in enumerate(timestamp_datetimes):
-            if dt is None:
-                continue
             date_iso = dt.date().isoformat()
             per_date_indices.setdefault(date_iso, []).append(idx)
 
-        # Prepare output container
+        # limit to requested days (sorted ascending)
+        sorted_dates = sorted(per_date_indices.keys())
+        if days is not None:
+            sorted_dates = sorted_dates[:int(days)]
+
+        # helper to extract solar event datetime for a date — mirrors DataFormatter._extract_solar_event_for_date
+        def _get_solar_dt_for_date(event: str, date_iso: str) -> datetime:
+            if full_payload is None:
+                raise ValueError(f"Solar event '{event}' requested but full_payload is not provided")
+            ev_dt = self._extract_solar_event_for_date(full_payload, date_iso, event)
+            if ev_dt is None:
+                raise ValueError(f"Solar event '{event}' not found for date {date_iso} in full_payload")
+            return ev_dt
+
         final: Dict[str, Dict[str, Any]] = {}
 
-        # Build per-date actual windows from aggregation_periods (handle solar windows)
-        for date_key in sorted(per_date_indices.keys())[:days]:
+        for date_key in sorted_dates:
+            indices_for_date = per_date_indices.get(date_key, [])
+            if not indices_for_date:
+                continue
             final[date_key] = {}
-            # Determine event datetimes if needed
+
+            # prepare mapping from indices -> entry for quick access
+            # we will use these to collect values for members
             for p in aggregation_periods:
                 pname = p.get("name") or f"period_{p.get('start_hour', 0)}_{p.get('end_hour', 0)}"
-                # Handle solar window
+                # Determine start_dt/end_dt
                 if "solar_event" in p:
                     event = p.get("solar_event")
                     window_hours = float(p.get("window_hours", 2.0))
                     offset_hours = float(p.get("offset_hours", 0.0))
-                    # try to extract event datetime from full_payload
-                    event_dt = self._extract_solar_event_for_date(full_payload or {}, date_key, event)
-                    if event_dt is None:
-                        # fallback conservative defaults (UTC): sunrise 06:00, sunset 18:00
-                        if str(event).lower() in ("sunrise", "dawn"):
-                            event_dt = datetime.fromisoformat(f"{date_key}T06:00:00+00:00")
-                        else:
-                            event_dt = datetime.fromisoformat(f"{date_key}T18:00:00+00:00")
-                    # center window on event_dt plus offset
+                    event_dt = _get_solar_dt_for_date(event, date_key)  # may raise if missing
                     center = event_dt + timedelta(hours=offset_hours)
                     half = timedelta(hours=window_hours / 2.0)
                     start_dt = center - half
                     end_dt = center + half
                 else:
-                    # static-hour window
-                    try:
-                        start_hr = int(p.get("start_hour", 0))
-                        end_hr = int(p.get("end_hour", 24))
-                    except Exception:
-                        start_hr = 0
-                        end_hr = 24
-                    # construct start/end datetimes in UTC for that date
+                    if "start_hour" not in p or "end_hour" not in p:
+                        raise ValueError(f"aggregation_period entry {p!r} must include start_hour and end_hour when not solar-based")
+                    start_hr = int(p.get("start_hour"))
+                    end_hr = int(p.get("end_hour"))
+                    # construct datetimes in UTC
                     start_dt = datetime.fromisoformat(f"{date_key}T{start_hr:02d}:00:00+00:00")
-                    # If end_hr==24, end is next date 00:00
                     if end_hr >= 24:
-                        end_next = (datetime.fromisoformat(f"{date_key}T00:00:00+00:00") + timedelta(days=1))
-                        end_dt = end_next
+                        # next date midnight
+                        end_dt = (datetime.fromisoformat(f"{date_key}T00:00:00+00:00") + timedelta(days=1))
                     else:
                         end_dt = datetime.fromisoformat(f"{date_key}T{end_hr:02d}:00:00+00:00")
 
-                # Select indices in per_date_indices[date_key] whose datetimes fall into [start_dt, end_dt)
+                # Collect members whose timestamp dt falls within [start_dt, end_dt)
                 members: List[int] = []
-                for idx in per_date_indices.get(date_key, []):
+                timestamps_in_period: List[str] = []
+                for idx in indices_for_date:
                     dt = timestamp_datetimes[idx]
                     if dt is None:
                         continue
                     if start_dt <= dt < end_dt:
                         members.append(idx)
+                        timestamps_in_period.append(timestamps[idx])
 
-                # If no members found and the aggregation period is solar-based, try a graceful expand +/-1 hour
-                if not members and "solar_event" in p:
-                    expanded_start = start_dt - timedelta(hours=1)
-                    expanded_end = end_dt + timedelta(hours=1)
-                    for idx in per_date_indices.get(date_key, []):
-                        dt = timestamp_datetimes[idx]
-                        if dt is None:
-                            continue
-                        if expanded_start <= dt < expanded_end:
-                            members.append(idx)
-
-                # Build aggregated metrics from members by scanning hourly_list fields (temperature, wind_speed etc.)
                 if not members:
-                    # no data for this period — skip but still create an empty summary
-                    final[date_key][pname] = {
-                        "indices": [],
-                        "timestamps": [],
-                        "start": start_dt.isoformat(),
-                        "end": end_dt.isoformat(),
-                        "score_10": None,
-                        "score_100": None,
-                        "components": None,
-                        "profile_used": None,
-                        "safety": {"unsafe": False, "caution": False, "reasons": []},
-                    }
-                    continue
+                    # In strict mode, missing members is an error — report specifically so caller can fix upstream fetch
+                    raise ValueError(f"No hourly members found for period '{pname}' on date {date_key} (window {start_dt.isoformat()} - {end_dt.isoformat()})")
 
-                # compute aggregated metric values (temperature mean, wind mean, gust max, cloud mean, precip max, pressure mean)
-                temp_sum = 0.0
-                wind_sum = 0.0
-                pressure_sum = 0.0
-                cloud_sum = 0.0
-                precip_max = 0
-                gust_max = None
-                cnt = 0
-                timestamps_in_period: List[str] = []
+                # Aggregate metrics: strict — require presence of numeric values for at least one of the canonical keys
+                temp_vals: List[float] = []
+                wind_vals: List[float] = []
+                gust_vals: List[float] = []
+                cloud_vals: List[int] = []
+                pop_vals: List[int] = []
+                pressure_vals: List[float] = []
+
                 for idx in members:
                     entry = hourly_list[idx]
-                    try:
-                        temp = _safe_float(entry.get("temperature") or entry.get("temp") or entry.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                        wind = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])
-                        gust = _safe_float(entry.get("wind_gust") or entry.get("gust"), wind)
-                    except Exception:
-                        continue
-                    cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover")) is not None else None
-                    pop = _safe_int(entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation") or entry.get("precip"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation") or entry.get("precip")) is not None else None
-                    pressure = _safe_float(entry.get("pressure") or entry.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (entry.get("pressure") or entry.get("pressure_msl")) is not None else None
+                    # Temperature
+                    if "temperature" in entry or "temperature_2m" in entry or "temp" in entry or "temperature_c" in entry:
+                        # prefer canonical names if present
+                        t = entry.get("temperature") if "temperature" in entry else entry.get("temperature_2m") if "temperature_2m" in entry else entry.get("temperature_c") if "temperature_c" in entry else entry.get("temp")
+                        if t is None:
+                            raise ValueError(f"Missing temperature value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
+                        temp_vals.append(float(t))
+                    else:
+                        raise ValueError(f"Temperature key missing in hourly entries; strict aggregator requires temperature for period aggregation")
 
-                    temp_sum += temp
-                    wind_sum += wind
-                    if gust is not None:
-                        gust_max = gust if gust_max is None else max(gust_max, gust)
-                    if pressure is not None:
-                        pressure_sum += pressure
-                    if cloud is not None:
-                        cloud_sum += cloud
-                    if pop is not None:
-                        precip_max = max(precip_max, pop)
-                    cnt += 1
-                    timestamps_in_period.append(timestamps[idx])
+                    # Wind (assume m/s canonical naming: wind_m_s or wind_speed or wind_speed_10m)
+                    w = None
+                    for key in ("wind_m_s", "wind_speed", "wind_speed_10m", "wind"):
+                        if key in entry:
+                            w = entry.get(key)
+                            break
+                    if w is None:
+                        raise ValueError(f"Missing wind value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
+                    wind_vals.append(float(w))
 
-                mean_temp = float(temp_sum / cnt) if cnt else None
-                mean_wind = float(wind_sum / cnt) if cnt else None
-                mean_pressure = float(pressure_sum / cnt) / cnt if cnt and pressure_sum is not None else None
-                mean_cloud = int(round(float(cloud_sum) / cnt)) if cnt else None
+                    # Gust (optional but preferred)
+                    g = None
+                    for key in ("wind_gust_m_s", "wind_gust", "wind_max_m_s", "windgusts_10m", "gust"):
+                        if key in entry:
+                            g = entry.get(key)
+                            break
+                    if g is None:
+                        # in strict mode we still allow missing gusts but will raise if later logic requires them
+                        pass
+                    else:
+                        gust_vals.append(float(g))
 
-                # Convert wind/gust from assumed m/s to configured output unit if this helper had that knowledge.
-                # NOTE: WeatherFetcher._m_s_to_output is not available here; we will leave raw metric units as-is
-                # because DataFormatter's main job is canonical arrays; scoring will use these values via compute_forecast.
-                # Period-level scores and safety will be computed by combining per-timestamp forecast entries below.
+                    # Cloud
+                    if any(k in entry for k in ("cloud_cover", "cloudcover", "clouds")):
+                        c = entry.get("cloud_cover") if "cloud_cover" in entry else entry.get("cloudcover") if "cloudcover" in entry else entry.get("clouds")
+                        if c is None:
+                            raise ValueError(f"Missing cloud_cover value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
+                        cloud_vals.append(int(c))
 
+                    # Precipitation probability
+                    if any(k in entry for k in ("precipitation_probability", "pop", "precip")):
+                        p = entry.get("precipitation_probability") if "precipitation_probability" in entry else entry.get("pop") if "pop" in entry else entry.get("precip")
+                        if p is None:
+                            raise ValueError(f"Missing precipitation_probability value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
+                        pop_vals.append(int(p))
+
+                    # Pressure (pressure_hpa or pressure_msl)
+                    pr = None
+                    for key in ("pressure_hpa", "pressure_msl", "pressure"):
+                        if key in entry:
+                            pr = entry.get(key)
+                            break
+                    if pr is None:
+                        raise ValueError(f"Missing pressure value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
+                    pressure_vals.append(float(pr))
+
+                # Compute aggregates (strict means we have at least one value in each list above)
+                if not temp_vals:
+                    raise ValueError(f"No temperature values collected for period '{pname}' on {date_key}")
+                mean_temp = float(sum(temp_vals) / len(temp_vals))
+
+                if not wind_vals:
+                    raise ValueError(f"No wind values collected for period '{pname}' on {date_key}")
+                mean_wind = float(sum(wind_vals) / len(wind_vals))
+
+                gust_max = float(max(gust_vals)) if gust_vals else None
+                mean_pressure = float(sum(pressure_vals) / len(pressure_vals)) if pressure_vals else None
+                mean_cloud = int(round(float(sum(cloud_vals) / len(cloud_vals)))) if cloud_vals else None
+                precip_max = int(max(pop_vals)) if pop_vals else None
+
+                # Build the period summary. Keep naming consistent with downstream scoring expectations:
                 final[date_key][pname] = {
                     "indices": members,
                     "timestamps": timestamps_in_period,
@@ -1049,9 +1070,8 @@ class WeatherFetcher:
                     "wind_m_s": mean_wind,
                     "wind_gust_m_s": gust_max,
                     "cloud_cover": mean_cloud,
-                    "precipitation_probability": int(round(float(precip_max))) if precip_max is not None else None,
+                    "precipitation_probability": precip_max,
                     "pressure_hpa": mean_pressure,
-                    # placeholders for aggregated scoring fields (filled later by DataFormatter.validate)
                     "score_10": None,
                     "score_100": None,
                     "components": None,
