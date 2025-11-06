@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import aiohttp
 
@@ -128,7 +128,7 @@ class WeatherFetcher:
             # if hint says m/s:
             if u in ("m/s", "mps", "m s-1"):
                 return v
-        # default: assume m/s (Open-Meteo default)
+        # default: assume m/s (Open-Meteo sometimes uses m/s)
         return v
 
     def _m_s_to_output(self, v: Optional[float]) -> Optional[float]:
@@ -173,7 +173,12 @@ class WeatherFetcher:
         # Normalize: prefer explicit current_weather block if present
         mapped = None
         if isinstance(result, dict) and "current_weather" in result and isinstance(result["current_weather"], dict):
-            mapped = self._map_to_current_shape(result["current_weather"])
+            # determine unit hint from result (current_weather_units or hourly_units)
+            units_container = result.get("current_weather_units") or result.get("hourly_units") or {}
+            wind_unit_hint = None
+            if isinstance(units_container, dict):
+                wind_unit_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
+            mapped = self._map_to_current_shape(result["current_weather"], incoming_unit_hint=wind_unit_hint)
         else:
             mapped = self._extract_current_from_rest_result(result)
 
@@ -233,7 +238,12 @@ class WeatherFetcher:
                         candidate[k] = arr[idx]
                     else:
                         candidate[k] = None
-                return self._map_to_current_shape(candidate)
+                # pass hourly_units if available
+                units_container = rest_result.get("hourly_units") or {}
+                wind_unit_hint = None
+                if isinstance(units_container, dict):
+                    wind_unit_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
+                return self._map_to_current_shape(candidate, incoming_unit_hint=wind_unit_hint)
             # If dict keyed by date or direct mapping, try mapping directly
             if isinstance(rest_result, dict):
                 return self._map_to_current_shape(rest_result)
@@ -266,10 +276,11 @@ class WeatherFetcher:
             _LOGGER.exception("Error extracting current from REST result")
             return None
 
-    def _map_to_current_shape(self, v: Any) -> Optional[Dict[str, Any]]:
+    def _map_to_current_shape(self, v: Any, incoming_unit_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Normalize various shapes into expected current-weather dict.
 
         Returned wind values are normalized to the configured output unit.
+        incoming_unit_hint: optional unit string to interpret the incoming wind values (e.g. "km/h", "m/s", "mph").
         """
         if isinstance(v, dict):
             d = v
@@ -305,15 +316,17 @@ class WeatherFetcher:
             _LOGGER.debug("Mapping produced no temperature or wind (temp=%s wind=%s); returning None", temp_raw, wind_raw)
             return None
 
-        # unit hint if present
-        wind_unit_hint = pick("wind_unit", "wind_speed_unit", None)
+        # unit hint if present on object/dict itself
+        wind_unit_hint_local = pick("wind_unit", "wind_speed_unit", None)
+        if incoming_unit_hint and not wind_unit_hint_local:
+            wind_unit_hint_local = incoming_unit_hint
 
         try:
             temp_f = _safe_float(temp_raw, DEFAULT_WEATHER_VALUES["temperature"])
 
             # Interpret incoming wind into m/s, then convert to configured output
-            wind_m_s = self._incoming_wind_to_m_s(wind_raw, wind_unit_hint)
-            wind_gust_m_s = self._incoming_wind_to_m_s(wind_gust_raw, wind_unit_hint) if wind_gust_raw is not None else wind_m_s
+            wind_m_s = self._incoming_wind_to_m_s(wind_raw, wind_unit_hint_local)
+            wind_gust_m_s = self._incoming_wind_to_m_s(wind_gust_raw, wind_unit_hint_local) if wind_gust_raw is not None else wind_m_s
 
             wind_out = self._m_s_to_output(wind_m_s) if wind_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_speed"], DEFAULT_WEATHER_VALUES["wind_speed"])
             wind_gust_out = self._m_s_to_output(wind_gust_m_s) if wind_gust_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_gust"], DEFAULT_WEATHER_VALUES["wind_gust"])
@@ -651,7 +664,7 @@ class WeatherFetcher:
         This helper now also supports aggregation_periods entries that declare a solar event:
             {"name":"dawn","solar_event":"sunrise","window_hours":2.0}
         When a solar_event is present we try to extract per-date event times from the
-        incoming payload (keys: 'astro','astronomy','astronomy_forecast','astro_forecast' or 'daily')
+        incoming payload (keys: 'astro','astronomy','astro_forecast' or 'daily')
         and produce per-date windows centered on those events.
         """
         # If already date keyed with metrics, truncate and return
@@ -660,8 +673,6 @@ class WeatherFetcher:
             out: Dict[str, Dict[str, Any]] = {}
             for k, v in list(data.items())[:days]:
                 if isinstance(v, dict) and v.get("wind_speed") is not None:
-                    # assume v["wind_speed"] is in m/s if it looks small (< 50) or no unit provided
-                    # We conservatively assume incoming daily summaries are already in m/s and convert
                     try:
                         wind_m_s = float(v.get("wind_speed"))
                         gust_m_s = float(v.get("wind_gust")) if v.get("wind_gust") is not None else None
@@ -762,7 +773,6 @@ class WeatherFetcher:
                                 s = str(ev)
                                 if ":" in s:
                                     iso = f"{date_iso}T{s}"
-                                    # if no timezone, assume UTC (API uses UTC in our fetcher)
                                     dt2 = dt_util.parse_datetime(iso)
                                     if dt2 and dt2.tzinfo is None:
                                         dt2 = dt2.replace(tzinfo=timezone.utc)
@@ -776,7 +786,6 @@ class WeatherFetcher:
                         dt = dt_util.parse_datetime(str(ev))
                         if dt and dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
-                        # if parsed dt has a date, ensure it matches desired date. If not, still return it as best-effort.
                         return dt
                     except Exception:
                         pass
@@ -1129,6 +1138,7 @@ class WeatherFetcher:
             _LOGGER.debug("Direct Marine API fetch failed for %s,%s", self.latitude, self.longitude, exc_info=True)
             return None
 
+
 class DataFormatter:
     """
     Minimal DataFormatter that converts an Open‑Meteo-like payload (or a merged payload
@@ -1195,6 +1205,13 @@ class DataFormatter:
         # If there is an 'hourly' dict, prefer that as the source of per-timestamp arrays.
         hourly = raw_payload.get("hourly") if isinstance(raw_payload.get("hourly"), dict) else None
 
+        # Prepare hourly_units map if present (top-level hourly_units or hourly.get("units"))
+        hourly_units_map = {}
+        if isinstance(raw_payload.get("hourly_units"), dict):
+            hourly_units_map = raw_payload.get("hourly_units")
+        elif isinstance(hourly, dict) and isinstance(hourly.get("units"), dict):
+            hourly_units_map = hourly.get("units")
+
         # If there is a top-level 'timestamps' or 'time' at top-level, allow pass-through too.
         if hourly:
             # Map known hourly keys to canonical names when present.
@@ -1202,7 +1219,49 @@ class DataFormatter:
                 if om_key in hourly:
                     arr = self._copy_if_list(hourly, om_key)
                     if arr is not None:
-                        canonical[canon_key] = arr
+                        # Convert wind arrays if unit hint indicates km/h or mph
+                        if om_key in ("wind_speed_10m", "windgusts_10m"):
+                            # determine unit hint for this hourly key
+                            unit_hint = None
+                            try:
+                                unit_hint = hourly_units_map.get(om_key) if isinstance(hourly_units_map, dict) else None
+                            except Exception:
+                                unit_hint = None
+                            # fall back to common names if hourly_units_map uses alternate key names
+                            if unit_hint is None:
+                                unit_hint = hourly_units_map.get("wind_speed_10m") if isinstance(hourly_units_map, dict) else None
+                                if unit_hint is None:
+                                    unit_hint = hourly_units_map.get("windspeed") if isinstance(hourly_units_map, dict) else None
+
+                            converted = []
+                            for v in arr:
+                                if v is None:
+                                    converted.append(None)
+                                    continue
+                                # if hint present, use it; else assume km/h if value seems large (> 30) else assume m/s
+                                try:
+                                    if isinstance(unit_hint, str) and unit_hint.strip().lower() in ("km/h", "kph", "kmh"):
+                                        converted.append(unit_helpers.kmh_to_m_s(v))
+                                    elif isinstance(unit_hint, str) and unit_hint.strip().lower() in ("mph", "mi/h", "miles/h"):
+                                        converted.append(unit_helpers.mph_to_m_s(v))
+                                    elif isinstance(unit_hint, str) and unit_hint.strip().lower() in ("m/s", "mps", "m s-1"):
+                                        converted.append(float(v))
+                                    else:
+                                        # conservative approach: if numeric value greater than 30, treat it as km/h and convert;
+                                        # otherwise assume it's already m/s.
+                                        try:
+                                            fv = float(v)
+                                            if fv > 30.0:
+                                                converted.append(unit_helpers.kmh_to_m_s(fv))
+                                            else:
+                                                converted.append(float(fv))
+                                        except Exception:
+                                            raise ValueError(f"Unable to coerce wind value {v!r}")
+                                except Exception as exc:
+                                    raise ValueError(f"Failed to convert wind array values for key {om_key}: {exc}") from exc
+                            canonical[canon_key] = converted
+                        else:
+                            canonical[canon_key] = arr
 
             # Ensure we set 'timestamps' -> prefer hourly['time']
             if "timestamps" not in canonical and "time" in hourly:
@@ -1216,7 +1275,34 @@ class DataFormatter:
             if canon_key not in canonical and om_key in raw_payload:
                 arr = self._copy_if_list(raw_payload, om_key)
                 if arr is not None:
-                    canonical[canon_key] = arr
+                    # apply same wind conversion logic if top-level keys are present
+                    if om_key in ("wind_speed_10m", "windgusts_10m"):
+                        unit_hint = None
+                        if isinstance(raw_payload.get("hourly_units"), dict):
+                            unit_hint = raw_payload.get("hourly_units").get(om_key)
+                        converted = []
+                        for v in arr:
+                            if v is None:
+                                converted.append(None)
+                                continue
+                            try:
+                                if unit_hint and str(unit_hint).strip().lower() in ("km/h", "kph", "kmh"):
+                                    converted.append(unit_helpers.kmh_to_m_s(v))
+                                elif unit_hint and str(unit_hint).strip().lower() in ("mph", "mi/h", "miles/h"):
+                                    converted.append(unit_helpers.mph_to_m_s(v))
+                                elif unit_hint and str(unit_hint).strip().lower() in ("m/s", "mps", "m s-1"):
+                                    converted.append(float(v))
+                                else:
+                                    fv = float(v)
+                                    if fv > 30.0:
+                                        converted.append(unit_helpers.kmh_to_m_s(fv))
+                                    else:
+                                        converted.append(float(fv))
+                            except Exception as exc:
+                                raise ValueError(f"Failed to convert wind array values for key {om_key}: {exc}") from exc
+                        canonical[canon_key] = converted
+                    else:
+                        canonical[canon_key] = arr
 
         # Top-level convenience keys that the scoring code expects (tide/astro/marine) — pass through if present.
         for top_key in ("tide", "astro", "astronomy", "marine", "astronomy_forecast", "astro_forecast", "daily"):
@@ -1257,19 +1343,13 @@ class DataFormatter:
         # ---------------------------------------------------------------------
         per_ts_forecasts: List[Dict[str, Any]] = []
 
-        # Guard: skip compute_forecast when we don't have timestamps or we don't have any of the core inputs.
         timestamps_here = canonical.get("timestamps") or []
         # treat presence of at least one of these keys as sufficient reason to attempt scoring
         required_any = any(k in canonical for k in ("temperature_c", "wind_m_s", "pressure_hpa", "wave_height_m"))
 
         if timestamps_here and required_any:
-            try:
-                # compute_forecast expects canonical keys like 'timestamps', 'temperature_c', etc.
-                # We pass the canonical dict (which includes arrays and any top-level tide/astro/marine fields).
-                per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
-            except Exception:
-                _LOGGER.debug("compute_forecast failed during DataFormatter.validate; continuing with empty per-timestamp forecasts", exc_info=True)
-                per_ts_forecasts = []
+            # Strict mode: do not swallow compute_forecast exceptions — let them surface to caller
+            per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
         else:
             _LOGGER.debug(
                 "Skipping compute_forecast: insufficient meteorological inputs (timestamps=%s, keys_present=%s)",
@@ -1280,8 +1360,6 @@ class DataFormatter:
 
         # ---------------------------------------------------------------------
         # Aggregate per-timestamp forecasts into periods (default 4-per-day or custom)
-        # Caller (WeatherFetcher.get_forecast) can request aggregation_periods instead; useful to compute here
-        # if caller wants period-level summary. We'll produce a conservative `period_forecasts` mapping here.
         # ---------------------------------------------------------------------
         # Build an hourly_list representation (like _ensure_period_aggregation creates) to feed aggregator
         hourly_like: List[Dict[str, Any]] = []
@@ -1418,10 +1496,12 @@ class DataFormatter:
                 period_forecasts[date_key][pname] = summary
 
         # Return a structure compatible with upstream callers/tests:
-        # Keep backward compatible top-level timestamps for sensor code/tests and include raw_payload and forecast metadata.
+        # Expose canonical arrays at top level (strict mode) and include raw_payload for traceability.
+        top_level_canonical = {k: v for k, v in canonical.items() if k != "raw_payload_source"}
         final_out = {
             "timestamps": canonical.get("timestamps") or [],
-            "raw_payload": canonical,  # canonical is intentionally included so callers/tests can see arrays
+            **top_level_canonical,  # expose canonical arrays like temperature_c, wind_m_s, etc.
+            "raw_payload": canonical,  # keep canonical snapshot under raw_payload for backward inspection
             "per_timestamp_forecasts": per_ts_forecasts,
             "period_forecasts": period_forecasts,
         }

@@ -4,7 +4,6 @@ Features:
 - Calls Open-Meteo REST endpoints (OM_BASE) directly for current & forecast.
 - Uses the Open-Meteo Marine endpoint (OM_MARINE_BASE) for marine/wave fields.
 - Global caching (shared across instances) for current & forecast.
-- Robust normalization for many shapes (dicts, lists, objects).
 - Unit coercion via unit_helpers (canonical m/s internal, output in km/h/mph/m/s).
 - Forecast aggregation into flexible "periods" (default: 4 equal periods per day) or custom periods.
 - Strict failure semantics: fails loudly when current/forecast critical fields are missing.
@@ -22,6 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import OM_BASE, OM_MARINE_BASE
 from . import unit_helpers
+from . import ocean_scoring
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,7 +172,12 @@ class WeatherFetcher:
         # Normalize: prefer explicit current_weather block if present
         mapped = None
         if isinstance(result, dict) and "current_weather" in result and isinstance(result["current_weather"], dict):
-            mapped = self._map_to_current_shape(result["current_weather"])
+            # determine unit hint from result (current_weather_units or hourly_units)
+            units_container = result.get("current_weather_units") or result.get("hourly_units") or {}
+            wind_unit_hint = None
+            if isinstance(units_container, dict):
+                wind_unit_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
+            mapped = self._map_to_current_shape(result["current_weather"], incoming_unit_hint=wind_unit_hint)
         else:
             mapped = self._extract_current_from_rest_result(result)
 
@@ -232,7 +237,12 @@ class WeatherFetcher:
                         candidate[k] = arr[idx]
                     else:
                         candidate[k] = None
-                return self._map_to_current_shape(candidate)
+                # pass hourly_units if available
+                units_container = rest_result.get("hourly_units") or {}
+                wind_unit_hint = None
+                if isinstance(units_container, dict):
+                    wind_unit_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
+                return self._map_to_current_shape(candidate, incoming_unit_hint=wind_unit_hint)
             # If dict keyed by date or direct mapping, try mapping directly
             if isinstance(rest_result, dict):
                 return self._map_to_current_shape(rest_result)
@@ -265,10 +275,11 @@ class WeatherFetcher:
             _LOGGER.exception("Error extracting current from REST result")
             return None
 
-    def _map_to_current_shape(self, v: Any) -> Optional[Dict[str, Any]]:
+    def _map_to_current_shape(self, v: Any, incoming_unit_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Normalize various shapes into expected current-weather dict.
 
         Returned wind values are normalized to the configured output unit.
+        incoming_unit_hint: optional unit string to interpret the incoming wind values (e.g. "km/h", "m/s", "mph").
         """
         if isinstance(v, dict):
             d = v
@@ -304,15 +315,17 @@ class WeatherFetcher:
             _LOGGER.debug("Mapping produced no temperature or wind (temp=%s wind=%s); returning None", temp_raw, wind_raw)
             return None
 
-        # unit hint if present
-        wind_unit_hint = pick("wind_unit", "wind_speed_unit", None)
+        # unit hint if present on object/dict itself
+        wind_unit_hint_local = pick("wind_unit", "wind_speed_unit", None)
+        if incoming_unit_hint and not wind_unit_hint_local:
+            wind_unit_hint_local = incoming_unit_hint
 
         try:
             temp_f = _safe_float(temp_raw, DEFAULT_WEATHER_VALUES["temperature"])
 
             # Interpret incoming wind into m/s, then convert to configured output
-            wind_m_s = self._incoming_wind_to_m_s(wind_raw, wind_unit_hint)
-            wind_gust_m_s = self._incoming_wind_to_m_s(wind_gust_raw, wind_unit_hint) if wind_gust_raw is not None else wind_m_s
+            wind_m_s = self._incoming_wind_to_m_s(wind_raw, wind_unit_hint_local)
+            wind_gust_m_s = self._incoming_wind_to_m_s(wind_gust_raw, wind_unit_hint_local) if wind_gust_raw is not None else wind_m_s
 
             wind_out = self._m_s_to_output(wind_m_s) if wind_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_speed"], DEFAULT_WEATHER_VALUES["wind_speed"])
             wind_gust_out = self._m_s_to_output(wind_gust_m_s) if wind_gust_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_gust"], DEFAULT_WEATHER_VALUES["wind_gust"])

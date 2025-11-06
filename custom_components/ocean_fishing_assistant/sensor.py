@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -20,51 +20,41 @@ class OFASensor(CoordinatorEntity):
     def _get_current_forecast(self) -> Optional[Dict[str, Any]]:
         """Return the precomputed forecast dict for index 0 if available, otherwise None."""
         data = self.coordinator.data or {}
-        forecasts = data.get("forecasts") or []
+        forecasts = data.get("per_timestamp_forecasts") or []
         if isinstance(forecasts, (list, tuple)) and len(forecasts) > 0:
             return forecasts[0]
         return None
 
     @property
     def state(self) -> Optional[int]:
-        """Return state as integer 0..100 or None."""
+        """Return state as integer 0..100 or raise on strict failures."""
         if not self.coordinator.data:
-            return None
+            # Strict: fail loudly when no coordinator data present
+            raise RuntimeError("Coordinator data missing for OFA sensor")
 
         # Prefer precomputed forecast (from DataFormatter)
         forecast = self._get_current_forecast()
         if forecast:
             sc = forecast.get("score_100")
-            return int(sc) if sc is not None else None
+            if sc is None:
+                # Strict: precomputed forecast exists but score missing -> surface error
+                raise RuntimeError("Precomputed forecast present but score_100 is missing for index 0")
+            return int(sc)
 
-        # Fallback: compute from raw payload (index 0)
-        try:
-            # Defer heavy import to runtime to avoid import-time failures / blocking
-            from .ocean_scoring import compute_score, MissingDataError
-
-            result = compute_score(
-                self.coordinator.data,
-                species_profile=getattr(self.coordinator, "species", None),
-                use_index=0,
-                safety_limits=getattr(self.coordinator, "safety_limits", None),
-            )
-            return int(result["score_100"])
-        except MissingDataError:
-            return None
-        except Exception:
-            return None
+        # Strict: do not attempt silent fallbacks. Require precomputed forecasts.
+        raise RuntimeError("No precomputed per_timestamp_forecasts found in coordinator.data")
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
-        """Expose the precomputed forecasts and helpful raw data for debugging/automation."""
+        """Expose the precomputed forecasts and helpful raw data for debugging/automation. Fail loudly if missing expected data."""
         if not self.coordinator.data:
             return {}
 
         attrs: Dict[str, Any] = {}
-        # Expose the full forecasts list (index-aware, 5-day hourly)
-        forecasts = self.coordinator.data.get("forecasts")
+        # Expose the full per_timestamp_forecasts list (index-aware, hourly)
+        forecasts = self.coordinator.data.get("per_timestamp_forecasts")
         if forecasts is not None:
-            attrs["forecasts"] = forecasts
+            attrs["per_timestamp_forecasts"] = forecasts
 
         # Also expose the current forecast (duplicate for convenience)
         current = self._get_current_forecast()

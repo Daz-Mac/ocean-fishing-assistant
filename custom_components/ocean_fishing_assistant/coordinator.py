@@ -1,4 +1,4 @@
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 import async_timeout
 import logging
 import time
@@ -6,6 +6,7 @@ from typing import Optional
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN
 from .tide_proxy import TideProxy
@@ -88,15 +89,21 @@ class OFACoordinator(DataUpdateCoordinator):
                         ref_time = raw_hourly.get("time") or []
                         ref_len = len(ref_time) if isinstance(ref_time, list) else None
                         marine_time = marine_hourly.get("time") or []
-                        # helper to parse ISO timestamps to epoch seconds
+                        # helper to parse ISO timestamps to epoch seconds using HA dt helper and UTC
                         def _iso_to_ts(s):
                             try:
                                 if s is None:
                                     return None
-                                ss = str(s)
-                                if ss.endswith("Z"):
-                                    ss = ss[:-1] + "+00:00"
-                                return datetime.fromisoformat(ss).timestamp()
+                                dt = dt_util.parse_datetime(str(s))
+                                if dt is None:
+                                    # fallback numeric epoch
+                                    tnum = float(s)
+                                    if tnum > 1e12:
+                                        tnum = tnum / 1000.0
+                                    dt = datetime.fromtimestamp(tnum, tz=timezone.utc)
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                return dt.timestamp()
                             except Exception:
                                 return None
                         # pre-parse marine timestamps if available
@@ -179,6 +186,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("Failed to get current snapshot from fetcher", exc_info=True)
 
             # IMPORTANT: pass per-entry species, units and safety_limits into the formatter
+            # NOTE: DataFormatter.validate is strict and will raise on critical failures to surface issues
             data = self.formatter.validate(
                 raw,
                 species_profile=self.species,
