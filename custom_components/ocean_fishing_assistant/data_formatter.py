@@ -841,7 +841,7 @@ class WeatherFetcher:
                                 try:
                                     s = str(ev)
                                     if ":" in s:
-                                        iso = f"{date_iso}T{s}"
+                                        iso = f"{date_key}T{s}"
                                         dt2 = dt_util.parse_datetime(iso)
                                         if dt2 and dt2.tzinfo is None:
                                             dt2 = dt2.replace(tzinfo=timezone.utc)
@@ -1236,13 +1236,26 @@ class DataFormatter:
         # Precompute per-timestamp strict forecasts using ocean_scoring.compute_forecast
         # ---------------------------------------------------------------------
         per_ts_forecasts: List[Dict[str, Any]] = []
-        try:
-            # compute_forecast expects canonical keys like 'timestamps', 'temperature_c', etc.
-            # We pass the canonical dict (which includes arrays and any top-level tide/astro/marine fields).
-            # If canonical lacks timestamps, compute_forecast will return [].
-            per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
-        except Exception:
-            _LOGGER.debug("compute_forecast failed during DataFormatter.validate; continuing with empty per-timestamp forecasts", exc_info=True)
+
+        # Guard: skip compute_forecast when we don't have timestamps or we don't have any of the core inputs.
+        timestamps_here = canonical.get("timestamps") or []
+        # treat presence of at least one of these keys as sufficient reason to attempt scoring
+        required_any = any(k in canonical for k in ("temperature_c", "wind_m_s", "pressure_hpa", "wave_height_m"))
+
+        if timestamps_here and required_any:
+            try:
+                # compute_forecast expects canonical keys like 'timestamps', 'temperature_c', etc.
+                # We pass the canonical dict (which includes arrays and any top-level tide/astro/marine fields).
+                per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
+            except Exception:
+                _LOGGER.debug("compute_forecast failed during DataFormatter.validate; continuing with empty per-timestamp forecasts", exc_info=True)
+                per_ts_forecasts = []
+        else:
+            _LOGGER.debug(
+                "Skipping compute_forecast: insufficient meteorological inputs (timestamps=%s, keys_present=%s)",
+                bool(timestamps_here),
+                [k for k in ("temperature_c", "wind_m_s", "pressure_hpa", "wave_height_m") if k in canonical],
+            )
             per_ts_forecasts = []
 
         # ---------------------------------------------------------------------
@@ -1289,8 +1302,12 @@ class DataFormatter:
 
         periods_to_use = requested_periods if requested_periods else default_periods
 
-        # Aggregate hourly-like into periods
-        period_agg = self._aggregate_hourly_into_periods(hourly_like, days=len(timestamps_arr) and 7 or 0, aggregation_periods=periods_to_use, full_payload=canonical)
+        # Aggregate hourly-like into periods; guard when hourly_like is empty
+        if hourly_like:
+            # days param: set to 7 by default for period aggregation (caller-specific requests use WeatherFetcher.get_forecast)
+            period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=periods_to_use, full_payload=canonical)
+        else:
+            period_agg = {}
 
         # Now combine per-timestamp forecasts into period-level scoring & safety (conservative safety aggregation)
         period_forecasts: Dict[str, Dict[str, Any]] = {}
