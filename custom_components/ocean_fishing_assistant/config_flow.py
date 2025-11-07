@@ -44,7 +44,8 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "persist_ttl": user_input.get("persist_ttl", 3600),
                 "species": user_input.get("species"),
                 "units": entry_units,
-                "wind_unit": user_input.get("wind_unit", ("km/h" if entry_units == "metric" else "mph")),
+                # Deterministic wind unit derived from chosen units (no separate UI for wind unit — strict behavior)
+                "wind_unit": ("km/h" if entry_units == "metric" else "mph"),
                 "safety_limits": normalized_safety,
             }
             return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
