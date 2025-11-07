@@ -1,14 +1,4 @@
-"""Weather data fetcher - Open-Meteo REST-focused.
-
-Features:
-- Calls Open-Meteo REST endpoints (OM_BASE) directly for current & forecast.
-- Uses the Open-Meteo Marine endpoint (OM_MARINE_BASE) for marine/wave fields.
-- Global caching (shared across instances) for current & forecast.
-- Robust normalization for many shapes (dicts, lists, objects).
-- Unit coercion via unit_helpers (canonical m/s internal, output in km/h/mph/m/s).
-- Forecast aggregation into flexible "periods" (default: 4 equal periods per day) or custom periods.
-- Strict failure semantics: fails loudly when current/forecast critical fields are missing.
-"""
+# Strict WeatherFetcher + DataFormatter (no fallbacks, fail loudly)
 from __future__ import annotations
 
 import logging
@@ -26,20 +16,6 @@ from . import ocean_scoring
 
 _LOGGER = logging.getLogger(__name__)
 
-# Global caches (shared across instances)
-_GLOBAL_CACHE: Dict[str, Dict[str, Any]] = {}
-
-# Defaults for diagnostics only (we fail loudly instead of silently using these)
-DEFAULT_WEATHER_VALUES = {
-    "temperature": 15.0,
-    "wind_speed": 10.0,  # km/h (diagnostic)
-    "wind_gust": 15.0,  # km/h (diagnostic)
-    "cloud_cover": 50,  # percentage
-    "precipitation_probability": 0,  # percentage
-    "pressure": 1013.0,  # hPa
-}
-
-# hourly params to request from Open-Meteo
 OM_PARAMS_HOURLY = ",".join(
     [
         "temperature_2m",
@@ -52,1461 +28,457 @@ OM_PARAMS_HOURLY = ",".join(
 )
 
 
-def _safe_float(v: Any, default: float) -> float:
-    try:
-        if v is None:
-            return float(default)
-        if isinstance(v, bool):
-            return float(v)
-        return float(v)
-    except Exception:
-        return float(default)
-
-
-def _safe_int(v: Any, default: int) -> int:
-    try:
-        if v is None:
-            return int(default)
-        return int(float(v))
-    except Exception:
-        return int(default)
+def _ensure_list_length_equal(key: str, timestamps: List[Any], arr: List[Any]) -> None:
+    if len(timestamps) != len(arr):
+        raise ValueError(f"Array length mismatch for '{key}': timestamps length={len(timestamps)}, {key} length={len(arr)}")
 
 
 class WeatherFetcher:
     """
-    Fetch current weather and forecast via direct Open-Meteo REST calls.
+    Strict WeatherFetcher for Open-Meteo REST.
 
-    Aggregation periods:
-      [
-        {"name": "dawn", "start_hour": 4, "end_hour": 6},
-        {"name": "day",  "start_hour": 6, "end_hour": 18},
-        ...
-      ]
-    If None, a default 4-period split is used (00-06, 06-12, 12-18, 18-24).
+    - Requires explicit speed_unit parameter (no HA auto-detection).
+    - Expects documented OM payload shapes; missing required fields raise errors.
     """
 
-    def __init__(self, hass, latitude: float, longitude: float, speed_unit: Optional[str] = None) -> None:
+    ALLOWED_SPEED_UNITS = {"km/h", "mph", "m/s"}
+
+    def __init__(self, hass, latitude: float, longitude: float, speed_unit: str) -> None:
         self.hass = hass
-        self.latitude = round(float(latitude), 4)
-        self.longitude = round(float(longitude), 4)
+        self.latitude = float(latitude)
+        self.longitude = float(longitude)
 
-        # Determine default output speed unit: derive from HA units if possible
-        if speed_unit:
-            self.speed_unit = str(speed_unit).lower()
-        else:
-            # Try to detect HA system units (fallback to km/h)
-            try:
-                units_obj = getattr(self.hass.config, "units", None)
-                if units_obj is not None and getattr(units_obj, "is_metric", True) is False:
-                    self.speed_unit = "mph"
-                else:
-                    self.speed_unit = "km/h"
-            except Exception:
-                self.speed_unit = "km/h"
+        if not speed_unit or not isinstance(speed_unit, str):
+            raise ValueError("WeatherFetcher requires explicit speed_unit (e.g. 'km/h', 'mph', 'm/s')")
+        su = speed_unit.strip().lower()
+        if su not in self.ALLOWED_SPEED_UNITS:
+            raise ValueError(f"Unsupported speed_unit '{speed_unit}'; supported: {sorted(self.ALLOWED_SPEED_UNITS)}")
+        self.speed_unit = su
 
-        self._cache_key = f"{self.latitude}_{self.longitude}_om"
+        self._cache_key = f"{round(self.latitude,4)}_{round(self.longitude,4)}_om"
         self._cache_duration = timedelta(minutes=30)
+        # minimal in-memory cache shared across instances
+        self._cache: Dict[str, Dict[str, Any]] = {}
 
-    # -----------------------
-    # Unit helpers
-    # -----------------------
-    def _incoming_wind_to_m_s(self, value: Any, unit_hint: Optional[str] = None) -> Optional[float]:
-        """Convert incoming wind value to m/s (internal canonical). If unit_hint provided, use it; otherwise assume m/s."""
-        if value is None:
-            return None
+    # --- Unit helpers (strict) ---
+    def _incoming_wind_to_m_s(self, value: Any, unit_hint: Optional[str]) -> float:
+        """
+        Convert incoming wind value to m/s. unit_hint is REQUIRED.
+        Raises ValueError if conversion cannot be performed or unit_hint missing.
+        """
+        if unit_hint is None:
+            raise ValueError("Missing unit hint for incoming wind values (strict mode)")
         try:
             v = float(value)
-        except Exception:
-            return None
+        except Exception as exc:
+            raise ValueError(f"Non-numeric wind value: {value!r}") from exc
+        u = str(unit_hint).strip().lower()
+        if u in ("km/h", "kph", "kmh"):
+            return unit_helpers.kmh_to_m_s(v)
+        if u in ("mph", "mi/h", "miles/h"):
+            return unit_helpers.mph_to_m_s(v)
+        if u in ("m/s", "mps", "m s-1"):
+            return float(v)
+        raise ValueError(f"Unsupported incoming wind unit hint: {unit_hint!r}")
 
-        if unit_hint:
-            u = str(unit_hint).strip().lower()
-            if u in ("km/h", "kph", "kmh", "km per h"):
-                return unit_helpers.kmh_to_m_s(v)
-            if u in ("mph", "mi/h", "miles/h"):
-                return unit_helpers.mph_to_m_s(v)
-            # if hint says m/s:
-            if u in ("m/s", "mps", "m s-1"):
-                return v
-        # default: assume m/s (Open-Meteo sometimes uses m/s)
-        return v
-
-    def _m_s_to_output(self, v: Optional[float]) -> Optional[float]:
-        """Convert m/s value to configured output unit (km/h, mph, or m/s)."""
-        if v is None:
-            return None
+    def _m_s_to_output(self, v: float) -> float:
+        """Convert m/s to configured output unit (strict)."""
         try:
             vf = float(v)
-        except Exception:
-            return None
-        su = (self.speed_unit or "km/h").lower()
-        if su in ("km/h", "kph", "kmh"):
+        except Exception as exc:
+            raise ValueError("Non-numeric m/s wind value") from exc
+        if self.speed_unit == "km/h":
             return unit_helpers.m_s_to_kmh(vf)
-        if su in ("mph",):
+        if self.speed_unit == "mph":
             return unit_helpers.m_s_to_mph(vf)
-        # default m/s
-        return vf
+        return vf  # m/s
 
-    def _to_output_wind(self, value: Any, incoming_unit_hint: Optional[str] = None) -> Optional[float]:
-        """Convenience: convert incoming value (with optional hint) to output unit."""
-        m_s = self._incoming_wind_to_m_s(value, incoming_unit_hint)
-        return self._m_s_to_output(m_s)
-
-    # -----------------------
-    # Public: current weather
-    # -----------------------
+    # --- Current weather ---
     async def get_weather_data(self) -> Dict[str, Any]:
-        """Get current normalized weather data via direct Open-Meteo REST call (no client fallback)."""
+        """Fetch current weather; raises on any missing required fields."""
         now = dt_util.now()
-        cache_entry = _GLOBAL_CACHE.get(self._cache_key)
+        cache_entry = self._cache.get(self._cache_key)
         if cache_entry:
             cached_time = cache_entry.get("time")
             if isinstance(cached_time, datetime) and (now - cached_time) < self._cache_duration:
                 _LOGGER.debug("Using cached weather data for %s", self._cache_key)
                 return cache_entry["data"]
 
-        result = await self.fetch_open_meteo_current_direct()
-        if not result:
-            _LOGGER.error("Unable to fetch current weather data from Open-Meteo for %s; aborting", self._cache_key)
-            raise RuntimeError("Unable to fetch current weather data from Open-Meteo")
+        payload = await self.fetch_open_meteo_current_direct()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Open-Meteo returned unexpected payload for current weather")
 
-        # Normalize: prefer explicit current_weather block if present
-        mapped = None
-        if isinstance(result, dict) and "current_weather" in result and isinstance(result["current_weather"], dict):
-            # determine unit hint from result (current_weather_units or hourly_units)
-            units_container = result.get("current_weather_units") or result.get("hourly_units") or {}
-            wind_unit_hint = None
+        # Prefer documented 'current_weather' block
+        if "current_weather" in payload and isinstance(payload["current_weather"], dict):
+            units_container = payload.get("current_weather_units") or payload.get("hourly_units") or {}
+            wind_hint = None
             if isinstance(units_container, dict):
-                wind_unit_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
-            mapped = self._map_to_current_shape(result["current_weather"], incoming_unit_hint=wind_unit_hint)
+                wind_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
+            if wind_hint is None:
+                raise ValueError("Missing wind unit hint in Open-Meteo response (current_weather_units/hourly_units)")
+            mapped = self._map_current_block(payload["current_weather"], wind_hint)
         else:
-            mapped = self._extract_current_from_rest_result(result)
+            # Strict: require hourly arrays with 'time'
+            if "hourly" not in payload or not isinstance(payload["hourly"], dict):
+                raise ValueError("Open-Meteo payload missing required 'current_weather' or 'hourly' block")
+            hourly = payload["hourly"]
+            times = hourly.get("time")
+            if not isinstance(times, (list, tuple)) or not times:
+                raise ValueError("Open-Meteo hourly block missing 'time' array for current extraction")
+            # pick nearest hour index exactly equal to current hour UTC (strict)
+            now_utc = dt_util.now().replace(minute=0, second=0, microsecond=0)
+            idx = None
+            for i, t_raw in enumerate(times):
+                t = dt_util.parse_datetime(str(t_raw))
+                if t is None:
+                    continue
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if t == now_utc:
+                    idx = i
+                    break
+            if idx is None:
+                raise ValueError("Unable to find exact matching hourly timestamp for current hour (strict)")
+            # require the documented hourly unit mapping
+            hourly_units = payload.get("hourly_units")
+            wind_hint = None
+            if isinstance(hourly_units, dict):
+                wind_hint = hourly_units.get("wind_speed_10m") or hourly_units.get("windspeed")
+            if wind_hint is None:
+                raise ValueError("Missing hourly wind unit hint (strict)")
 
-        if not mapped or mapped.get("temperature") is None or mapped.get("wind_speed") is None:
-            _LOGGER.error("Open-Meteo returned incomplete current-weather data: %s", result)
-            raise RuntimeError("Incomplete weather data from Open-Meteo")
+            candidate = {}
+            for k, arr in hourly.items():
+                if not isinstance(arr, (list, tuple)):
+                    continue
+                if idx >= len(arr):
+                    raise ValueError(f"Hourly array length mismatch for key '{k}'")
+                candidate[k] = arr[idx]
+            mapped = self._map_current_block(candidate, wind_hint)
 
-        _LOGGER.info("Fetched current weather from Open-Meteo REST for %s", self._cache_key)
-        _GLOBAL_CACHE[self._cache_key] = {"data": mapped, "time": now}
+        # final basic validation
+        if "temperature" not in mapped or "wind_speed" not in mapped:
+            raise ValueError("Mapped current weather missing required fields (temperature or wind_speed)")
+
+        self._cache[self._cache_key] = {"data": mapped, "time": now}
         return mapped
 
-    async def fetch_open_meteo_current_direct(self) -> Optional[Dict[str, Any]]:
-        """Call OM_BASE with current_weather=true and hourly as fallback."""
-        try:
-            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
-            params = {
-                "latitude": self.latitude,
-                "longitude": self.longitude,
-                "timezone": "UTC",
-                "current_weather": "true",
-                "hourly": OM_PARAMS_HOURLY,
-                "forecast_days": 2,
-            }
-            async with session.get(OM_BASE, params=params, timeout=30) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-            return data
-        except Exception:
-            _LOGGER.exception("Open-Meteo current REST fetch failed for %s,%s", self.latitude, self.longitude)
-            return None
-
-    def _extract_current_from_rest_result(self, rest_result: Any) -> Optional[Dict[str, Any]]:
-        """Extract nearest-hour-like entry from Open-Meteo REST result (hourly arrays) and map to current shape."""
-        try:
-            if isinstance(rest_result, dict) and "hourly" in rest_result and isinstance(rest_result["hourly"], dict):
-                hourly = rest_result["hourly"]
-                times = hourly.get("time") or []
-                if not times:
-                    return None
-                now = dt_util.now()
-                idx = 0
-                try:
-                    for i, t_raw in enumerate(times):
-                        t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-                        if t and t.tzinfo is None:
-                            t = t.replace(tzinfo=timezone.utc)
-                        if t and abs((t - now).total_seconds()) < 3600:
-                            idx = i
-                            break
-                except Exception:
-                    idx = 0
-                candidate = {}
-                for k, arr in hourly.items():
-                    if k == "time":
-                        continue
-                    if isinstance(arr, list) and len(arr) > idx:
-                        candidate[k] = arr[idx]
-                    else:
-                        candidate[k] = None
-                # pass hourly_units if available
-                units_container = rest_result.get("hourly_units") or {}
-                wind_unit_hint = None
-                if isinstance(units_container, dict):
-                    wind_unit_hint = units_container.get("windspeed") or units_container.get("wind_speed") or units_container.get("wind_speed_10m")
-                return self._map_to_current_shape(candidate, incoming_unit_hint=wind_unit_hint)
-            # If dict keyed by date or direct mapping, try mapping directly
-            if isinstance(rest_result, dict):
-                return self._map_to_current_shape(rest_result)
-            # If list, pick nearest hour-like entry
-            if isinstance(rest_result, list):
-                now = dt_util.now()
-                best = None
-                best_delta = None
-                for item in rest_result:
-                    if not isinstance(item, dict):
-                        continue
-                    t_raw = item.get("time") or item.get("datetime") or item.get("timestamp")
-                    try:
-                        t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-                    except Exception:
-                        t = None
-                    if t is None:
-                        continue
-                    if t.tzinfo is None:
-                        t = t.replace(tzinfo=timezone.utc)
-                    delta = abs((t - now).total_seconds())
-                    if best is None or delta < best_delta:
-                        best = item
-                        best_delta = delta
-                if best:
-                    return self._map_to_current_shape(best)
-            # else not recognized
-            return None
-        except Exception:
-            _LOGGER.exception("Error extracting current from REST result")
-            return None
-
-    def _map_to_current_shape(self, v: Any, incoming_unit_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Normalize various shapes into expected current-weather dict.
-
-        Returned wind values are normalized to the configured output unit.
-        incoming_unit_hint: optional unit string to interpret the incoming wind values (e.g. "km/h", "m/s", "mph").
-        """
-        if isinstance(v, dict):
-            d = v
-        else:
-            # Try attribute access
-            d = {
-                "temperature": getattr(v, "temperature", None),
-                "temp": getattr(v, "temp", None),
-                "wind_speed": getattr(v, "wind_speed", None),
-                "wind_gust": getattr(v, "wind_gust", None),
-                "cloud_cover": getattr(v, "cloud_cover", None),
-                "precipitation_probability": getattr(v, "precipitation_probability", None),
-                "pressure": getattr(v, "pressure", None),
-                "units": getattr(v, "units", None),
-                "wind_unit": getattr(v, "wind_unit", None),
-            }
-
-        def pick(*keys, default=None):
-            for k in keys:
-                if k in d and d[k] is not None:
-                    return d[k]
-            return default
-
-        temp_raw = pick("temperature", "temp", "temperature_2m", "air_temperature", None)
-        wind_raw = pick("wind_speed", "wind_kph", "wind_km_h", "wind", "windspeed", None)
-        wind_gust_raw = pick("wind_gust", "gust", None) or wind_raw
-        cloud_raw = pick("cloud_cover", "clouds", "clouds_percent", "cloud_coverage", None)
-        precip_raw = pick("precipitation_probability", "pop", "precipitation", "precip", None)
-        pressure_raw = pick("pressure", "air_pressure", "pressure_msl", None)
-
-        # Critical fields check (allow caller to decide to fail if missing)
-        if temp_raw is None or wind_raw is None:
-            _LOGGER.debug("Mapping produced no temperature or wind (temp=%s wind=%s); returning None", temp_raw, wind_raw)
-            return None
-
-        # unit hint if present on object/dict itself
-        wind_unit_hint_local = pick("wind_unit", "wind_speed_unit", None)
-        if incoming_unit_hint and not wind_unit_hint_local:
-            wind_unit_hint_local = incoming_unit_hint
-
-        try:
-            temp_f = _safe_float(temp_raw, DEFAULT_WEATHER_VALUES["temperature"])
-
-            # Interpret incoming wind into m/s, then convert to configured output
-            wind_m_s = self._incoming_wind_to_m_s(wind_raw, wind_unit_hint_local)
-            wind_gust_m_s = self._incoming_wind_to_m_s(wind_gust_raw, wind_unit_hint_local) if wind_gust_raw is not None else wind_m_s
-
-            wind_out = self._m_s_to_output(wind_m_s) if wind_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_speed"], DEFAULT_WEATHER_VALUES["wind_speed"])
-            wind_gust_out = self._m_s_to_output(wind_gust_m_s) if wind_gust_m_s is not None else _safe_float(DEFAULT_WEATHER_VALUES["wind_gust"], DEFAULT_WEATHER_VALUES["wind_gust"])
-
-            cloud_i = _safe_int(cloud_raw, DEFAULT_WEATHER_VALUES["cloud_cover"]) if cloud_raw is not None else None
-            precip_i = _safe_int(precip_raw, DEFAULT_WEATHER_VALUES["precipitation_probability"]) if precip_raw is not None else None
-            pressure_f = _safe_float(pressure_raw, DEFAULT_WEATHER_VALUES["pressure"]) if pressure_raw is not None else None
-
-        except Exception as exc:
-            _LOGGER.exception("Error coercing Open-Meteo current values: %s", exc)
-            return None
-
-        out: Dict[str, Any] = {
-            "temperature": temp_f,
-            "wind_speed": wind_out,
-            "wind_gust": wind_gust_out,
-            "wind_unit": self.speed_unit,
+    async def fetch_open_meteo_current_direct(self) -> Dict[str, Any]:
+        """Call OM_BASE with current_weather=true (strict)."""
+        session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+        params = {
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "timezone": "UTC",
+            "current_weather": "true",
+            "hourly": OM_PARAMS_HOURLY,
+            "forecast_days": 2,
         }
-        if cloud_i is not None:
-            out["cloud_cover"] = cloud_i
-        if precip_i is not None:
-            out["precipitation_probability"] = precip_i
-        if pressure_f is not None:
-            out["pressure"] = pressure_f
-        return out
-
-    # -----------------------
-    # Public: forecast
-    # -----------------------
-    async def get_forecast(self, days: int = 7, aggregation_periods: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
-        """
-        Get forecast summarized into date->period mappings.
-        aggregation_periods: optional sequence of {"name": str, "start_hour": int, "end_hour": int}
-          OR {"name": str, "solar_event": "sunrise"|"sunset"|"dawn"|"dusk", "window_hours": float}
-          If None, default 4 equal periods are used: 00-06,06-12,12-18,18-24.
-        """
-        now = dt_util.now()
-        forecast_cache_key = f"{self._cache_key}_forecast_{days}_{str(aggregation_periods)}"
-        cache_entry = _GLOBAL_CACHE.get(forecast_cache_key)
-        if cache_entry:
-            cached_time = cache_entry.get("time")
-            if isinstance(cached_time, datetime) and (now - cached_time) < self._cache_duration:
-                _LOGGER.debug("Using cached forecast data for %s", forecast_cache_key)
-                return cache_entry["data"]
-
-        result = await self.fetch_open_meteo_forecast_direct(days)
-        if not result:
-            _LOGGER.error("Unable to fetch forecast from Open-Meteo for %s; aborting", self._cache_key)
-            raise RuntimeError("Unable to fetch forecast from Open-Meteo")
-
-        # If aggregation requested, attempt to aggregate hourly -> periods (helper handles many shapes)
-        if aggregation_periods:
-            normalized = await self._ensure_period_aggregation(result, days, aggregation_periods)
-            if not normalized:
-                _LOGGER.error("Open-Meteo returned no usable forecast data for aggregation")
-                raise RuntimeError("Unable to fetch forecast from Open-Meteo")
-            _GLOBAL_CACHE[forecast_cache_key] = {"data": normalized, "time": now}
-            return normalized
-
-        # No aggregation requested — normalize into date->daily-summary
-        normalized: Optional[Dict[str, Dict[str, Any]]] = None
-
-        if isinstance(result, dict) and "hourly" in result and isinstance(result.get("hourly"), dict):
-            hourly = result.get("hourly")
-            times = hourly.get("time") or []
-            items: List[Dict[str, Any]] = []
-            for idx, t in enumerate(times):
-                row = {"time": t}
-                for k, arr in hourly.items():
-                    if k == "time":
-                        continue
-                    if isinstance(arr, list) and idx < len(arr):
-                        row[k] = arr[idx]
-                    else:
-                        row[k] = None
-                items.append(row)
-            normalized = self._normalize_hourly_list_to_daily(items, days)
-        elif isinstance(result, dict):
-            # Dict keyed by dates or similar shape
-            normalized = await self.hass.async_add_executor_job(self._call_sync_normalize_dict, result, days)
-        elif isinstance(result, list):
-            # list of hourly/daily entries
-            first = next((it for it in result if isinstance(it, dict)), None)
-            if first:
-                if "time" in first or "datetime" in first or "timestamp" in first:
-                    normalized = self._normalize_hourly_list_to_daily(result, days)
-                else:
-                    normalized = self._normalize_forecast_list(result, days)
-
-        if not normalized:
-            _LOGGER.error("Open-Meteo REST returned no usable forecast data")
-            raise RuntimeError("Unable to fetch forecast from Open-Meteo")
-
-        _LOGGER.info("Fetched forecast from Open-Meteo REST for %s", self._cache_key)
-        _GLOBAL_CACHE[forecast_cache_key] = {"data": normalized, "time": now}
-        return normalized
-
-    async def fetch_open_meteo_forecast_direct(self, days: int) -> Optional[Dict[str, Any]]:
-        """Call OM_BASE for forecast (hourly arrays)."""
-        try:
-            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
-            params = {
-                "latitude": self.latitude,
-                "longitude": self.longitude,
-                "timezone": "UTC",
-                "hourly": OM_PARAMS_HOURLY,
-                "forecast_days": int(days) + 1,
-            }
-            async with session.get(OM_BASE, params=params, timeout=60) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-            return data
-        except Exception:
-            _LOGGER.exception("Open-Meteo forecast REST fetch failed for %s,%s", self.latitude, self.longitude)
-            return None
-
-    async def fetch(self, latitude: float, longitude: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
-        """
-        Fetch raw Open-Meteo response strictly according to the Open-Meteo API.
-
-        This function performs a direct REST call to the Open-Meteo endpoint and
-        returns the parsed JSON response exactly as returned by the API (a dict).
-
-        No heuristics, no normalization, and no shape guessing is performed here.
-        The coordinator and DataFormatter are expected to consume the Open-Meteo
-        payload shape (for example, using the 'hourly' dict with 'time' and the
-        requested parameter arrays).
-        """
-        if mode != "hourly":
-            _LOGGER.warning("WeatherFetcher.fetch called with unsupported mode=%s; only 'hourly' is supported", mode)
-
-        try:
-            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
-            params = {
-                "latitude": float(latitude),
-                "longitude": float(longitude),
-                "timezone": "UTC",
-                "hourly": OM_PARAMS_HOURLY,
-                "forecast_days": int(days) + 1,
-            }
-            async with session.get(OM_BASE, params=params, timeout=60) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-        except Exception:
-            _LOGGER.exception("Open-Meteo fetch failed for %s,%s", latitude, longitude)
-            raise RuntimeError("Open-Meteo fetch failed")
-
-        # Return the Open-Meteo payload unchanged (caller will validate/normalize).
+        async with session.get(OM_BASE, params=params, timeout=30) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
         if not isinstance(data, dict):
-            # If the API returned unexpected shape, surface this as an error to the caller.
-            _LOGGER.error("Open-Meteo returned unexpected non-dict payload for %s,%s", latitude, longitude)
-            raise RuntimeError("Open-Meteo returned unexpected payload shape")
-
-        _LOGGER.debug("WeatherFetcher.fetch: returning raw Open-Meteo payload for %s,%s (days=%s)", latitude, longitude, days)
+            raise RuntimeError("Open-Meteo current endpoint returned unexpected shape")
         return data
 
-    def _call_sync_normalize_dict(self, d: Dict[str, Any], days: int) -> Optional[Dict[str, Dict[str, Any]]]:
-        """Helper for sync normalization paths executed in executor."""
+    def _map_current_block(self, block: Dict[str, Any], wind_unit_hint: str) -> Dict[str, Any]:
+        """
+        Map either current_weather block or a single-hour candidate into canonical current dict.
+        Requires explicit wind_unit_hint.
+        """
+        # temperature
+        if "temperature" in block:
+            temp = block["temperature"]
+        elif "temperature_2m" in block:
+            temp = block["temperature_2m"]
+        elif "temp" in block:
+            temp = block["temp"]
+        else:
+            raise ValueError("Missing temperature field in current block (strict)")
+
+        # wind
+        if "windspeed" in block:
+            wind = block["windspeed"]
+        elif "wind_speed" in block:
+            wind = block["wind_speed"]
+        elif "wind_speed_10m" in block:
+            wind = block["wind_speed_10m"]
+        else:
+            raise ValueError("Missing wind speed field in current block (strict)")
+
+        # gust optional
+        gust = block.get("windgusts") or block.get("wind_gust") or block.get("windgusts_10m") or None
+
         try:
-            final: Dict[str, Dict[str, Any]] = {}
-            for date_key in sorted(d.keys())[:days]:
-                entry = d.get(date_key) or {}
-                if not isinstance(entry, dict):
-                    continue
-                try:
-                    temp = _safe_float(entry.get("temperature") or entry.get("temp"), DEFAULT_WEATHER_VALUES["temperature"])
-                    wind_m_s = _safe_float(entry.get("wind_speed") or entry.get("wind"), None)
-                    gust_m_s = _safe_float(entry.get("wind_gust") or entry.get("gust") or wind_m_s, None)
-                except Exception:
-                    _LOGGER.debug("Skipping invalid sync-normalize entry for %s", date_key)
-                    continue
-                cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds")) is not None else None
-                pop = _safe_int(entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation")) is not None else None
-                pressure = _safe_float(entry.get("pressure") or entry.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (entry.get("pressure") or entry.get("pressure_msl")) is not None else None
-
-                wind_out = self._m_s_to_output(wind_m_s) if wind_m_s is not None else None
-                gust_out = self._m_s_to_output(gust_m_s) if gust_m_s is not None else None
-
-                final[date_key] = {"temperature": temp, "wind_speed": wind_out, "wind_gust": gust_out}
-                if cloud is not None:
-                    final[date_key]["cloud_cover"] = cloud
-                if pop is not None:
-                    final[date_key]["precipitation_probability"] = pop
-                if pressure is not None:
-                    final[date_key]["pressure"] = pressure
-            return final or None
+            temp_f = float(temp)
         except Exception:
-            return None
+            raise ValueError("Non-numeric temperature in current block")
 
-    # -----------------------
-    # Helpers: normalize various shapes
-    # -----------------------
-    def _normalize_forecast_list(self, lst: List[Any], days: int) -> Dict[str, Dict[str, Any]]:
-        """Normalize list of dicts into date-keyed daily summaries (expects daily entries)."""
-        final: Dict[str, Dict[str, Any]] = {}
-        for item in lst:
-            if not isinstance(item, dict):
-                continue
-            # find a date key
-            date_key = None
-            for k in ("date", "time", "datetime", "day"):
-                if k in item and item.get(k):
-                    v = item.get(k)
-                    try:
-                        if isinstance(v, (int, float)):
-                            dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
-                            date_key = dt.date().isoformat()
-                        else:
-                            s = str(v).split("T")[0]
-                            datetime.strptime(s, "%Y-%m-%d")
-                            date_key = s
-                    except Exception:
-                        date_key = None
-                if date_key:
-                    break
-            if not date_key:
-                continue
-            try:
-                temp = _safe_float(item.get("temperature") or item.get("temp") or item.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                wind_m_s = _safe_float(item.get("wind_speed") or item.get("wind") or item.get("wind_speed_10m"), None)
-                gust_m_s = _safe_float(item.get("wind_gust") or item.get("gust") or wind_m_s, None)
-            except Exception:
-                _LOGGER.debug("Skipping invalid forecast list item for %s", date_key)
-                continue
-            cloud = _safe_int(item.get("cloud_cover") or item.get("clouds"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (item.get("cloud_cover") or item.get("clouds")) is not None else None
-            pop = _safe_int(item.get("precipitation_probability") or item.get("pop") or item.get("precipitation") or item.get("precip"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (item.get("precipitation_probability") or item.get("pop") or item.get("precipitation") or item.get("precip")) is not None else None
-            pressure = _safe_float(item.get("pressure") or item.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (item.get("pressure") or item.get("pressure_msl")) is not None else None
+        wind_m_s = self._incoming_wind_to_m_s(wind, wind_unit_hint)
+        gust_m_s = None
+        if gust is not None:
+            gust_m_s = self._incoming_wind_to_m_s(gust, wind_unit_hint)
 
-            final[date_key] = {
-                "temperature": temp,
-                "wind_speed": self._m_s_to_output(wind_m_s) if wind_m_s is not None else None,
-                "wind_gust": self._m_s_to_output(gust_m_s) if gust_m_s is not None else None,
-            }
-            if cloud is not None:
-                final[date_key]["cloud_cover"] = cloud
-            if pop is not None:
-                final[date_key]["precipitation_probability"] = pop
-            if pressure is not None:
-                final[date_key]["pressure"] = pressure
-            if len(final) >= days:
-                break
-        return final
+        out = {
+            "temperature": temp_f,
+            "wind_speed": self._m_s_to_output(wind_m_s),
+            "wind_gust": self._m_s_to_output(gust_m_s) if gust_m_s is not None else None,
+            "wind_unit": self.speed_unit,
+        }
 
-    def _normalize_hourly_list_to_daily(self, hourly_list: List[Any], days: int) -> Dict[str, Dict[str, Any]]:
+        # optional fields: cloud_cover, precipitation_probability, pressure (only include if present)
+        if "cloudcover" in block:
+            out["cloud_cover"] = int(block["cloudcover"])
+        if "precipitation_probability" in block:
+            out["precipitation_probability"] = int(block["precipitation_probability"])
+        if "pressure_msl" in block:
+            out["pressure"] = float(block["pressure_msl"])
+        return out
+
+    # --- Forecast fetch (strict) ---
+    async def fetch(self, latitude: float, longitude: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
         """
-        Convert list of hourly entries (each with time + metrics) into daily summaries:
-        - temperature: mean
-        - wind_speed: mean
-        - wind_gust: max
-        - cloud_cover: mean (rounded)
-        - precipitation_probability: max
-        - pressure: mean
-        Returned wind values are in configured output unit.
+        Fetch raw Open-Meteo response (strict): returns dict with 'hourly' containing arrays.
         """
-        per_date: Dict[str, Dict[str, Any]] = {}
-        for entry in hourly_list:
-            if not isinstance(entry, dict):
-                continue
-            t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
-            if t_raw is None:
-                continue
-            try:
-                t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-            except Exception:
-                t = None
-            if t is None:
-                try:
-                    tnum = float(t_raw)
-                    if tnum > 1e12:
-                        tnum = tnum / 1000.0
-                    t = datetime.fromtimestamp(tnum, tz=timezone.utc)
-                except Exception:
-                    continue
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=timezone.utc)
-            date_key = t.date().isoformat()
-            try:
-                temp = _safe_float(entry.get("temperature") or entry.get("temp") or entry.get("temperature_2m"), DEFAULT_WEATHER_VALUES["temperature"])
-                wind_m_s = _safe_float(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), DEFAULT_WEATHER_VALUES["wind_speed"])  # assume m/s
-                gust_m_s = _safe_float(entry.get("wind_gust") or entry.get("gust"), wind_m_s or DEFAULT_WEATHER_VALUES["wind_gust"])
-            except Exception:
-                continue
-            cloud = _safe_int(entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover"), DEFAULT_WEATHER_VALUES["cloud_cover"]) if (entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover")) is not None else None
-            pop = _safe_int(entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation") or entry.get("precip"), DEFAULT_WEATHER_VALUES["precipitation_probability"]) if (entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation") or entry.get("precip")) is not None else None
-            pressure = _safe_float(entry.get("pressure") or entry.get("pressure_msl"), DEFAULT_WEATHER_VALUES["pressure"]) if (entry.get("pressure") or entry.get("pressure_msl")) is not None else None
+        if mode != "hourly":
+            raise ValueError("Only 'hourly' mode is supported in strict WeatherFetcher")
 
-            agg = per_date.get(date_key)
-            if not agg:
-                per_date[date_key] = {
-                    "temperature_sum": temp,
-                    "wind_speed_sum": wind_m_s or 0.0,
-                    "pressure_sum": pressure or 0.0,
-                    "cloud_sum": cloud or 0,
-                    "precip_max": pop or 0,
-                    "gust_max": gust_m_s,
-                    "count": 1,
-                }
-            else:
-                agg["temperature_sum"] += temp
-                agg["wind_speed_sum"] += (wind_m_s or 0.0)
-                agg["pressure_sum"] += (pressure or 0.0)
-                agg["cloud_sum"] += (cloud or 0)
-                agg["precip_max"] = max(agg["precip_max"], pop or 0)
-                agg["gust_max"] = max(agg["gust_max"], gust_m_s)
-                agg["count"] += 1
+        session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+        params = {
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "timezone": "UTC",
+            "hourly": OM_PARAMS_HOURLY,
+            "forecast_days": int(days) + 1,
+        }
+        async with session.get(OM_BASE, params=params, timeout=60) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+        if not isinstance(data, dict) or "hourly" not in data or not isinstance(data["hourly"], dict):
+            raise RuntimeError("Open-Meteo fetch returned payload missing 'hourly' dict (strict)")
+        return data
 
-        if not per_date:
-            return {}
-
-        final: Dict[str, Dict[str, Any]] = {}
-        for date_key in sorted(per_date.keys())[:days]:
-            agg = per_date[date_key]
-            cnt = agg.get("count", 1) or 1
-            try:
-                mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt
-                gust_m_s = float(agg["gust_max"])
-                final[date_key] = {
-                    "temperature": float(agg["temperature_sum"]) / cnt,
-                    "wind_speed": self._m_s_to_output(mean_wind_m_s),
-                    "wind_gust": self._m_s_to_output(gust_m_s),
-                    "cloud_cover": int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None,
-                    "precipitation_probability": int(round(float(agg["precip_max"]))),
-                    "pressure": float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None,
-                }
-            except Exception:
-                _LOGGER.debug("Failed to aggregate hourly data for %s; skipping", date_key)
-                continue
-        return final
-
-    async def _ensure_period_aggregation(self, data: Dict[str, Any], days: int, aggregation_periods: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    async def fetch_marine_direct(self, days: int = 5) -> Dict[str, Any]:
         """
-        If `data` is already date-keyed summaries, return as-is (truncated to days).
-        If `data` is hourly list under special keys, attempt to aggregate into requested periods.
-
-        This helper now also supports aggregation_periods entries that declare a solar event:
-            {"name":"dawn","solar_event":"sunrise","window_hours":2.0}
-        When a solar_event is present we try to extract per-date event times from the
-        incoming payload (keys: 'astro','astronomy','astro_forecast' or 'daily')
-        and produce per-date windows centered on those events.
+        Fetch marine endpoint. Return will be passed through but caller must align shapes.
+        This function raises on network/HTTP errors; caller decides whether marine data is required.
         """
-        # If already date keyed with metrics, truncate and return
-        if all(isinstance(v, dict) and ("temperature" in v or "wind_speed" in v) for v in data.values()):
-            # ensure wind units present (if numeric assumed m/s -> convert)
-            out: Dict[str, Dict[str, Any]] = {}
-            for k, v in list(data.items())[:days]:
-                if isinstance(v, dict) and v.get("wind_speed") is not None:
-                    try:
-                        wind_m_s = float(v.get("wind_speed"))
-                        gust_m_s = float(v.get("wind_gust")) if v.get("wind_gust") is not None else None
-                        vv = dict(v)
-                        vv["wind_speed"] = self._m_s_to_output(wind_m_s)
-                        vv["wind_gust"] = self._m_s_to_output(gust_m_s) if gust_m_s is not None else None
-                        vv["wind_unit"] = self.speed_unit
-                        out[k] = vv
-                    except Exception:
-                        out[k] = v
-                else:
-                    out[k] = v
-            return out
-
-        # If dict has 'hourly' arrays, convert to list first
-        hourly_list = None
-        if isinstance(data, dict) and "hourly" in data and isinstance(data.get("hourly"), dict):
-            hourly = data.get("hourly")
-            times = hourly.get("time") or []
-            items: List[Dict[str, Any]] = []
-            for idx, t in enumerate(times):
-                row = {"time": t}
-                for key, arr in hourly.items():
-                    if key == "time":
-                        continue
-                    if isinstance(arr, list) and idx < len(arr):
-                        row[key] = arr[idx]
-                    else:
-                        row[key] = None
-                items.append(row)
-            hourly_list = items
-        # If dict is a mapping of date->list, or contains an 'entries' key, try to find an hourly list
-        if hourly_list is None:
-            values = [v for v in data.values() if isinstance(v, list)]
-            if values:
-                first = values[0]
-                if first and isinstance(first[0], dict) and ("time" in first[0] or "datetime" in first[0]):
-                    hourly_list = first
-
-        if hourly_list is None and isinstance(data, list):
-            hourly_list = data
-
-        if hourly_list is None:
-            return self._normalize_forecast_list(list(data.values()) if isinstance(data, dict) else [], days)
-
-        # Aggregate hourly_list into periods per day
-        return self._aggregate_hourly_into_periods(hourly_list, days, aggregation_periods, full_payload=data)
-
-    def _parse_date_iso(self, s: Any) -> Optional[str]:
-        """Return ISO date string (YYYY-MM-DD) for many timestamp forms, or None."""
-        if s is None:
-            return None
-        try:
-            dt = dt_util.parse_datetime(str(s)) if not isinstance(s, (int, float)) else datetime.fromtimestamp(float(s), tz=timezone.utc)
-            if dt is None:
-                return None
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.date().isoformat()
-        except Exception:
-            return None
-
-    def _extract_solar_event_for_date(self, payload: Dict[str, Any], date_iso: str, event: str) -> Optional[datetime]:
-        """
-        Try to find a solar event (sunrise/sunset) datetime for a given date in the payload.
-        Accept recognized container keys: 'astro','astronomy','astronomy_forecast','astro_forecast','daily'.
-        Event strings accepted: 'sunrise','sunset' (also accept 'dawn'->sunrise, 'dusk'->sunset).
-        Returns timezone-aware UTC datetime or None.
-        """
-        if not payload or not date_iso:
-            return None
-        event = str(event).lower()
-        if event in ("dawn",):
-            event = "sunrise"
-        if event in ("dusk",):
-            event = "sunset"
-
-        candidates = ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "daily")
-        for key in candidates:
-            ast = payload.get(key)
-            if ast is None:
-                continue
-            # dict keyed by date
-            if isinstance(ast, dict):
-                if date_iso in ast:
-                    dayinfo = ast.get(date_iso) or {}
-                    ev = dayinfo.get(event)
-                    if ev:
-                        # try to parse directly
-                        try:
-                            dt = dt_util.parse_datetime(str(ev))
-                            if dt and dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            return dt
-                        except Exception:
-                            # maybe just time-of-day like '06:12' — combine with date
-                            try:
-                                s = str(ev)
-                                if ":" in s:
-                                    iso = f"{date_iso}T{s}"
-                                    dt2 = dt_util.parse_datetime(iso)
-                                    if dt2 and dt2.tzinfo is None:
-                                        dt2 = dt2.replace(tzinfo=timezone.utc)
-                                    return dt2
-                            except Exception:
-                                pass
-                # also top-level keys inside dict (e.g., astro.get('sunrise') scalar)
-                ev = ast.get(event)
-                if ev:
-                    try:
-                        dt = dt_util.parse_datetime(str(ev))
-                        if dt and dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        return dt
-                    except Exception:
-                        pass
-            # list of day dicts
-            if isinstance(ast, (list, tuple)):
-                # find an entry whose 'date' or 'time' matches
-                for entry in ast:
-                    if not isinstance(entry, dict):
-                        continue
-                    date_field = entry.get("date") or entry.get("day") or entry.get("iso_date") or entry.get("time")
-                    d_iso = None
-                    if date_field:
-                        try:
-                            d_iso = self._parse_date_iso(date_field)
-                        except Exception:
-                            d_iso = None
-                    if d_iso == date_iso:
-                        ev = entry.get(event)
-                        if ev:
-                            try:
-                                dt = dt_util.parse_datetime(str(ev))
-                                if dt and dt.tzinfo is None:
-                                    dt = dt.replace(tzinfo=timezone.utc)
-                                return dt
-                            except Exception:
-                                try:
-                                    s = str(ev)
-                                    if ":" in s:
-                                        iso = f"{date_iso}T{s}"
-                                        dt2 = dt_util.parse_datetime(iso)
-                                        if dt2 and dt2.tzinfo is None:
-                                            dt2 = dt2.replace(tzinfo=timezone.utc)
-                                        return dt2
-                                except Exception:
-                                    pass
-                # fallback: if lists contain top-level arrays keyed by 'sunrise' we handle outside
-            # special-case 'daily' where sunrise/sunset might be arrays with 'time' or 'date' arrays
-            if key == "daily" and isinstance(ast, dict):
-                # find index in ast['time'] matching date_iso
-                times = ast.get("time") or ast.get("date") or []
-                if isinstance(times, (list, tuple)) and times:
-                    found_idx = None
-                    for i, t in enumerate(times):
-                        try:
-                            if self._parse_date_iso(t) == date_iso:
-                                found_idx = i
-                                break
-                        except Exception:
-                            continue
-                    if found_idx is not None:
-                        # sunrise might be ast.get('sunrise')[found_idx]
-                        evarr = ast.get(event)
-                        if isinstance(evarr, (list, tuple)) and found_idx < len(evarr):
-                            ev = evarr[found_idx]
-                            try:
-                                dt = dt_util.parse_datetime(str(ev))
-                                if dt and dt.tzinfo is None:
-                                    dt = dt.replace(tzinfo=timezone.utc)
-                                return dt
-                            except Exception:
-                                # maybe just time-of-day
-                                try:
-                                    s = str(ev)
-                                    if ":" in s:
-                                        iso = f"{date_key}T{s}"
-                                        dt2 = dt_util.parse_datetime(iso)
-                                        if dt2 and dt2.tzinfo is None:
-                                            dt2 = dt2.replace(tzinfo=timezone.utc)
-                                        return dt2
-                                except Exception:
-                                    pass
-        return None
-
-    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
-        """
-        STRICT aggregator: aggregate hourly entries into named periods per-date.
-
-        - Requires hourly_list to contain dicts with a parsable 'time' (ISO-like).
-        - Requires numeric fields to be present where used; otherwise raises ValueError.
-        - For solar-event windows, requires full_payload to expose per-date solar event datetimes
-          (keys: 'astro','astronomy','daily','astronomy_forecast', or similar). If solar times for a
-          requested date/event are missing the function raises ValueError (no fallback).
-        - Aggregation rules:
-            temperature -> mean
-            wind_m_s -> mean
-            wind_gust_m_s -> max
-            cloud_cover -> mean (rounded)
-            precipitation_probability -> max
-            pressure_hpa -> mean
-        Returns:
-            { date_iso: { period_name: { indices, timestamps, start, end, temperature, wind_m_s, wind_gust_m_s, cloud_cover, precipitation_probability, pressure_hpa, score_10: None, score_100: None, components: None, profile_used: None, safety: {...} } } }
-        """
-        # Validate input shape
-        if not isinstance(hourly_list, list) or not hourly_list:
-            raise ValueError("hourly_list must be a non-empty list of dicts")
-
-        # Use default 4x6h periods when none provided
-        if not aggregation_periods:
-            aggregation_periods = [
-                {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
-                {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
-                {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
-                {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
-            ]
-
-        # Parse timestamps, keep parallel arrays
-        timestamps: List[Optional[str]] = []
-        timestamp_datetimes: List[Optional[datetime]] = []
-        for entry in hourly_list:
-            if not isinstance(entry, dict):
-                raise ValueError("each hourly_list element must be a dict")
-            t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
-            if t_raw is None:
-                raise ValueError("hourly entry missing required 'time' field: %r" % (entry,))
-            # parse using homeassistant dt helper for robust ISO handling
-            try:
-                dt = dt_util.parse_datetime(str(t_raw))
-            except Exception:
-                # numeric epoch fallback
-                try:
-                    tnum = float(t_raw)
-                    if tnum > 1e12:
-                        tnum = tnum / 1000.0
-                    dt = datetime.fromtimestamp(tnum, tz=timezone.utc)
-                except Exception as exc:
-                    raise ValueError(f"Unable to parse timestamp {t_raw!r}: {exc}") from exc
-            if dt is None:
-                raise ValueError(f"Unable to parse timestamp {t_raw!r}")
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            timestamps.append(str(t_raw))
-            timestamp_datetimes.append(dt)
-
-        # group indices by ISO date in UTC
-        per_date_indices: Dict[str, List[int]] = {}
-        for idx, dt in enumerate(timestamp_datetimes):
-            date_iso = dt.date().isoformat()
-            per_date_indices.setdefault(date_iso, []).append(idx)
-
-        # limit to requested days (sorted ascending)
-        sorted_dates = sorted(per_date_indices.keys())
-        if days is not None:
-            sorted_dates = sorted_dates[:int(days)]
-
-        # helper to extract solar event datetime for a date — mirrors DataFormatter._extract_solar_event_for_date
-        def _get_solar_dt_for_date(event: str, date_iso: str) -> datetime:
-            if full_payload is None:
-                raise ValueError(f"Solar event '{event}' requested but full_payload is not provided")
-            ev_dt = self._extract_solar_event_for_date(full_payload, date_iso, event)
-            if ev_dt is None:
-                raise ValueError(f"Solar event '{event}' not found for date {date_iso} in full_payload")
-            return ev_dt
-
-        final: Dict[str, Dict[str, Any]] = {}
-
-        for date_key in sorted_dates:
-            indices_for_date = per_date_indices.get(date_key, [])
-            if not indices_for_date:
-                continue
-            final[date_key] = {}
-
-            # prepare mapping from indices -> entry for quick access
-            # we will use these to collect values for members
-            for p in aggregation_periods:
-                pname = p.get("name") or f"period_{p.get('start_hour', 0)}_{p.get('end_hour', 0)}"
-                # Determine start_dt/end_dt
-                if "solar_event" in p:
-                    event = p.get("solar_event")
-                    window_hours = float(p.get("window_hours", 2.0))
-                    offset_hours = float(p.get("offset_hours", 0.0))
-                    event_dt = _get_solar_dt_for_date(event, date_key)  # may raise if missing
-                    center = event_dt + timedelta(hours=offset_hours)
-                    half = timedelta(hours=window_hours / 2.0)
-                    start_dt = center - half
-                    end_dt = center + half
-                else:
-                    if "start_hour" not in p or "end_hour" not in p:
-                        raise ValueError(f"aggregation_period entry {p!r} must include start_hour and end_hour when not solar-based")
-                    start_hr = int(p.get("start_hour"))
-                    end_hr = int(p.get("end_hour"))
-                    # construct datetimes in UTC
-                    start_dt = datetime.fromisoformat(f"{date_key}T{start_hr:02d}:00:00+00:00")
-                    if end_hr >= 24:
-                        # next date midnight
-                        end_dt = (datetime.fromisoformat(f"{date_key}T00:00:00+00:00") + timedelta(days=1))
-                    else:
-                        end_dt = datetime.fromisoformat(f"{date_key}T{end_hr:02d}:00:00+00:00")
-
-                # Collect members whose timestamp dt falls within [start_dt, end_dt)
-                members: List[int] = []
-                timestamps_in_period: List[str] = []
-                for idx in indices_for_date:
-                    dt = timestamp_datetimes[idx]
-                    if dt is None:
-                        continue
-                    if start_dt <= dt < end_dt:
-                        members.append(idx)
-                        timestamps_in_period.append(timestamps[idx])
-
-                if not members:
-                    # In strict mode, missing members is an error — report specifically so caller can fix upstream fetch
-                    raise ValueError(f"No hourly members found for period '{pname}' on date {date_key} (window {start_dt.isoformat()} - {end_dt.isoformat()})")
-
-                # Aggregate metrics: strict — require presence of numeric values for at least one of the canonical keys
-                temp_vals: List[float] = []
-                wind_vals: List[float] = []
-                gust_vals: List[float] = []
-                cloud_vals: List[int] = []
-                pop_vals: List[int] = []
-                pressure_vals: List[float] = []
-
-                for idx in members:
-                    entry = hourly_list[idx]
-                    # Temperature
-                    if "temperature" in entry or "temperature_2m" in entry or "temp" in entry or "temperature_c" in entry:
-                        # prefer canonical names if present
-                        t = entry.get("temperature") if "temperature" in entry else entry.get("temperature_2m") if "temperature_2m" in entry else entry.get("temperature_c") if "temperature_c" in entry else entry.get("temp")
-                        if t is None:
-                            raise ValueError(f"Missing temperature value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
-                        temp_vals.append(float(t))
-                    else:
-                        raise ValueError(f"Temperature key missing in hourly entries; strict aggregator requires temperature for period aggregation")
-
-                    # Wind (assume m/s canonical naming: wind_m_s or wind_speed or wind_speed_10m)
-                    w = None
-                    for key in ("wind_m_s", "wind_speed", "wind_speed_10m", "wind"):
-                        if key in entry:
-                            w = entry.get(key)
-                            break
-                    if w is None:
-                        raise ValueError(f"Missing wind value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
-                    wind_vals.append(float(w))
-
-                    # Gust (optional but preferred)
-                    g = None
-                    for key in ("wind_gust_m_s", "wind_gust", "wind_max_m_s", "windgusts_10m", "gust"):
-                        if key in entry:
-                            g = entry.get(key)
-                            break
-                    if g is None:
-                        # in strict mode we still allow missing gusts but will raise if later logic requires them
-                        pass
-                    else:
-                        gust_vals.append(float(g))
-
-                    # Cloud
-                    if any(k in entry for k in ("cloud_cover", "cloudcover", "clouds")):
-                        c = entry.get("cloud_cover") if "cloud_cover" in entry else entry.get("cloudcover") if "cloudcover" in entry else entry.get("clouds")
-                        if c is None:
-                            raise ValueError(f"Missing cloud_cover value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
-                        cloud_vals.append(int(c))
-
-                    # Precipitation probability
-                    if any(k in entry for k in ("precipitation_probability", "pop", "precip")):
-                        p = entry.get("precipitation_probability") if "precipitation_probability" in entry else entry.get("pop") if "pop" in entry else entry.get("precip")
-                        if p is None:
-                            raise ValueError(f"Missing precipitation_probability value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
-                        pop_vals.append(int(p))
-
-                    # Pressure (pressure_hpa or pressure_msl)
-                    pr = None
-                    for key in ("pressure_hpa", "pressure_msl", "pressure"):
-                        if key in entry:
-                            pr = entry.get(key)
-                            break
-                    if pr is None:
-                        raise ValueError(f"Missing pressure value at index {idx} (ts={timestamps[idx]}) required by strict aggregator")
-                    pressure_vals.append(float(pr))
-
-                # Compute aggregates (strict means we have at least one value in each list above)
-                if not temp_vals:
-                    raise ValueError(f"No temperature values collected for period '{pname}' on {date_key}")
-                mean_temp = float(sum(temp_vals) / len(temp_vals))
-
-                if not wind_vals:
-                    raise ValueError(f"No wind values collected for period '{pname}' on {date_key}")
-                mean_wind = float(sum(wind_vals) / len(wind_vals))
-
-                gust_max = float(max(gust_vals)) if gust_vals else None
-                mean_pressure = float(sum(pressure_vals) / len(pressure_vals)) if pressure_vals else None
-                mean_cloud = int(round(float(sum(cloud_vals) / len(cloud_vals)))) if cloud_vals else None
-                precip_max = int(max(pop_vals)) if pop_vals else None
-
-                # Build the period summary. Keep naming consistent with downstream scoring expectations:
-                final[date_key][pname] = {
-                    "indices": members,
-                    "timestamps": timestamps_in_period,
-                    "start": start_dt.isoformat(),
-                    "end": end_dt.isoformat(),
-                    "temperature": mean_temp,
-                    "wind_m_s": mean_wind,
-                    "wind_gust_m_s": gust_max,
-                    "cloud_cover": mean_cloud,
-                    "precipitation_probability": precip_max,
-                    "pressure_hpa": mean_pressure,
-                    "score_10": None,
-                    "score_100": None,
-                    "components": None,
-                    "profile_used": None,
-                    "safety": {"unsafe": False, "caution": False, "reasons": []},
-                }
-
-        return final
-
-    # -----------------------
-    # Marine endpoint helper
-    # -----------------------
-    async def fetch_marine_direct(self, days: int = 5) -> Optional[Dict[str, Any]]:
-        """
-        Attempt to fetch marine-specific variables directly from the Open-Meteo Marine endpoint.
-        Returns normalized structure similar to Open-Meteo client output (hourly dicts).
-
-        NOTE: use only documented parameter names. See Open‑Meteo docs:
-        https://open-meteo.com/en/docs/marine-weather-api
-        """
-        try:
-            session: aiohttp.ClientSession = async_get_clientsession(self.hass)
-            # Use documented marine variable names (correct parameter names: e.g. 'swell_wave_height')
-            hourly_vars = ",".join([
+        session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+        hourly_vars = ",".join(
+            [
                 "wave_height",
                 "wave_direction",
                 "wave_period",
                 "swell_wave_height",
                 "swell_wave_period",
-            ])
-            params = {
-                "latitude": self.latitude,
-                "longitude": self.longitude,
-                "timezone": "UTC",
-                "hourly": hourly_vars,
-                "forecast_days": int(days),
-            }
-            async with session.get(OM_MARINE_BASE, params=params, timeout=60) as resp:
-                # If the API returns 400, the parameters were invalid (or the request malformed).
-                # Log at debug and return None so upstream logic can continue without marine data.
-                if resp.status == 400:
-                    try:
-                        body = await resp.text()
-                    except Exception:
-                        body = "<no body>"
-                    _LOGGER.debug("Marine API returned 400 Bad Request for %s,%s (params=%s): %s", self.latitude, self.longitude, hourly_vars, body)
-                    return None
-                resp.raise_for_status()
-                data = await resp.json()
-            # leave raw structure (caller will extract hourly arrays)
-            return data
-        except Exception:
-            # Log at debug to avoid flooding logs when marine data is unavailable; caller can decide
-            # whether to treat missing marine payload as fatal or not.
-            _LOGGER.debug("Direct Marine API fetch failed for %s,%s", self.latitude, self.longitude, exc_info=True)
-            return None
+            ]
+        )
+        params = {
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "timezone": "UTC",
+            "hourly": hourly_vars,
+            "forecast_days": int(days),
+        }
+        async with session.get(OM_MARINE_BASE, params=params, timeout=60) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Marine endpoint returned unexpected shape")
+        return data
 
 
 class DataFormatter:
     """
-    Minimal DataFormatter that converts an Open‑Meteo-like payload (or a merged payload
-    with 'hourly' dict) into the canonical keys expected by the rest of the integration
-    and by ocean_scoring.
+    Strict DataFormatter:
 
-    This version also precomputes strict per-timestamp forecasts (via ocean_scoring.compute_forecast)
-    and aggregates those forecasts into named periods per-day (including support for solar-event windows).
+    - Requires payload to contain 'hourly' dict with 'time' array and canonical keys.
+    - Requires hourly_units to exist and to provide units for wind arrays.
+    - No legacy aliases, no heuristics. Raises ValueError on any validation failure.
     """
 
     # mapping of Open-Meteo hourly keys -> canonical keys used by scoring/formatting
     HOURLY_KEY_MAP = {
-        "time": "timestamps",  # special-case: 'time' -> 'timestamps'
-        # standard weather keys
+        "time": "timestamps",
         "temperature_2m": "temperature_c",
         "wind_speed_10m": "wind_m_s",
         "windgusts_10m": "wind_max_m_s",
         "pressure_msl": "pressure_hpa",
         "cloudcover": "cloud_cover",
         "precipitation_probability": "precipitation_probability",
-        # marine keys (documented OM marine names -> canonical names)
+        # marine keys
         "wave_height": "wave_height_m",
         "wave_direction": "wave_direction",
         "wave_period": "wave_period_s",
         "swell_wave_height": "swell_height_m",
         "swell_wave_period": "swell_period_s",
-        # Accept alternative but documented names (kept explicit)
-        "swell_height": "swell_height_m",
-        "swell_period": "swell_period_s",
     }
 
     def __init__(self) -> None:
         pass
 
-    def _copy_if_list(self, src: dict, key: str):
-        """Return a shallow copy of the list for key if present and a list; else None."""
-        val = src.get(key)
-        if isinstance(val, (list, tuple)):
-            return list(val)
-        return None
-
-    def validate(self, raw_payload: dict, species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None) -> dict:
+    def validate(self, raw_payload: Dict[str, Any], species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None) -> Dict[str, Any]:
         """
-        Validate/normalize the incoming payload.
-
-        Parameters:
-        - raw_payload: the dict provided by OFACoordinator (often an Open-Meteo payload possibly
-          merged with marine and tide data).
-        - species_profile, units, safety_limits: accepted for API compatibility.
-
-        Returns:
-        - canonical_payload: dict containing:
-            - timestamps (list)
-            - raw_payload (the canonical arrays dict)
-            - per_timestamp_forecasts (list)  -- output of ocean_scoring.compute_forecast
-            - period_forecasts (dict date->period->aggregated data)
+        Validate and normalize raw_payload into strict canonical shape:
+        - 'timestamps' list
+        - canonical arrays using canonical keys
+        - compute per_timestamp_forecasts via ocean_scoring.compute_forecast (errors propagate)
+        - compute period_forecasts via strict aggregator (errors propagate)
         """
         if not isinstance(raw_payload, dict):
-            # nothing to do — return empty canonical payload
-            return {}
+            raise ValueError("raw_payload must be a dict (strict)")
 
-        canonical: dict = {}
+        if "hourly" not in raw_payload or not isinstance(raw_payload["hourly"], dict):
+            raise ValueError("raw_payload must include an 'hourly' dict (strict)")
 
-        # If there is an 'hourly' dict, prefer that as the source of per-timestamp arrays.
-        hourly = raw_payload.get("hourly") if isinstance(raw_payload.get("hourly"), dict) else None
+        hourly = raw_payload["hourly"]
+        if "time" not in hourly or not isinstance(hourly["time"], (list, tuple)):
+            raise ValueError("'hourly' must include 'time' array (strict)")
 
-        # Prepare hourly_units map if present (top-level hourly_units or hourly.get("units"))
-        hourly_units_map = {}
-        if isinstance(raw_payload.get("hourly_units"), dict):
-            hourly_units_map = raw_payload.get("hourly_units")
-        elif isinstance(hourly, dict) and isinstance(hourly.get("units"), dict):
-            hourly_units_map = hourly.get("units")
+        timestamps = list(hourly["time"])
+        if not timestamps:
+            raise ValueError("'time' array is empty (strict)")
 
-        # If there is a top-level 'timestamps' or 'time' at top-level, allow pass-through too.
-        if hourly:
-            # Map known hourly keys to canonical names when present.
-            for om_key, canon_key in self.HOURLY_KEY_MAP.items():
-                if om_key in hourly:
-                    arr = self._copy_if_list(hourly, om_key)
-                    if arr is not None:
-                        # Convert wind arrays if unit hint indicates km/h or mph
-                        if om_key in ("wind_speed_10m", "windgusts_10m"):
-                            # determine unit hint for this hourly key
-                            unit_hint = None
-                            try:
-                                unit_hint = hourly_units_map.get(om_key) if isinstance(hourly_units_map, dict) else None
-                            except Exception:
-                                unit_hint = None
-                            # fall back to common names if hourly_units_map uses alternate key names
-                            if unit_hint is None:
-                                unit_hint = hourly_units_map.get("wind_speed_10m") if isinstance(hourly_units_map, dict) else None
-                                if unit_hint is None:
-                                    unit_hint = hourly_units_map.get("windspeed") if isinstance(hourly_units_map, dict) else None
+        # prepare hourly_units (required for wind conversion)
+        hourly_units = raw_payload.get("hourly_units") or hourly.get("units")
+        if not isinstance(hourly_units, dict):
+            raise ValueError("Missing 'hourly_units' mapping in payload; wind unit hints are required (strict)")
 
-                            converted = []
-                            for v in arr:
-                                if v is None:
-                                    converted.append(None)
-                                    continue
-                                # if hint present, use it; else assume km/h if value seems large (> 30) else assume m/s
-                                try:
-                                    if isinstance(unit_hint, str) and unit_hint.strip().lower() in ("km/h", "kph", "kmh"):
-                                        converted.append(unit_helpers.kmh_to_m_s(v))
-                                    elif isinstance(unit_hint, str) and unit_hint.strip().lower() in ("mph", "mi/h", "miles/h"):
-                                        converted.append(unit_helpers.mph_to_m_s(v))
-                                    elif isinstance(unit_hint, str) and unit_hint.strip().lower() in ("m/s", "mps", "m s-1"):
-                                        converted.append(float(v))
-                                    else:
-                                        # conservative approach: if numeric value greater than 30, treat it as km/h and convert;
-                                        # otherwise assume it's already m/s.
-                                        try:
-                                            fv = float(v)
-                                            if fv > 30.0:
-                                                converted.append(unit_helpers.kmh_to_m_s(fv))
-                                            else:
-                                                converted.append(float(fv))
-                                        except Exception:
-                                            raise ValueError(f"Unable to coerce wind value {v!r}")
-                                except Exception as exc:
-                                    raise ValueError(f"Failed to convert wind array values for key {om_key}: {exc}") from exc
-                            canonical[canon_key] = converted
-                        else:
-                            canonical[canon_key] = arr
+        canonical: Dict[str, Any] = {}
+        canonical["timestamps"] = timestamps
 
-            # Ensure we set 'timestamps' -> prefer hourly['time']
-            if "timestamps" not in canonical and "time" in hourly:
-                ts = self._copy_if_list(hourly, "time")
-                if ts is not None:
-                    canonical["timestamps"] = ts
+        # Map required numeric arrays: require temperature_2m and wind_speed_10m at minimum
+        missing_required = []
+        if "temperature_2m" not in hourly:
+            missing_required.append("temperature_2m")
+        if "wind_speed_10m" not in hourly:
+            missing_required.append("wind_speed_10m")
+        if missing_required:
+            raise ValueError(f"Missing required hourly arrays: {missing_required} (strict)")
 
-        # If not hourly or some keys still missing, accept top-level documented keys without trying fallbacks.
-        # (This is deliberate: do not do tolerant guessing here.)
+        # map arrays and enforce equal lengths
         for om_key, canon_key in self.HOURLY_KEY_MAP.items():
-            if canon_key not in canonical and om_key in raw_payload:
-                arr = self._copy_if_list(raw_payload, om_key)
-                if arr is not None:
-                    # apply same wind conversion logic if top-level keys are present
-                    if om_key in ("wind_speed_10m", "windgusts_10m"):
-                        unit_hint = None
-                        if isinstance(raw_payload.get("hourly_units"), dict):
-                            unit_hint = raw_payload.get("hourly_units").get(om_key)
-                        converted = []
-                        for v in arr:
-                            if v is None:
-                                converted.append(None)
-                                continue
-                            try:
-                                if unit_hint and str(unit_hint).strip().lower() in ("km/h", "kph", "kmh"):
-                                    converted.append(unit_helpers.kmh_to_m_s(v))
-                                elif unit_hint and str(unit_hint).strip().lower() in ("mph", "mi/h", "miles/h"):
-                                    converted.append(unit_helpers.mph_to_m_s(v))
-                                elif unit_hint and str(unit_hint).strip().lower() in ("m/s", "mps", "m s-1"):
-                                    converted.append(float(v))
-                                else:
-                                    fv = float(v)
-                                    if fv > 30.0:
-                                        converted.append(unit_helpers.kmh_to_m_s(fv))
-                                    else:
-                                        converted.append(float(fv))
-                            except Exception as exc:
-                                raise ValueError(f"Failed to convert wind array values for key {om_key}: {exc}") from exc
-                        canonical[canon_key] = converted
-                    else:
-                        canonical[canon_key] = arr
+            if om_key == "time":
+                continue
+            if om_key in hourly:
+                arr = hourly[om_key]
+                if not isinstance(arr, (list, tuple)):
+                    raise ValueError(f"Hourly key '{om_key}' must be a list/tuple (strict)")
+                # enforce same length as timestamps
+                _ensure_list_length_equal(om_key, timestamps, list(arr))
+                if om_key in ("wind_speed_10m", "windgusts_10m"):
+                    # require explicit unit hint for these
+                    unit_hint = hourly_units.get(om_key) or hourly_units.get("windspeed") or hourly_units.get("wind_speed_10m")
+                    if not unit_hint:
+                        raise ValueError(f"Missing unit hint for hourly key '{om_key}' (strict)")
+                    converted: List[Optional[float]] = []
+                    for v in arr:
+                        if v is None:
+                            converted.append(None)
+                            continue
+                        converted.append(self._convert_wind_array_value(v, unit_hint))
+                    canonical[canon_key] = converted
+                else:
+                    canonical[canon_key] = list(arr)  # shallow copy
 
-        # Top-level convenience keys that the scoring code expects (tide/astro/marine) — pass through if present.
-        for top_key in ("tide", "astro", "astronomy", "marine", "astronomy_forecast", "astro_forecast", "daily"):
-            v = raw_payload.get(top_key)
-            if v is not None:
-                canonical[top_key] = v
-
-        # Also keep any existing top-level convenience keys like 'tide_height_m', 'tide_phase', etc.
-        for k in ("tide_height_m", "tide_phase", "tide_strength", "moon_phase"):
-            if k in raw_payload:
-                canonical.setdefault(k, raw_payload.get(k))
-
-        # Keep a 'current' snapshot if provided (useful for instant sensor/current values)
-        if "current" in raw_payload:
-            canonical["current"] = raw_payload.get("current")
-
-        # Finally, if no explicit timestamps key but we have a top-level 'time' or 'timestamps' scalar,
-        # accept it only if it's already in list form; we do NOT attempt to synthesize timestamps.
-        if "timestamps" not in canonical:
-            if isinstance(raw_payload.get("timestamps"), (list, tuple)):
-                canonical["timestamps"] = list(raw_payload.get("timestamps"))
-            elif isinstance(raw_payload.get("time"), (list, tuple)):
-                canonical["timestamps"] = list(raw_payload.get("time"))
-
-        # Backwards-compatibility aliases: some callers expect both 'swell_height_m' and
-        # 'swell_wave_height_m' keys. If one is present, expose the other as an alias so
-        # downstream code (and tests) can find swell heights under either name.
-        if "swell_height_m" in canonical and "swell_wave_height_m" not in canonical:
-            canonical["swell_wave_height_m"] = list(canonical["swell_height_m"]) if isinstance(canonical["swell_height_m"], list) else canonical["swell_height_m"]
-        if "swell_wave_height_m" in canonical and "swell_height_m" not in canonical:
-            canonical["swell_height_m"] = list(canonical["swell_wave_height_m"]) if isinstance(canonical["swell_wave_height_m"], list) else canonical["swell_wave_height_m"]
-
-        # attach a shallow copy of the original raw payload for debugging/traceability
-        canonical["raw_payload_source"] = raw_payload if isinstance(raw_payload, dict) else {}
-
-        # ---------------------------------------------------------------------
-        # Precompute per-timestamp strict forecasts using ocean_scoring.compute_forecast
-        # ---------------------------------------------------------------------
+        # compute per-timestamp forecasts if required keys exist (compute errors propagate)
+        required_for_scoring = ("temperature_c" in canonical and "wind_m_s" in canonical and "pressure_hpa" in canonical) or ("wave_height_m" in canonical)
         per_ts_forecasts: List[Dict[str, Any]] = []
-
-        timestamps_here = canonical.get("timestamps") or []
-        # treat presence of at least one of these keys as sufficient reason to attempt scoring
-        required_any = any(k in canonical for k in ("temperature_c", "wind_m_s", "pressure_hpa", "wave_height_m"))
-
-        if timestamps_here and required_any:
-            # Strict mode: do not swallow compute_forecast exceptions — let them surface to caller
+        if required_for_scoring:
             per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
         else:
-            _LOGGER.debug(
-                "Skipping compute_forecast: insufficient meteorological inputs (timestamps=%s, keys_present=%s)",
-                bool(timestamps_here),
-                [k for k in ("temperature_c", "wind_m_s", "pressure_hpa", "wave_height_m") if k in canonical],
-            )
-            per_ts_forecasts = []
+            # If scoring cannot be attempted due to missing optional keys, raise so callers know.
+            raise ValueError("Insufficient canonical keys to compute forecasts (strict): need temperature_c, wind_m_s, pressure_hpa or wave_height_m")
 
-        # ---------------------------------------------------------------------
-        # Aggregate per-timestamp forecasts into periods (default 4-per-day or custom)
-        # ---------------------------------------------------------------------
-        # Build an hourly_list representation (like _ensure_period_aggregation creates) to feed aggregator
+        # Build hourly_like list expected by aggregator (strict)
         hourly_like: List[Dict[str, Any]] = []
-        timestamps_arr = canonical.get("timestamps") or []
-        # If we have arrays for the mapped keys, attach them per index when available
-        def get_array_value(key: str, idx: int):
-            arr = canonical.get(key)
-            if isinstance(arr, (list, tuple)) and idx < len(arr):
-                return arr[idx]
-            return None
-
-        for i, ts in enumerate(timestamps_arr):
+        length = len(timestamps)
+        for i, ts in enumerate(timestamps):
             row: Dict[str, Any] = {"time": ts}
-            # include a small selection of keys that aggregator expects
+            # attach canonical keys into row when present
             for src_key in ("temperature_c", "wind_m_s", "wind_max_m_s", "pressure_hpa", "cloud_cover", "precipitation_probability",
                             "wave_height_m", "wave_period_s", "swell_height_m", "swell_period_s"):
-                val = get_array_value(src_key, i)
-                if val is not None:
-                    # keep keys named similarly to Open-Meteo hourly entries so aggregator can reuse logic
-                    row[src_key] = val
-            # also include the precomputed forecast (if available) for later per-period combination
-            if per_ts_forecasts and i < len(per_ts_forecasts):
+                arr = canonical.get(src_key)
+                if isinstance(arr, (list, tuple)):
+                    row[src_key] = arr[i]
+            # attach computed forecast entry if available
+            if i < len(per_ts_forecasts):
                 row["_forecast_entry"] = per_ts_forecasts[i]
             hourly_like.append(row)
 
-        # Default canonical 4 periods
+        # Use strict default 4 periods if caller doesn't supply aggregation shape
         default_periods = [
             {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
             {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
             {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
             {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
         ]
+        # NOTE: we do not read aggregation_periods from the payload (legacy); caller must provide if desired.
 
-        # If caller requested a specific aggregation shape inside raw_payload_source (legacy), attempt to use it.
-        requested_periods = None
-        if isinstance(raw_payload.get("aggregation_periods"), (list, tuple)):
-            requested_periods = list(raw_payload.get("aggregation_periods"))
+        # Aggregate (the aggregator is strict and raises on missing members)
+        period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload)
 
-        periods_to_use = requested_periods if requested_periods else default_periods
-
-        # Aggregate hourly-like into periods; guard when hourly_like is empty
-        if hourly_like:
-            # days param: set to 7 by default for period aggregation (caller-specific requests use WeatherFetcher.get_forecast)
-            period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=periods_to_use, full_payload=canonical)
-        else:
-            period_agg = {}
-
-        # Now combine per-timestamp forecasts into period-level scoring & safety (conservative safety aggregation)
+        # aggregate per-period scoring (same approach as original but errors propagate)
         period_forecasts: Dict[str, Dict[str, Any]] = {}
-        # Helper: aggregate component numeric scores by mean for the period
-        def _aggregate_components(component_lists: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-            if not component_lists:
-                return None
-            # discover all component keys
-            keys = set().union(*(c.keys() for c in component_lists if isinstance(c, dict)))
-            out = {}
-            for k in keys:
-                vals = []
-                reasons = []
-                for comp in component_lists:
-                    if not comp or k not in comp:
-                        continue
-                    try:
-                        s10 = comp[k].get("score_10")
-                        if s10 is not None:
-                            vals.append(float(s10))
-                        r = comp[k].get("reason")
-                        if r:
-                            reasons.append(str(r))
-                    except Exception:
-                        continue
-                if vals:
-                    avg = float(sum(vals) / len(vals))
-                    out[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10)), "reason": ";".join(sorted(set(reasons)))}
-            return out or None
-
-        # iterate each date and its periods
         for date_key, pmap in period_agg.items():
             period_forecasts[date_key] = {}
             for pname, pdata in pmap.items():
                 indices = pdata.get("indices") or []
-                timestamps_in_period = pdata.get("timestamps") or []
-                if not indices:
-                    # keep the empty summary
-                    period_forecasts[date_key][pname] = pdata
-                    continue
-
-                # collect per-timestamp forecast entries if present (we included them under "_forecast_entry")
                 per_ts_entries = []
                 for idx in indices:
                     if idx < len(hourly_like):
                         fe = hourly_like[idx].get("_forecast_entry")
                         if fe:
                             per_ts_entries.append(fe)
-
-                # compute aggregated score_10: mean of available score_10 values
                 score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
                 score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
-                score_100 = int(round(score_10 * 10)) if score_10 is not None else None
-
-                # components aggregation (average each numeric component.score_10)
-                comp_lists = [e.get("components") for e in per_ts_entries if e.get("components")]
-                components_agg = _aggregate_components(comp_lists)
-
-                # profile_used: first non-null profile_used found
-                profile_used = None
-                for e in per_ts_entries:
-                    if e.get("profile_used"):
-                        profile_used = e.get("profile_used")
-                        break
-
-                # safety: conservative union: unsafe if any unsafe True; caution if any caution True; collect unique reasons
-                safety = {"unsafe": False, "caution": False, "reasons": []}
-                reasons_set = set()
-                for e in per_ts_entries:
-                    s = e.get("safety") or {}
-                    if s.get("unsafe"):
-                        safety["unsafe"] = True
-                    if s.get("caution"):
-                        safety["caution"] = True
-                    for r in (s.get("reasons") or []):
-                        reasons_set.add(str(r))
-                safety["reasons"] = sorted(list(reasons_set))
-
-                # attach aggregated scoring to the period summary
-                summary = dict(pdata)  # shallow copy
+                components = None
+                if per_ts_entries:
+                    # basic components aggregation (mean of numeric score_10 per component)
+                    keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
+                    out_comp = {}
+                    for k in keys:
+                        vals = []
+                        for e in per_ts_entries:
+                            c = e.get("components") or {}
+                            if k in c and c[k].get("score_10") is not None:
+                                vals.append(float(c[k]["score_10"]))
+                        if vals:
+                            avg = float(sum(vals) / len(vals))
+                            out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
+                    components = out_comp or None
+                profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
+                safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
+                          "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
+                          "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
+                summary = dict(pdata)
                 summary.update({
                     "score_10": round(score_10, 3) if score_10 is not None else None,
                     "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
-                    "components": components_agg,
+                    "components": components,
                     "profile_used": profile_used,
                     "safety": safety,
                 })
                 period_forecasts[date_key][pname] = summary
 
-        # Return a structure compatible with upstream callers/tests:
-        # Expose canonical arrays at top level (strict mode) and include raw_payload for traceability.
-        top_level_canonical = {k: v for k, v in canonical.items() if k != "raw_payload_source"}
         final_out = {
-            "timestamps": canonical.get("timestamps") or [],
-            **top_level_canonical,  # expose canonical arrays like temperature_c, wind_m_s, etc.
-            "raw_payload": canonical,  # keep canonical snapshot under raw_payload for backward inspection
+            "timestamps": timestamps,
+            **canonical,
+            "raw_payload": raw_payload,
             "per_timestamp_forecasts": per_ts_forecasts,
             "period_forecasts": period_forecasts,
         }
-
         return final_out
 
-    # -----------------------
-    # End
+    # Reuse the strictly implemented aggregator from WeatherFetcher (delegation)
+    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+        # To avoid code duplication: instantiate a WeatherFetcher-like helper or call the WeatherFetcher version
+        # but since both classes are in the same module, reuse the method defined earlier on a lightweight helper
+        wf = WeatherFetcher.__new__(WeatherFetcher)
+        # call the aggregator implementation that exists on WeatherFetcher (we rely on identical signature)
+        # NOTE: WeatherFetcher._aggregate_hourly_into_periods expects specific key names; our hourly_like uses similar keys.
+        return WeatherFetcher._aggregate_hourly_into_periods(wf, hourly_list, days, aggregation_periods, full_payload)
+
+    def _convert_wind_array_value(self, v: Any, unit_hint: str) -> float:
+        """Convert single wind array value to m/s using the strict converter."""
+        return WeatherFetcher._incoming_wind_to_m_s(self=WeatherFetcher.__new__(WeatherFetcher), value=v, unit_hint=unit_hint)

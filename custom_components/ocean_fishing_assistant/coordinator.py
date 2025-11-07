@@ -1,3 +1,5 @@
+# Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
+
 from datetime import timedelta, datetime, timezone
 import async_timeout
 import logging
@@ -30,7 +32,10 @@ class OFACoordinator(DataUpdateCoordinator):
         units: str = "metric",
         safety_limits: Optional[dict] = None,
     ):
-        """Coordinator that fetches, aligns tide, formats data and persists last fetch."""
+        """
+        - fetcher must be already constructed with the user-selected units (strict).
+        - units here should correspond to that selection; coordinator validates fetcher speed unit consistency.
+        """
         super().__init__(
             hass,
             _LOGGER,
@@ -42,151 +47,87 @@ class OFACoordinator(DataUpdateCoordinator):
         self.formatter = formatter
         self.lat = lat
         self.lon = lon
-        # per-entry options
         self.species = species
         self.units = units or "metric"
-        # canonicalized safety limits in metric units (e.g. m/s, m, km, s)
         self.safety_limits = safety_limits or {}
-        # per-entry store key to avoid cross-entry collisions
         self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
         self._ttl = int(ttl)
-        # instantiate TideProxy for this sensor coords
         self._tide_proxy = TideProxy(hass, self.lat, self.lon)
 
+        # Validate fetcher speed unit matches the configured units selection:
+        # mapping: 'metric' -> 'km/h' (requires fetcher.speed_unit == 'km/h');
+        # if caller passed a more explicit units string like 'km/h'/'mph'/'m/s', accept that.
+        expected_speed_unit = None
+        if self.units == "metric":
+            expected_speed_unit = "km/h"
+        elif self.units == "imperial":
+            expected_speed_unit = "mph"
+        else:
+            # allow direct units strings
+            expected_speed_unit = self.units
+
+        fetcher_speed = getattr(self.fetcher, "speed_unit", None)
+        if fetcher_speed is None:
+            raise ValueError("Fetcher instance missing 'speed_unit' attribute; fetcher must be created with explicit units (strict)")
+        if fetcher_speed != expected_speed_unit:
+            raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
+
     async def _async_update_data(self):
-        """Fetch weather (cached), attach tide data, run formatter to precompute forecasts."""
+        """Fetch weather (strict), attach tide data, run formatter. All validation errors propagate."""
         async with async_timeout.timeout(60):
-            # build robust cache access via hass.data
             cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
             cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
             cached = cache_dict.get(cache_key)
             raw = None
-            try:
-                if cached and (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
-                    raw = cached.get("data")
-                else:
-                    raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-                    try:
-                        cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
-                    except Exception:
-                        _LOGGER.debug("Failed to update in-memory fetch cache", exc_info=True)
-            except Exception:
-                # fallback to fetching directly if cache logic fails
-                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
-
-            # Attempt to fetch marine/wave variables and merge them into the hourly payload if available.
-            try:
-                marine = None
-                if hasattr(self.fetcher, "fetch_marine_direct"):
-                    _LOGGER.debug("Fetching marine variables via fetch_marine_direct")
-                    marine = await self.fetcher.fetch_marine_direct(days=5)
-                if isinstance(marine, dict) and isinstance(marine.get("hourly"), dict):
-                    marine_hourly = marine.get("hourly", {})
-                    # If raw contains hourly arrays, merge keys that are missing. Prefer existing keys in raw.
-                    if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
-                        raw_hourly = raw["hourly"]
-                        # Reference times from the primary weather payload
-                        ref_time = raw_hourly.get("time") or []
-                        ref_len = len(ref_time) if isinstance(ref_time, list) else None
-                        marine_time = marine_hourly.get("time") or []
-                        # helper to parse ISO timestamps to epoch seconds using HA dt helper and UTC
-                        def _iso_to_ts(s):
-                            try:
-                                if s is None:
-                                    return None
-                                dt = dt_util.parse_datetime(str(s))
-                                if dt is None:
-                                    # fallback numeric epoch
-                                    tnum = float(s)
-                                    if tnum > 1e12:
-                                        tnum = tnum / 1000.0
-                                    dt = datetime.fromtimestamp(tnum, tz=timezone.utc)
-                                if dt.tzinfo is None:
-                                    dt = dt.replace(tzinfo=timezone.utc)
-                                return dt.timestamp()
-                            except Exception:
-                                return None
-                        # pre-parse marine timestamps if available
-                        marine_ts = [ _iso_to_ts(t) for t in marine_time ] if isinstance(marine_time, list) else []
-                        for k, arr in marine_hourly.items():
-                            if k == "time":
-                                continue
-                            if k in raw_hourly:
-                                # Prefer existing keys from primary payload
-                                continue
-                            if not isinstance(arr, list):
-                                _LOGGER.debug("Marine key %s is not a list; skipping", k)
-                                continue
-                            # If we have no reference times, attach as-is
-                            if ref_len is None:
-                                raw_hourly[k] = arr
-                                _LOGGER.debug("Attached marine key %s (no reference time available)", k)
-                                continue
-                            # If lengths match, attach directly
-                            if len(arr) == ref_len:
-                                raw_hourly[k] = arr
-                                _LOGGER.debug("Attached marine key %s (length matched)", k)
-                                continue
-                            # Attempt nearest-timestamp alignment if possible
-                            if not marine_ts or any(v is None for v in marine_ts):
-                                _LOGGER.debug("Marine key %s length mismatch and marine timestamps unavailable or unparsable; skipping", k)
-                                continue
-                            # parse reference timestamps
-                            ref_ts = [ _iso_to_ts(t) for t in ref_time ]
-                            if any(v is None for v in ref_ts):
-                                _LOGGER.debug("Reference timestamps unparsable; skipping alignment for key %s", k)
-                                continue
-                            # build aligned array using nearest-neighbor
-                            aligned = []
-                            for r in ref_ts:
-                                # find nearest marine index
-                                j = min(range(len(marine_ts)), key=lambda idx: abs(marine_ts[idx] - r))
-                                aligned.append(arr[j] if j < len(arr) else None)
-                            raw_hourly[k] = aligned
-                            _LOGGER.debug("Aligned marine key %s to reference timestamps (src_len=%d ref_len=%d)", k, len(arr), ref_len)
-                    else:
-                        # Raw had no hourly dict — attach marine hourly as the hourly payload
-                        raw.setdefault("hourly", {}).update(marine_hourly)
-                        _LOGGER.debug("Attached marine hourly payload as primary hourly data")
-                        # Also, if top-level time/timestamps missing, try convenience keys
-                        if "time" not in raw and "time" in marine_hourly:
-                            raw["time"] = marine_hourly.get("time")
-            except Exception:
-                _LOGGER.debug("Marine merge failed; continuing without marine data", exc_info=True)
-
-            # attempt to align tide to weather timestamps if available
-            timestamps = None
-            if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
-                timestamps = raw.get("hourly", {}).get("time") or raw.get("timestamps") or raw.get("time") or []
+            if cached and (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
+                raw = cached.get("data")
             else:
-                timestamps = raw.get("timestamps") or raw.get("time") or []
+                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
+                cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
 
-            if timestamps:
+            # Try to fetch marine variables and align strictly if provided (errors propagate)
+            if hasattr(self.fetcher, "fetch_marine_direct"):
                 try:
-                    tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
-                    # Keep a top-level tide dict for the formatter to consume
-                    raw.setdefault("tide", {}).update(tide)
-                    # Backwards-compatible convenience keys
-                    if "tide_height_m" not in raw and tide.get("tide_height_m") is not None:
-                        raw["tide_height_m"] = tide.get("tide_height_m")
-                    if "tide_phase" not in raw and tide.get("tide_phase") is not None:
-                        raw["tide_phase"] = tide.get("tide_phase")
-                    if "tide_strength" not in raw and tide.get("tide_strength") is not None:
-                        raw["tide_strength"] = tide.get("tide_strength")
+                    marine = await self.fetcher.fetch_marine_direct(days=5)
                 except Exception:
-                    _LOGGER.debug("TideProxy failed; continuing without tide", exc_info=True)
+                    # treat marine as optional but do not silently modify payload shapes; only attach when shapes align exactly
+                    marine = None
+                if isinstance(marine, dict) and isinstance(marine.get("hourly"), dict) and isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
+                    # only attach keys that have identical lengths to raw['hourly']['time']
+                    ref_time = raw["hourly"]["time"]
+                    if not isinstance(ref_time, (list, tuple)):
+                        raise ValueError("Raw hourly 'time' is not a list (strict)")
+                    ref_len = len(ref_time)
+                    for k, arr in marine["hourly"].items():
+                        if k == "time":
+                            continue
+                        if isinstance(arr, (list, tuple)) and len(arr) == ref_len:
+                            raw["hourly"][k] = list(arr)
 
-            # Attach convenience 'current' snapshot if the fetcher can provide it
-            try:
-                if hasattr(self.fetcher, "get_weather_data"):
+            # Attach tide strictly (tide proxy must return dict with arrays aligned to timestamps)
+            if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
+                timestamps = raw["hourly"]["time"]
+            else:
+                timestamps = raw.get("timestamps") or raw.get("time")
+            if timestamps:
+                tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
+                if not isinstance(tide, dict):
+                    raise ValueError("TideProxy returned invalid shape (strict)")
+                # only attach tide arrays if they are same length as timestamps
+                for k, v in tide.items():
+                    if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
+                        raw.setdefault("tide", {})[k] = list(v)
+
+            # Attach 'current' snapshot from fetcher (if present). fetcher.get_weather_data is strict and may raise.
+            if hasattr(self.fetcher, "get_weather_data"):
+                try:
                     current = await self.fetcher.get_weather_data()
-                    if current:
-                        raw["current"] = current
-            except Exception:
-                _LOGGER.debug("Failed to get current snapshot from fetcher", exc_info=True)
+                    raw["current"] = current
+                except Exception:
+                    # If get_weather_data fails, propagate: it's a strict condition
+                    raise
 
-            # IMPORTANT: pass per-entry species, units and safety_limits into the formatter
-            # NOTE: DataFormatter.validate is strict and will raise on critical failures to surface issues
+            # Run strict formatter (errors propagate)
             data = self.formatter.validate(
                 raw,
                 species_profile=self.species,
@@ -194,11 +135,8 @@ class OFACoordinator(DataUpdateCoordinator):
                 safety_limits=self.safety_limits,
             )
 
-            # persist if store enabled (wrap with timestamp for TTL checks)
+            # persist
             if self._store:
-                try:
-                    await self._store.async_save({"fetched_at": time.time(), "data": data})
-                except Exception:
-                    _LOGGER.debug("Failed to persist fetch to store", exc_info=True)
+                await self._store.async_save({"fetched_at": time.time(), "data": data})
 
             return data
