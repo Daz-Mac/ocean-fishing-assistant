@@ -416,7 +416,7 @@ class DataFormatter:
         # NOTE: we do not read aggregation_periods from the payload (legacy); caller must provide if desired.
 
         # Aggregate (the aggregator is strict and raises on missing members)
-        period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload)
+        period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload, units=units)
 
         # aggregate per-period scoring (same approach as original but errors propagate)
         period_forecasts: Dict[str, Dict[str, Any]] = {}
@@ -470,15 +470,177 @@ class DataFormatter:
         }
         return final_out
 
-    # Reuse the strictly implemented aggregator from WeatherFetcher (delegation)
-    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
-        # To avoid code duplication: instantiate a WeatherFetcher-like helper or call the WeatherFetcher version
-        # but since both classes are in the same module, reuse the method defined earlier on a lightweight helper
-        wf = WeatherFetcher.__new__(WeatherFetcher)
-        # call the aggregator implementation that exists on WeatherFetcher (we rely on identical signature)
-        # NOTE: WeatherFetcher._aggregate_hourly_into_periods expects specific key names; our hourly_like uses similar keys.
-        return WeatherFetcher._aggregate_hourly_into_periods(wf, hourly_list, days, aggregation_periods, full_payload)
+    # Aggregate hourly entries into named periods (implemented locally to avoid cross-class delegation)
+    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None, units: str = "metric") -> Dict[str, Dict[str, Any]]:
+        """
+        Local aggregator that accepts hourly-like rows produced earlier in validate().
+        Expects rows with keys: time, temperature_c, wind_m_s, wind_max_m_s, pressure_hpa, cloud_cover,
+        precipitation_probability, wave_height_m, wave_period_s, swell_height_m, swell_period_s
+        Returns mapping: date -> period_name -> {metrics..., indices: [hourly indices included]}
+        """
+        if not aggregation_periods:
+            aggregation_periods = [
+                {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
+                {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
+                {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
+                {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
+            ]
+
+        per_date_periods: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+        for idx, entry in enumerate(hourly_list):
+            if not isinstance(entry, dict):
+                continue
+            t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
+            if t_raw is None:
+                continue
+            try:
+                t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
+            except Exception:
+                t = None
+            if t is None:
+                try:
+                    tnum = float(t_raw)
+                    if tnum > 1e12:
+                        tnum = tnum / 1000.0
+                    t = datetime.fromtimestamp(tnum, tz=timezone.utc)
+                except Exception:
+                    continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            date_key = t.date().isoformat()
+            hour = t.hour
+
+            # find matching period
+            for p in aggregation_periods:
+                start = int(p["start_hour"])
+                end = int(p["end_hour"])
+                if start <= hour < end:
+                    pname = p["name"]
+                    per_date_periods.setdefault(date_key, {}).setdefault(pname, {
+                        "temperature_sum": 0.0,
+                        "wind_speed_sum": 0.0,
+                        "pressure_sum": 0.0,
+                        "cloud_sum": 0,
+                        "precip_max": 0,
+                        "gust_max": 0,
+                        "count": 0,
+                        "indices": [],
+                    })
+                    agg = per_date_periods[date_key][pname]
+                    try:
+                        temp = float(entry.get("temperature_c")) if entry.get("temperature_c") is not None else None
+                    except Exception:
+                        temp = None
+                    try:
+                        wind_m_s = float(entry.get("wind_m_s")) if entry.get("wind_m_s") is not None else None
+                    except Exception:
+                        wind_m_s = None
+                    try:
+                        gust_m_s = float(entry.get("wind_max_m_s")) if entry.get("wind_max_m_s") is not None else None
+                    except Exception:
+                        gust_m_s = None
+                    try:
+                        cloud = int(entry.get("cloud_cover")) if entry.get("cloud_cover") is not None else None
+                    except Exception:
+                        cloud = None
+                    try:
+                        pop = int(entry.get("precipitation_probability")) if entry.get("precipitation_probability") is not None else None
+                    except Exception:
+                        pop = None
+                    try:
+                        pressure = float(entry.get("pressure_hpa")) if entry.get("pressure_hpa") is not None else None
+                    except Exception:
+                        pressure = None
+
+                    if temp is not None:
+                        agg["temperature_sum"] += temp
+                    if wind_m_s is not None:
+                        agg["wind_speed_sum"] += wind_m_s
+                    if pressure is not None:
+                        agg["pressure_sum"] += pressure
+                    if cloud is not None:
+                        agg["cloud_sum"] += cloud
+                    if pop is not None:
+                        agg["precip_max"] = max(agg["precip_max"], pop)
+                    if gust_m_s is not None:
+                        agg["gust_max"] = max(agg["gust_max"], gust_m_s)
+                    agg["count"] += 1
+                    agg["indices"].append(idx)
+                    break
+
+        # finalize
+        final: Dict[str, Dict[str, Any]] = {}
+
+        # determine output wind unit
+        out_wind_unit = "km/h" if units == "metric" else "mph" if units == "imperial" else units
+
+        for date_key in sorted(per_date_periods.keys())[:days]:
+            final[date_key] = {}
+            for pname, agg in per_date_periods[date_key].items():
+                cnt = agg.get("count", 1) or 1
+                try:
+                    mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
+                    mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt if agg.get("wind_speed_sum") is not None else None
+                    gust_m_s = float(agg["gust_max"]) if agg.get("gust_max") is not None else None
+                    pressure = float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None
+                    cloud = int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None
+                    precip = int(round(float(agg["precip_max"]))) if agg.get("precip_max") is not None else None
+                except Exception:
+                    _LOGGER.debug("Failed to finalize aggregation for %s %s; skipping", date_key, pname)
+                    continue
+
+                # convert wind to requested display unit
+                wind_out = None
+                gust_out = None
+                try:
+                    if mean_wind_m_s is not None:
+                        if out_wind_unit in ("km/h", "kph", "kmh"):
+                            wind_out = unit_helpers.m_s_to_kmh(mean_wind_m_s)
+                        elif out_wind_unit in ("mph",):
+                            wind_out = unit_helpers.m_s_to_mph(mean_wind_m_s)
+                        else:
+                            wind_out = mean_wind_m_s
+                    if gust_m_s is not None:
+                        if out_wind_unit in ("km/h", "kph", "kmh"):
+                            gust_out = unit_helpers.m_s_to_kmh(gust_m_s)
+                        elif out_wind_unit in ("mph",):
+                            gust_out = unit_helpers.m_s_to_mph(gust_m_s)
+                        else:
+                            gust_out = gust_m_s
+                except Exception:
+                    wind_out = None
+                    gust_out = None
+
+                final[date_key][pname] = {
+                    "temperature": mean_temp,
+                    "wind_speed": wind_out,
+                    "wind_gust": gust_out,
+                    "wind_unit": out_wind_unit,
+                    "cloud_cover": cloud,
+                    "precipitation_probability": precip,
+                    "pressure": pressure,
+                    "indices": list(agg.get("indices", [])),
+                }
+
+        return final
 
     def _convert_wind_array_value(self, v: Any, unit_hint: str) -> float:
-        """Convert single wind array value to m/s using the strict converter."""
-        return WeatherFetcher._incoming_wind_to_m_s(self=WeatherFetcher.__new__(WeatherFetcher), value=v, unit_hint=unit_hint)
+        """Convert single wind array value to m/s using local converters."""
+        try:
+            if v is None:
+                raise ValueError("None wind value")
+            val = float(v)
+        except Exception as exc:
+            raise ValueError(f"Non-numeric wind value: {v!r}") from exc
+        u = str(unit_hint).strip().lower() if unit_hint is not None else "m/s"
+        if u in ("km/h", "kph", "kmh"):
+            out = unit_helpers.kmh_to_m_s(val)
+        elif u in ("mph", "mi/h", "miles/h"):
+            out = unit_helpers.mph_to_m_s(val)
+        else:
+            # assume m/s
+            out = val
+        if out is None:
+            raise ValueError(f"Unable to convert wind value: {v!r} with hint {unit_hint!r}")
+        return float(out)
