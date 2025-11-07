@@ -164,14 +164,20 @@ class DataFormatter:
         # temperature
         if "temperature_c" not in canonical:
             missing_keys.append("temperature_c")
-        # pressure series check
+        # pressure series check (STRICT):
+        # compute_score requires that for every timestamp index `i` there exists a
+        # future pressure point at index `i+1`. Therefore the pressure array must
+        # have at least one element more than the timestamps (len >= len(timestamps)+1).
         if "pressure_hpa" not in canonical:
             missing_keys.append("pressure_hpa")
         else:
-            # must be list/tuple and length > 1 to allow computing a delta to the next point
             p_arr = canonical.get("pressure_hpa")
-            if not isinstance(p_arr, (list, tuple)) or len(p_arr) < 2:
-                missing_keys.append("pressure_hpa_series_with_future_point")
+            if not isinstance(p_arr, (list, tuple)):
+                missing_keys.append("pressure_hpa_not_array")
+            else:
+                required_len = len(timestamps) + 1
+                if len(p_arr) < required_len:
+                    missing_keys.append(f"pressure_hpa_series_needs_len_at_least_{required_len}")
 
         # moon/astro presence — accept either explicit moon_phase, tide_phase, or an astro block
         if not any(k in canonical for k in ("moon_phase", "tide_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
