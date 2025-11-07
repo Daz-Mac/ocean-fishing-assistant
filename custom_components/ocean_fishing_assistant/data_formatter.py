@@ -148,14 +148,47 @@ class DataFormatter:
             if key in raw_payload:
                 canonical[key] = raw_payload.get(key)
 
-        # compute per-timestamp forecasts if required keys exist (compute errors propagate)
-        required_for_scoring = ("temperature_c" in canonical and "wind_m_s" in canonical and "pressure_hpa" in canonical) or ("wave_height_m" in canonical)
-        per_ts_forecasts: List[Dict[str, Any]] = []
-        if required_for_scoring:
-            per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
+        # STRICT PRECHECK: ensure canonical contains the essential arrays required by compute_score
+        # compute_score expects (per-index): tide_height_m, wind (wind_m_s), wave (wave_height_m), temperature_c,
+        # moon_phase/astro, and a pressure_hpa series with at least one future point (len > index+1).
+        missing_keys = []
+        # tide
+        if "tide_height_m" not in canonical:
+            missing_keys.append("tide_height_m")
+        # wind
+        if "wind_m_s" not in canonical:
+            missing_keys.append("wind_m_s")
+        # wave
+        if "wave_height_m" not in canonical:
+            missing_keys.append("wave_height_m")
+        # temperature
+        if "temperature_c" not in canonical:
+            missing_keys.append("temperature_c")
+        # pressure series check
+        if "pressure_hpa" not in canonical:
+            missing_keys.append("pressure_hpa")
         else:
-            # If scoring cannot be attempted due to missing optional keys, raise so callers know.
-            raise ValueError("Insufficient canonical keys to compute forecasts (strict): need temperature_c, wind_m_s, pressure_hpa or wave_height_m")
+            # must be list/tuple and length > 1 to allow computing a delta to the next point
+            p_arr = canonical.get("pressure_hpa")
+            if not isinstance(p_arr, (list, tuple)) or len(p_arr) < 2:
+                missing_keys.append("pressure_hpa_series_with_future_point")
+
+        # moon/astro presence
+        if not any(k in canonical for k in ("moon_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
+            missing_keys.append("moon_phase/astro")
+
+        if missing_keys:
+            raise ValueError(f"Insufficient canonical keys to compute strict forecasts (missing {missing_keys})")
+
+        # compute per-timestamp forecasts (compute errors propagate)
+        per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
+
+        # STRICT POSTCHECK: fail if any per-timestamp forecast is incomplete (score_100 is None)
+        for i, entry in enumerate(per_ts_forecasts):
+            if entry.get("score_100") is None:
+                ts = entry.get("timestamp")
+                details = entry.get("forecast_raw") or {}
+                raise ValueError(f"Incomplete scoring at index={i} timestamp={ts}: missing required inputs or scoring failed; details={details}")
 
         # Build hourly_like list expected by aggregator (strict)
         hourly_like: List[Dict[str, Any]] = []
