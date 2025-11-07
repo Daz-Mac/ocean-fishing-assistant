@@ -115,6 +115,10 @@ class DataFormatter:
         # --- Incorporate tide & astro if present in raw_payload so scoring can use them ---
         tide_obj = raw_payload.get("tide")
         if isinstance(tide_obj, dict):
+            # Preserve the original tide dict at top-level so downstream code that expects payload["tide"]
+            # can find the structured tide forecast/snapshot.
+            canonical["tide"] = tide_obj
+
             # If tide provides its own 'timestamps' align by index; otherwise require arrays to match
             tide_ts = tide_obj.get("timestamps")
             if tide_ts and isinstance(tide_ts, (list, tuple)):
@@ -148,12 +152,29 @@ class DataFormatter:
             if key in raw_payload:
                 canonical[key] = raw_payload.get(key)
 
+        # If marine arrays were attached into hourly (coordinator may attach marine hourly fields under raw['hourly']),
+        # construct a conservative top-level 'marine' dict so scoring can match by timestamps. This is deterministic:
+        marine_fields = ["wave_height", "wave_direction", "wave_period", "swell_wave_height", "swell_wave_period"]
+        marine_candidate: Dict[str, Any] = {}
+        for mf in marine_fields:
+            if mf in hourly:
+                arr = hourly[mf]
+                if isinstance(arr, (list, tuple)):
+                    _ensure_list_length_equal(mf, timestamps, list(arr))
+                    marine_candidate[mf] = list(arr)
+        if marine_candidate:
+            # include canonical timestamps for marine block
+            marine_candidate_with_ts = {"timestamps": timestamps, **marine_candidate}
+            # avoid clobbering existing explicit marine key if present; prefer explicit
+            if "marine" not in canonical:
+                canonical["marine"] = marine_candidate_with_ts
+
         # STRICT PRECHECK: ensure canonical contains the essential arrays required by compute_score
         # compute_score expects (per-index): tide_height_m, wind (wind_m_s), wave (wave_height_m), temperature_c,
         # moon_phase/astro, and a pressure_hpa series with at least one future point (len > index+1).
         missing_keys = []
         # tide
-        if "tide_height_m" not in canonical:
+        if "tide_height_m" not in canonical and "tide" not in canonical:
             missing_keys.append("tide_height_m")
         # wind
         if "wind_m_s" not in canonical:
