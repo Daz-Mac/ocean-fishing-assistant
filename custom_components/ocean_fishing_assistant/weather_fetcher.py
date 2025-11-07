@@ -848,7 +848,7 @@ class WeatherFetcher:
                 "longitude": self.longitude,
                 "timezone": "UTC",
                 "hourly": hourly_vars,
-                "forecast_days": int(days),
+                "forecast_days": int(days)+ 1,
             }
             async with session.get(OM_MARINE_BASE, params=params, timeout=60) as resp:
                 # If the API returns 400, the parameters were invalid (or the request malformed).
