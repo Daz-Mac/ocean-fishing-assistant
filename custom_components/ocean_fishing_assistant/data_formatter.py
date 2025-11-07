@@ -173,9 +173,9 @@ class DataFormatter:
             if not isinstance(p_arr, (list, tuple)) or len(p_arr) < 2:
                 missing_keys.append("pressure_hpa_series_with_future_point")
 
-        # moon/astro presence
-        if not any(k in canonical for k in ("moon_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
-            missing_keys.append("moon_phase/astro")
+        # moon/astro presence — accept either explicit moon_phase, tide_phase, or an astro block
+        if not any(k in canonical for k in ("moon_phase", "tide_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
+            missing_keys.append("moon_phase/astro/tide_phase")
 
         if missing_keys:
             raise ValueError(f"Insufficient canonical keys to compute strict forecasts (missing {missing_keys})")

@@ -138,7 +138,20 @@ class TideProxy:
 
         # Parse timestamps into TZ-aware UTC datetimes
         try:
-            dt_objs = [datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc) for ts in timestamps]
+            dt_objs = []
+            for ts in timestamps:
+                try:
+                    parsed = dt_util.parse_datetime(str(ts))
+                    if parsed is None:
+                        raise ValueError("parse_datetime returned None")
+                    if parsed.tzinfo is None:
+                        # assume UTC explicitly for naive timestamps
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    else:
+                        parsed = parsed.astimezone(timezone.utc)
+                    dt_objs.append(parsed)
+                except Exception as exc:
+                    raise ValueError(f"Unable to parse timestamp '{ts}': {exc}") from exc
         except Exception:
             empty = {
                 "timestamps": list(timestamps),
