@@ -1,3 +1,4 @@
+# (full contents — replace your existing file)
 # Strict DataFormatter (no fallbacks, fail loudly)
 from __future__ import annotations
 
@@ -110,6 +111,42 @@ class DataFormatter:
                     canonical[canon_key] = converted
                 else:
                     canonical[canon_key] = list(arr)  # shallow copy
+
+        # --- Incorporate tide & astro if present in raw_payload so scoring can use them ---
+        tide_obj = raw_payload.get("tide")
+        if isinstance(tide_obj, dict):
+            # If tide provides its own 'timestamps' align by index; otherwise require arrays to match
+            tide_ts = tide_obj.get("timestamps")
+            if tide_ts and isinstance(tide_ts, (list, tuple)):
+                # attempt to align by nearest index only if lengths match
+                if len(tide_ts) == len(timestamps):
+                    # copy tide arrays
+                    for k, v in tide_obj.items():
+                        if k == "timestamps":
+                            continue
+                        if isinstance(v, (list, tuple)):
+                            _ensure_list_length_equal(k, timestamps, list(v))
+                            canonical[k] = list(v)
+                        else:
+                            # scalar tide metadata
+                            canonical[k] = v
+            else:
+                # tide_obj may provide arrays keyed to timestamps directly — include arrays that match length
+                for k, v in tide_obj.items():
+                    if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
+                        canonical[k] = list(v)
+                    elif not isinstance(v, (list, tuple)):
+                        canonical[k] = v
+
+        # Copy top-level astro/astronomy/moon_phase into canonical so compute_score's _get_moon_phase_for_index() can find them.
+        for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "moon_phase"):
+            if key in raw_payload:
+                canonical[key] = raw_payload.get(key)
+
+        # Also accept 'marine' or 'marine_forecast' if caller attached it (we do not transform)
+        for key in ("marine", "marine_forecast", "marine_current"):
+            if key in raw_payload:
+                canonical[key] = raw_payload.get(key)
 
         # compute per-timestamp forecasts if required keys exist (compute errors propagate)
         required_for_scoring = ("temperature_c" in canonical and "wind_m_s" in canonical and "pressure_hpa" in canonical) or ("wave_height_m" in canonical)

@@ -1,3 +1,4 @@
+# (full contents — replace your existing file)
 from __future__ import annotations
 import logging
 import math
@@ -8,11 +9,11 @@ import asyncio
 
 from homeassistant.util import dt as dt_util
 
-# Local import to normalize output where available
+# Local import left for historical reasons but not used to validate tide-only payloads.
 try:
-    from .data_formatter import DataFormatter
+    from .data_formatter import DataFormatter  # type: ignore
 except Exception:
-    DataFormatter = None  # optional
+    DataFormatter = None  # optional — but we will not call validate() on tide-only payloads
 
 # Skyfield is required for astronomical tide calculations. Import at module load so missing
 # dependency surfaces quickly during integration setup.
@@ -253,19 +254,9 @@ class TideProxy:
             "source": "astronomical_skyfield",
         }
 
-        # DataFormatter remains optional
-        if DataFormatter:
-            try:
-                # DataFormatter implements a validate() instance method that returns
-                # the canonical mapping. Instantiate and call validate rather than
-                # calling a non-existent classmethod.
-                formatter = DataFormatter()
-                normalized = formatter.validate(raw_tide)
-            except Exception:
-                _LOGGER.exception("DataFormatter failed to normalize tide data; returning raw tide payload", exc_info=True)
-                normalized = raw_tide
-        else:
-            normalized = raw_tide
+        # Do NOT attempt to call DataFormatter.validate on this small tide-only dict.
+        # DataFormatter.validate is strict and expects an Open-Meteo shaped payload (hourly dict).
+        normalized = raw_tide
 
         self._cache = normalized
         self._last_calc = now

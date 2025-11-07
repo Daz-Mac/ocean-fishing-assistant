@@ -1,3 +1,4 @@
+# (full contents — replace your existing file)
 # Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
 
 from datetime import timedelta, datetime, timezone
@@ -113,10 +114,13 @@ class OFACoordinator(DataUpdateCoordinator):
                 tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
                 if not isinstance(tide, dict):
                     raise ValueError("TideProxy returned invalid shape (strict)")
-                # only attach tide arrays if they are same length as timestamps
+                # only attach tide arrays if they are same length as timestamps; attach scalars as well
                 for k, v in tide.items():
                     if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
                         raw.setdefault("tide", {})[k] = list(v)
+                    elif not isinstance(v, (list, tuple)):
+                        # attach scalar metadata (e.g., tide_phase, tide_strength, source, confidence)
+                        raw.setdefault("tide", {})[k] = v
 
             # Attach 'current' snapshot from fetcher (if present). fetcher.get_weather_data is strict and may raise.
             if hasattr(self.fetcher, "get_weather_data"):
