@@ -186,13 +186,6 @@ class DataFormatter:
         if "temperature_c" not in canonical:
             missing_keys.append("temperature_c")
         # pressure series check (STRICT):
-        # compute_score requires that for every timestamp index `i` there exists a
-        # future pressure point at index `i+1`. In practice Open-Meteo supplies an hourly
-        # array aligned with 'time' where all arrays are equal length. Therefore:
-        #  - If pressure array is shorter than timestamps -> fail (strict).
-        #  - If pressure array equals timestamps length (common case) -> we trim the final timestamp
-        #    and all per-hour arrays by one hour so that every remaining index has a future pressure point.
-        #  - If pressure array is longer than timestamps (rare), accept it as-is.
         if "pressure_hpa" not in canonical:
             missing_keys.append("pressure_hpa")
         else:
@@ -205,9 +198,6 @@ class DataFormatter:
                 if len_p < len_t:
                     missing_keys.append(f"pressure_hpa_series_too_short ({len_p} < {len_t})")
                 elif len_p == len_t:
-                    # Trim final timestamp and align all per-hour canonical arrays to length len_t - 1.
-                    # This is an explicit, deterministic operation (logged) that allows compute_score to
-                    # compute p_next for every remaining index (since pressure retains the trailing point).
                     new_len = len_t - 1
                     if new_len <= 0:
                         missing_keys.append("pressure_hpa_series_needs_more_points")
@@ -217,27 +207,19 @@ class DataFormatter:
                             len_t,
                             new_len,
                         )
-                        # Trim timestamps
                         timestamps = list(timestamps[:new_len])
                         canonical["timestamps"] = timestamps
-                        # Trim all per-hour arrays except pressure_hpa (we keep full pressure array so p_next exists)
                         for k, v in list(canonical.items()):
                             if k == "pressure_hpa" or k == "timestamps":
                                 continue
                             if isinstance(v, (list, tuple)):
-                                # If the array is at least len_t long, slice to new_len; otherwise it's an inconsistency
                                 if len(v) >= len_t:
                                     canonical[k] = list(v[:new_len])
                                 else:
-                                    # this should not happen because earlier we enforced equal lengths,
-                                    # but error loudly if it does.
                                     raise ValueError(f"Unexpected array length mismatch while trimming '{k}': expected >= {len_t}, got {len(v)}")
-                        # Note: pressure_hpa is intentionally left untrimmed so compute_score sees p_next for each index.
                 else:
-                    # len_p > len_t -> acceptable; no action (rare)
                     pass
 
-        # moon/astro presence — accept either explicit moon_phase, tide_phase, or an astro block
         if not any(k in canonical for k in ("moon_phase", "tide_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
             missing_keys.append("moon_phase/astro/tide_phase")
 
@@ -259,32 +241,25 @@ class DataFormatter:
         length = len(timestamps)
         for i, ts in enumerate(timestamps):
             row: Dict[str, Any] = {"time": ts}
-            # attach canonical keys into row when present
             for src_key in ("temperature_c", "wind_m_s", "wind_max_m_s", "pressure_hpa", "cloud_cover", "precipitation_probability",
                             "wave_height_m", "wave_period_s", "swell_height_m", "swell_period_s"):
                 arr = canonical.get(src_key)
                 if isinstance(arr, (list, tuple)):
-                    # arrays may be shorter due to trimming done above; safe indexing
                     if i < len(arr):
                         row[src_key] = arr[i]
-            # attach computed forecast entry if available
             if i < len(per_ts_forecasts):
                 row["_forecast_entry"] = per_ts_forecasts[i]
             hourly_like.append(row)
 
-        # Use strict default 4 periods if caller doesn't supply aggregation shape
         default_periods = [
             {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
             {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
             {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
             {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
         ]
-        # NOTE: we do not read aggregation_periods from the payload (legacy); caller must provide if desired.
 
-        # Aggregate (the aggregator is strict and raises on missing members)
         period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload, units=units)
 
-        # aggregate per-period scoring (same approach as original but errors propagate)
         period_forecasts: Dict[str, Dict[str, Any]] = {}
         for date_key, pmap in period_agg.items():
             period_forecasts[date_key] = {}
@@ -300,7 +275,6 @@ class DataFormatter:
                 score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
                 components = None
                 if per_ts_entries:
-                    # basic components aggregation (mean of numeric score_10 per component)
                     keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
                     out_comp = {}
                     for k in keys:

@@ -1,7 +1,6 @@
-# (full contents — replace your existing file)
 # Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
 
-from datetime import timedelta, datetime, timezone
+from datetime import timedelta
 import async_timeout
 import logging
 import time
@@ -34,8 +33,8 @@ class OFACoordinator(DataUpdateCoordinator):
         safety_limits: Optional[dict] = None,
     ):
         """
-        - fetcher must be already constructed with the user-selected units (strict).
-        - units here should correspond to that selection; coordinator validates fetcher speed unit consistency.
+        - fetcher must be constructed with the user-selected wind unit (strict).
+        - coordinator validates fetcher.speed_unit matches options.
         """
         super().__init__(
             hass,
@@ -55,16 +54,13 @@ class OFACoordinator(DataUpdateCoordinator):
         self._ttl = int(ttl)
         self._tide_proxy = TideProxy(hass, self.lat, self.lon)
 
-        # Validate fetcher speed unit matches the configured units selection:
-        # mapping: 'metric' -> 'km/h' (requires fetcher.speed_unit == 'km/h');
-        # if caller passed a more explicit units string like 'km/h'/'mph'/'m/s', accept that.
+        # Validate fetcher speed unit matches the configured units selection (strict enforcement)
         expected_speed_unit = None
         if self.units == "metric":
             expected_speed_unit = "km/h"
         elif self.units == "imperial":
             expected_speed_unit = "mph"
         else:
-            # allow direct units strings
             expected_speed_unit = self.units
 
         fetcher_speed = getattr(self.fetcher, "speed_unit", None)
@@ -74,7 +70,7 @@ class OFACoordinator(DataUpdateCoordinator):
             raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
 
     async def _async_update_data(self):
-        """Fetch weather (strict), attach tide data, run formatter. All validation errors propagate."""
+        """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
         async with async_timeout.timeout(60):
             cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
             cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
@@ -83,53 +79,53 @@ class OFACoordinator(DataUpdateCoordinator):
             if cached and (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
                 raw = cached.get("data")
             else:
+                # fetch raw Open-Meteo payload strictly (may raise)
                 raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
                 cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
 
-            # Try to fetch marine variables and align strictly if provided (errors propagate)
-            if hasattr(self.fetcher, "fetch_marine_direct"):
-                try:
-                    marine = await self.fetcher.fetch_marine_direct(days=5)
-                except Exception:
-                    # treat marine as optional but do not silently modify payload shapes; only attach when shapes align exactly
-                    marine = None
-                if isinstance(marine, dict) and isinstance(marine.get("hourly"), dict) and isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
-                    # only attach keys that have identical lengths to raw['hourly']['time']
-                    ref_time = raw["hourly"]["time"]
-                    if not isinstance(ref_time, (list, tuple)):
-                        raise ValueError("Raw hourly 'time' is not a list (strict)")
-                    ref_len = len(ref_time)
-                    for k, arr in marine["hourly"].items():
-                        if k == "time":
-                            continue
-                        if isinstance(arr, (list, tuple)) and len(arr) == ref_len:
-                            raw["hourly"][k] = list(arr)
+            # Fetch marine variables (STRICT: marine is required for ocean assistant)
+            if not hasattr(self.fetcher, "fetch_marine_direct"):
+                raise RuntimeError("Fetcher does not implement fetch_marine_direct (marine required)")
+
+            marine = await self.fetcher.fetch_marine_direct(days=5)  # will raise on failure
+            if not isinstance(marine, dict) or "hourly" not in marine or not isinstance(marine["hourly"], dict):
+                raise RuntimeError("Marine payload invalid (strict)")
+
+            # Only attach marine arrays that align exactly with raw['hourly']['time']
+            if not isinstance(raw, dict) or "hourly" not in raw or not isinstance(raw["hourly"], dict):
+                raise RuntimeError("Raw forecast payload missing required 'hourly' arrays (strict)")
+            ref_time = raw["hourly"]["time"]
+            if not isinstance(ref_time, (list, tuple)):
+                raise ValueError("Raw hourly 'time' is not a list (strict)")
+            ref_len = len(ref_time)
+            for k, arr in marine["hourly"].items():
+                if k == "time":
+                    continue
+                if not isinstance(arr, (list, tuple)):
+                    raise ValueError(f"Marine hourly key '{k}' is not an array (strict)")
+                if len(arr) != ref_len:
+                    raise ValueError(f"Marine hourly array '{k}' length {len(arr)} does not match forecast time length {ref_len} (strict)")
+                raw["hourly"][k] = list(arr)
 
             # Attach tide strictly (tide proxy must return dict with arrays aligned to timestamps)
-            if isinstance(raw, dict) and isinstance(raw.get("hourly"), dict):
-                timestamps = raw["hourly"]["time"]
-            else:
-                timestamps = raw.get("timestamps") or raw.get("time")
-            if timestamps:
-                tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
-                if not isinstance(tide, dict):
-                    raise ValueError("TideProxy returned invalid shape (strict)")
-                # only attach tide arrays if they are same length as timestamps; attach scalars as well
-                for k, v in tide.items():
-                    if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
-                        raw.setdefault("tide", {})[k] = list(v)
-                    elif not isinstance(v, (list, tuple)):
-                        # attach scalar metadata (e.g., tide_phase, tide_strength, source, confidence)
-                        raw.setdefault("tide", {})[k] = v
+            timestamps = raw["hourly"]["time"]
+            tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
+            if not isinstance(tide, dict):
+                raise ValueError("TideProxy returned invalid shape (strict)")
+            # only attach tide arrays if they are same length as timestamps; attach scalars as well
+            for k, v in tide.items():
+                if isinstance(v, (list, tuple)):
+                    if len(v) != len(timestamps):
+                        raise ValueError(f"Tide array '{k}' length {len(v)} does not match timestamps length {len(timestamps)} (strict)")
+                    raw.setdefault("tide", {})[k] = list(v)
+                else:
+                    raw.setdefault("tide", {})[k] = v
 
-            # Attach 'current' snapshot from fetcher (if present). fetcher.get_weather_data is strict and may raise.
-            if hasattr(self.fetcher, "get_weather_data"):
-                try:
-                    current = await self.fetcher.get_weather_data()
-                    raw["current"] = current
-                except Exception:
-                    # If get_weather_data fails, propagate: it's a strict condition
-                    raise
+            # Attach current snapshot (strict)
+            if not hasattr(self.fetcher, "get_weather_data"):
+                raise RuntimeError("Fetcher does not implement get_weather_data (strict)")
+            current = await self.fetcher.get_weather_data()  # will raise on failure
+            raw["current"] = current
 
             # Run strict formatter (errors propagate)
             data = self.formatter.validate(
