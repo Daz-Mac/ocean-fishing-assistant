@@ -101,11 +101,14 @@ async def async_setup_entry(hass, entry):
     if entry.options.get("persist_last_fetch", False):
         _LOGGER.debug("persist_last_fetch enabled for entry %s; attempting to load persisted data", entry.entry_id)
         try:
-            await coord.async_load_from_store()
-            _LOGGER.debug("Successfully loaded persisted fetch for entry %s", entry.entry_id)
+            loaded = await coord.async_load_from_store()
+            if loaded:
+                _LOGGER.debug("Successfully loaded persisted fetch for entry %s", entry.entry_id)
+            else:
+                _LOGGER.debug("No persisted fetch available for entry %s (first run)", entry.entry_id)
         except Exception:
             _LOGGER.exception("Failed to load persisted fetch for entry %s", entry.entry_id)
-            # Do not mask — treat failure to restore as non-fatal but log the stack.
+            # Treat failure to restore as non-fatal but log the stack.
 
     # request a fresh update (will run after any restored data is available)
     _LOGGER.debug("Requesting initial data refresh for entry %s", entry.entry_id)
@@ -123,3 +126,23 @@ async def async_setup_entry(hass, entry):
 
     _LOGGER.debug("async_setup_entry completed for entry %s", entry.entry_id)
     return True
+
+
+async def async_unload_entry(hass, entry):
+    """Unload a config entry."""
+    _LOGGER.debug("Starting async_unload_entry for entry %s", entry.entry_id)
+    try:
+        unload_ok = await hass.config_entries.async_forward_entry_unload(entry, "sensor")
+        _LOGGER.debug("Forwarded unload for entry %s to sensor platform, result=%s", entry.entry_id, unload_ok)
+    except Exception:
+        _LOGGER.exception("Error while forwarding unload for entry %s", entry.entry_id)
+        unload_ok = False
+
+    try:
+        removed = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        _LOGGER.debug("Removed coordinator from hass.data for entry %s: %s", entry.entry_id, removed)
+    except Exception:
+        _LOGGER.exception("Failed to remove entry %s from hass.data", entry.entry_id)
+
+    _LOGGER.debug("async_unload_entry finished for entry %s, unload_ok=%s", entry.entry_id, unload_ok)
+    return unload_ok

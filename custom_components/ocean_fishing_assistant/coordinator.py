@@ -72,14 +72,19 @@ class OFACoordinator(DataUpdateCoordinator):
     async def async_load_from_store(self):
         """
         Load a previously persisted successful fetch from storage and set the coordinator's data.
-        Raises on invalid shape or if store not configured (strict).
+
+        Non-fatal: if store contains nothing (first run) return False.
+        Raises on invalid shape or other store errors (strict).
+        Returns True if persisted data was loaded and applied.
         """
         if not self._store:
             raise RuntimeError("Persistence store not configured for this coordinator (cannot load)")
 
         stored = await self._store.async_load()
+        # If nothing persisted yet, treat as normal (not an error)
         if not stored:
-            raise RuntimeError("No persisted fetch available in store (strict)")
+            # No persisted fetch available — caller can continue normally
+            return False
 
         if not isinstance(stored, dict) or "data" not in stored:
             raise RuntimeError("Persisted store payload invalid (strict)")
@@ -92,7 +97,8 @@ class OFACoordinator(DataUpdateCoordinator):
         try:
             self.async_set_updated_data(data)
             _LOGGER.debug("Loaded persisted fetch for coordinator %s", self.entry_id)
-        except Exception as exc:
+            return True
+        except Exception:
             _LOGGER.exception("Failed to set persisted data into coordinator (strict)")
             raise
 
