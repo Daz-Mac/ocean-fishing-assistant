@@ -84,6 +84,33 @@ class WeatherFetcher:
         self._cache_duration = timedelta(minutes=30)
 
     # -----------------------
+    # New: convenience fetch wrapper used by coordinator
+    # -----------------------
+    async def fetch(self, latitude: float, longitude: float, mode: str = "hourly", days: int = 5) -> Dict[str, Any]:
+        """
+        Strict wrapper to return the raw Open-Meteo forecast payload expected by the coordinator.
+
+        - Validates lat/lon match the fetcher instance (strict).
+        - Supports only mode='hourly' currently.
+        - Delegates to fetch_open_meteo_forecast_direct and returns the raw dict.
+        """
+        # Strict validation: caller must use the same coordinates as the fetcher was constructed with
+        try:
+            lat_n = round(float(latitude), 6)
+            lon_n = round(float(longitude), 6)
+        except Exception:
+            raise ValueError("Invalid latitude/longitude passed to fetch (strict)")
+
+        if lat_n != self.latitude or lon_n != self.longitude:
+            raise ValueError("Latitude/longitude mismatch with fetcher instance (strict)")
+
+        if mode != "hourly":
+            raise ValueError(f"Unsupported fetch mode '{mode}' (strict)")
+
+        # Return the raw Open-Meteo payload (coordinator expects 'hourly' arrays)
+        return await self.fetch_open_meteo_forecast_direct(days)
+
+    # -----------------------
     # Unit helpers
     # -----------------------
     def _incoming_wind_to_m_s(self, value: Any, unit_hint: Optional[str] = None) -> Optional[float]:

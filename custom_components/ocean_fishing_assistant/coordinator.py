@@ -69,6 +69,33 @@ class OFACoordinator(DataUpdateCoordinator):
         if fetcher_speed != expected_speed_unit:
             raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
 
+    async def async_load_from_store(self):
+        """
+        Load a previously persisted successful fetch from storage and set the coordinator's data.
+        Raises on invalid shape or if store not configured (strict).
+        """
+        if not self._store:
+            raise RuntimeError("Persistence store not configured for this coordinator (cannot load)")
+
+        stored = await self._store.async_load()
+        if not stored:
+            raise RuntimeError("No persisted fetch available in store (strict)")
+
+        if not isinstance(stored, dict) or "data" not in stored:
+            raise RuntimeError("Persisted store payload invalid (strict)")
+
+        data = stored.get("data")
+        if data is None:
+            raise RuntimeError("Persisted fetch contains no data (strict)")
+
+        # Use DataUpdateCoordinator helper to set the last known data so sensors start with it.
+        try:
+            self.async_set_updated_data(data)
+            _LOGGER.debug("Loaded persisted fetch for coordinator %s", self.entry_id)
+        except Exception as exc:
+            _LOGGER.exception("Failed to set persisted data into coordinator (strict)")
+            raise
+
     async def _async_update_data(self):
         """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
         async with async_timeout.timeout(60):
