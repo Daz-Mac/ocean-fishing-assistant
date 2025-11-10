@@ -40,7 +40,7 @@ async def async_setup_entry(hass, entry):
     formatter = DataFormatter()
     _LOGGER.debug("DataFormatter instantiated: %s", formatter)
 
-    # Read canonical safety_limits already normalized by config flow; require wind_unit present
+    # Read canonical safety_limits already normalized by config flow; require units present
     units = entry.options.get("units")
     if not units:
         raise ValueError("Entry options missing 'units' (strict)")
@@ -49,9 +49,31 @@ async def async_setup_entry(hass, entry):
     if safety_limits is None:
         raise ValueError("Entry options missing 'safety_limits' (strict)")
 
-    wind_unit = entry.options.get("wind_unit")
-    if not wind_unit:
-        raise ValueError("Entry options missing required 'wind_unit' (strict)")
+    # Determine expected wind unit deterministically from the selected units
+    expected_wind_unit = "km/h" if units == "metric" else "mph" if units == "imperial" else None
+    if expected_wind_unit is None:
+        raise ValueError(f"Unsupported entry.options['units']: {units!r} (strict)")
+
+    # If wind_unit is missing or mismatched, migrate the entry options to the deterministic mapping.
+    current_wind_unit = entry.options.get("wind_unit")
+    if current_wind_unit != expected_wind_unit:
+        _LOGGER.info(
+            "Config entry %s wind_unit mismatch or missing (current=%s expected=%s). Migrating entry.options to deterministic wind unit.",
+            entry.entry_id,
+            current_wind_unit,
+            expected_wind_unit,
+        )
+        # Build new options dict based on existing options but with corrected wind_unit
+        new_options = dict(entry.options or {})
+        new_options["wind_unit"] = expected_wind_unit
+        # Persist update to the config entry so future setups use correct mapping
+        hass.config_entries.async_update_entry(entry, options=new_options)
+        # Use updated value going forward
+        wind_unit = expected_wind_unit
+    else:
+        wind_unit = current_wind_unit
+
+    # Final validation of wind_unit value
     if wind_unit not in ("km/h", "mph", "m/s"):
         raise ValueError(f"Invalid entry.options['wind_unit']: {wind_unit!r} (strict)")
 
@@ -101,23 +123,3 @@ async def async_setup_entry(hass, entry):
 
     _LOGGER.debug("async_setup_entry completed for entry %s", entry.entry_id)
     return True
-
-
-async def async_unload_entry(hass, entry):
-    """Unload a config entry."""
-    _LOGGER.debug("Starting async_unload_entry for entry %s", entry.entry_id)
-    try:
-        unload_ok = await hass.config_entries.async_forward_entry_unload(entry, "sensor")
-        _LOGGER.debug("Forwarded unload for entry %s to sensor platform, result=%s", entry.entry_id, unload_ok)
-    except Exception:
-        _LOGGER.exception("Error while forwarding unload for entry %s", entry.entry_id)
-        unload_ok = False
-
-    try:
-        removed = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-        _LOGGER.debug("Removed coordinator from hass.data for entry %s: %s", entry.entry_id, removed)
-    except Exception:
-        _LOGGER.exception("Failed to remove entry %s from hass.data", entry.entry_id)
-
-    _LOGGER.debug("async_unload_entry finished for entry %s, unload_ok=%s", entry.entry_id, unload_ok)
-    return unload_ok
