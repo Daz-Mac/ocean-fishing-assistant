@@ -169,15 +169,18 @@ class OFACoordinator(DataUpdateCoordinator):
                 )
                 raise RuntimeError("Failed to construct current weather snapshot from hourly arrays (strict)") from exc
 
-            # Additional sanity check: ensure current contains required keys
-            if not isinstance(current, dict) or current.get("temperature") is None or current.get("wind_speed") is None:
+            # STRICT sanity check: ensure current contains required keys (all required under strict policy)
+            required_current = ["temperature", "wind_speed", "wind_gust", "cloud_cover", "precipitation_probability", "pressure", "wind_unit"]
+            missing_current = [k for k in required_current if not (isinstance(current, dict) and current.get(k) is not None)]
+            if missing_current:
                 _LOGGER.error(
-                    "Constructed current snapshot missing required fields for %s,%s: %s",
+                    "Constructed current snapshot missing required fields for %s,%s: missing=%s current=%s",
                     self.lat,
                     self.lon,
+                    missing_current,
                     current,
                 )
-                raise RuntimeError("Constructed current snapshot missing required fields (strict)")
+                raise RuntimeError(f"Constructed current snapshot missing required fields (strict): {missing_current}")
 
             raw["current"] = current
 
