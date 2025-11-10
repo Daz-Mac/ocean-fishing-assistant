@@ -363,7 +363,7 @@ class DataFormatter:
                         "pressure_sum": 0.0,
                         "cloud_sum": 0,
                         "precip_max": 0,
-                        "gust_max": 0,
+                        "gust_max": None,
                         "count": 0,
                         "indices": [],
                     })
@@ -404,7 +404,11 @@ class DataFormatter:
                     if pop is not None:
                         agg["precip_max"] = max(agg["precip_max"], pop)
                     if gust_m_s is not None:
-                        agg["gust_max"] = max(agg["gust_max"], gust_m_s)
+                        # gust_max must be the maximum gust seen in the period (do not average)
+                        if agg["gust_max"] is None:
+                            agg["gust_max"] = gust_m_s
+                        else:
+                            agg["gust_max"] = max(agg["gust_max"], gust_m_s)
                     agg["count"] += 1
                     agg["indices"].append(idx)
                     break
@@ -418,11 +422,14 @@ class DataFormatter:
         for date_key in sorted(per_date_periods.keys())[:days]:
             final[date_key] = {}
             for pname, agg in per_date_periods[date_key].items():
-                cnt = agg.get("count", 1) or 1
+                cnt = agg.get("count", 0) or 0
+                if cnt == 0:
+                    # Nothing to aggregate for this period
+                    continue
                 try:
                     mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
                     mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt if agg.get("wind_speed_sum") is not None else None
-                    gust_m_s = float(agg["gust_max"]) / cnt if agg.get("gust_max") is not None else None
+                    gust_m_s = float(agg["gust_max"]) if agg.get("gust_max") is not None else None
                     pressure = float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None
                     cloud = int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None
                     precip = int(round(float(agg["precip_max"]))) if agg.get("precip_max") is not None else None
