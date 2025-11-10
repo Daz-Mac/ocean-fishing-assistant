@@ -71,11 +71,13 @@ class WeatherFetcher:
         if not speed_unit or str(speed_unit).strip().lower() not in ("km/h", "kph", "kmh", "mph", "m/s"):
             raise ValueError("WeatherFetcher requires explicit speed_unit ('km/h', 'mph' or 'm/s') (strict)")
         su = str(speed_unit).strip().lower()
-        if su in ("kph", "kmh"):
+        # Accept common variants and normalize them to canonical internal values
+        if su in ("kph", "kmh", "km/h"):
             self.speed_unit = "km/h"
         elif su == "mph":
             self.speed_unit = "mph"
         else:
+            # covers "m/s" and variants which fall through
             self.speed_unit = "m/s"
 
         self._cache_key = f"{self.latitude}_{self.longitude}_om"
