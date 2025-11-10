@@ -157,7 +157,28 @@ class OFACoordinator(DataUpdateCoordinator):
             # Attach current snapshot (strict)
             if not hasattr(self.fetcher, "get_weather_data"):
                 raise RuntimeError("Fetcher does not implement get_weather_data (strict)")
-            current = await self.fetcher.get_weather_data()  # will raise on failure
+            try:
+                current = await self.fetcher.get_weather_data()  # will raise on failure
+            except Exception as exc:
+                # Log with context for easier debugging, then re-raise as a strict error.
+                _LOGGER.exception(
+                    "Failed to construct current snapshot from Open-Meteo hourly data for %s,%s: %s",
+                    self.lat,
+                    self.lon,
+                    exc,
+                )
+                raise RuntimeError("Failed to construct current weather snapshot from hourly arrays (strict)") from exc
+
+            # Additional sanity check: ensure current contains required keys
+            if not isinstance(current, dict) or current.get("temperature") is None or current.get("wind_speed") is None:
+                _LOGGER.error(
+                    "Constructed current snapshot missing required fields for %s,%s: %s",
+                    self.lat,
+                    self.lon,
+                    current,
+                )
+                raise RuntimeError("Constructed current snapshot missing required fields (strict)")
+
             raw["current"] = current
 
             # Run strict formatter (errors propagate)

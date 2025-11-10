@@ -164,9 +164,9 @@ class WeatherFetcher:
         Fetch and return a strict current weather snapshot.
 
         This method will raise on any missing/invalid critical field (temperature, wind).
-        """
-        from homeassistant.util import dt as dt_util
 
+        NOTE: Always constructs the current snapshot from hourly arrays (nearest-hour).
+        """
         now = dt_util.now()
         cache_entry = self.hass.data.setdefault("ocean_fishing_assistant_fetch_cache", {}).get(self._cache_key)
         if cache_entry:
@@ -180,20 +180,8 @@ class WeatherFetcher:
         if not isinstance(payload, dict):
             raise RuntimeError("Open-Meteo current fetch returned non-dict payload (strict)")
 
-        # Prefer explicit current_weather block (Open‑Meteo documented shape)
-        if "current_weather" in payload and isinstance(payload["current_weather"], dict):
-            units_container = payload.get("current_weather_units") or payload.get("hourly_units") or {}
-            wind_unit_hint = None
-            if isinstance(units_container, dict):
-                wind_unit_hint = (
-                    units_container.get("windspeed")
-                    or units_container.get("wind_speed")
-                    or units_container.get("wind_speed_10m")
-                )
-            mapped = self._map_to_current_shape(payload["current_weather"], incoming_unit_hint=wind_unit_hint)
-        else:
-            # Strictly extract nearest-hourly snapshot (will raise if critical fields missing)
-            mapped = self._extract_current_from_rest_result(payload)
+        # Always derive current snapshot from hourly arrays (strict)
+        mapped = self._extract_current_from_rest_result(payload)
 
         # Must have critical fields
         if not mapped or mapped.get("temperature") is None or mapped.get("wind_speed") is None:
@@ -287,7 +275,7 @@ class WeatherFetcher:
         temp_raw = pick("temperature", "temp", "temperature_2m", "air_temperature")
         wind_raw = pick("wind_speed", "wind_kph", "wind_km_h", "wind", "windspeed", "wind_speed_10m")
         wind_gust_raw = pick("wind_gust", "gust", "windgusts_10m") or wind_raw
-        cloud_raw = pick("cloud_cover", "clouds", "clouds_percent", "cloud_coverage")
+        cloud_raw = pick("cloud_cover", "cloudcover", "clouds", "clouds_percent", "cloud_coverage")
         precip_raw = pick("precipitation_probability", "pop", "precipitation", "precip")
         pressure_raw = pick("pressure", "air_pressure", "pressure_msl", "pressure_msl")
 
