@@ -656,7 +656,7 @@ def compute_forecast(
             except Exception:
                 matched_marine = None
 
-            # matched astro (similar approach)
+            # matched astro (enhanced: include per-timestamp moon_phase array or scalar if present)
             matched_astro = None
             try:
                 if isinstance(astro_data, dict):
@@ -689,6 +689,21 @@ def compute_forecast(
                         matched_astro = best
             except Exception:
                 matched_astro = None
+
+            # FALLBACK: if we didn't match an astro block, but payload includes a per-timestamp
+            # 'moon_phase' array or scalar, expose that as astro_used so diagnostics show the
+            # actual moon_phase value used by compute_score (compute_score itself still uses
+            # _get_moon_phase_for_index — we only populate the debug field here).
+            if matched_astro is None:
+                try:
+                    moon_arr = payload.get("moon_phase")
+                    if isinstance(moon_arr, (list, tuple)) and idx < len(moon_arr):
+                        matched_astro = {"moon_phase": _to_float_safe(moon_arr[idx])}
+                    elif moon_arr is not None and not isinstance(moon_arr, (list, tuple)):
+                        # scalar moon_phase
+                        matched_astro = {"moon_phase": _to_float_safe(moon_arr)}
+                except Exception:
+                    matched_astro = None
 
             forecast_raw = {
                 "raw_input": payload,
