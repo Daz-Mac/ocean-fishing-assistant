@@ -206,13 +206,13 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
+                # sensor_name kept at top in options flow so it appears above coordinates when editing options
+                vol.Optional("sensor_name", default=current.get("sensor_name", "")): cv.string,
                 vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=current.get("persist_last_fetch", False)): bool,
                 vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
                 vol.Optional("species", default=current.get("species", "")): cv.string,
                 vol.Optional("units", default=entry_units): vol.In(["metric", "imperial"]),
-                # sensor_name is required in options flow as well (no fallback)
-                vol.Optional("sensor_name", default=current.get("sensor_name", "")): cv.string,
                 vol.Optional("safety_max_wind", default=wind_default): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement=wind_unit, mode="slider")
                 ),
