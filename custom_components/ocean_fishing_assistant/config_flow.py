@@ -12,6 +12,18 @@ from .unit_helpers import convert_safety_display_to_metric, validate_and_normali
 
 _LOGGER = logging.getLogger(__name__)
 
+# Load species profiles for use in config/options flows. If validation fails, fall back to empty options
+try:
+    from .species_loader import load_profiles, validate_profiles, get_species_options  # local import
+
+    _PROFILES = load_profiles()
+    validate_profiles(_PROFILES)
+    _SPECIES_OPTIONS = get_species_options(_PROFILES)
+except Exception:
+    _LOGGER.exception("Failed to load species profiles for config flow; species dropdown will be empty")
+    _SPECIES_OPTIONS = []
+
+
 
 class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
@@ -72,7 +84,7 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("update_interval", default=DEFAULT_UPDATE_INTERVAL): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=False): bool,
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,
-                vol.Optional("species", default=""): cv.string,
+                vol.Optional("species", default=""): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)),
                 vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
                 vol.Required("safety_max_wind"): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement="km/h", mode="slider")
