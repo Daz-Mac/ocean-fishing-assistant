@@ -65,6 +65,7 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Require users to provide explicit safety limits and sensor name at setup. Show sliders (NumberSelector) with metric defaults.
         schema = vol.Schema(
             {
+                vol.Required("sensor_name"): cv.string,
                 vol.Required(CONF_LATITUDE): cv.latitude,
                 vol.Required(CONF_LONGITUDE): cv.longitude,
                 vol.Optional("update_interval", default=DEFAULT_UPDATE_INTERVAL): cv.positive_int,
@@ -72,8 +73,6 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,
                 vol.Optional("species", default=""): cv.string,
                 vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
-                # New required sensor name (no fallback)
-                vol.Required("sensor_name"): cv.string,
                 vol.Required("safety_max_wind"): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement="km/h", mode="slider")
                 ),
