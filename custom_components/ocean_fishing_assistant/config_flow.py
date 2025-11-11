@@ -62,7 +62,8 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
 
-        # Require users to provide explicit safety limits and sensor name at setup. Show sliders (NumberSelector) with metric defaults.
+        # Require users to provide explicit safety limits and sensor name at setup.
+        # Show sliders (NumberSelector) with metric defaults. sensor_name placed first so it appears above coordinates.
         schema = vol.Schema(
             {
                 vol.Required("sensor_name"): cv.string,
@@ -109,7 +110,6 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
             # validate species exists in species_profiles.json if provided
             species = user_input.get("species") or None
             if species:
-                # Attempt to load species list from file packaged with integration
                 try:
                     import json
                     import pkgutil
@@ -119,7 +119,6 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                     if species not in profiles:
                         errors["species"] = "invalid_species"
                 except Exception:
-                    # if we can't validate, accept but warn (no blocking error)
                     _LOGGER.warning("Failed to validate species list packaged with integration", exc_info=True)
 
             if not errors:
@@ -137,14 +136,16 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                     _LOGGER.warning("Safety limits normalization (options flow): %s", w)
 
                 new_options = {
-                    "update_interval": int(user_input.get("update_interval", current.get("update_interval", DEFAULT_UPDATE_INTERVAL))),
+                    "update_interval": int(
+                        user_input.get("update_interval", current.get("update_interval", DEFAULT_UPDATE_INTERVAL))
+                    ),
                     "persist_last_fetch": bool(user_input.get("persist_last_fetch", current.get("persist_last_fetch", False))),
                     "persist_ttl": int(user_input.get("persist_ttl", current.get("persist_ttl", 3600))),
                     "species": user_input.get("species", current.get("species")),
                     "units": entry_units,
                     "wind_unit": ("km/h" if entry_units == "metric" else "mph"),
                     "safety_limits": normalized_safety,
-                    # sensor_name is required (no fallback)
+                    # preserve/update sensor_name in options if provided
                     "sensor_name": user_input.get("sensor_name", current.get("sensor_name")),
                 }
 
@@ -164,14 +165,15 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
             return target
 
         entry_units = current.get("units", "metric")
+
         # derive display defaults (convert metric stored values to UI units)
         wind_metric = _pick(["max_wind_m_s", "max_wind"], None)
         if wind_metric is not None:
             if entry_units == "metric":
-                wind_default = (float(wind_metric) * 3.6)
+                wind_default = float(wind_metric) * 3.6
                 wind_unit = "km/h"
             else:
-                wind_default = (float(wind_metric) * 2.2369362920544)
+                wind_default = float(wind_metric) * 2.2369362920544
                 wind_unit = "mph"
         else:
             wind_default = None
@@ -205,7 +207,6 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
-                # sensor_name kept at top in options flow so it appears above coordinates when editing options
                 vol.Optional("sensor_name", default=current.get("sensor_name", "")): cv.string,
                 vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=current.get("persist_last_fetch", False)): bool,
