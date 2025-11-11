@@ -8,7 +8,11 @@ Canonical units used by the integration:
 - pressure: hectopascals (hPa)
 - time periods: seconds (s)
 """
-from typing import Any, Optional
+from typing import Any, Optional, Dict, Tuple, List
+import logging
+from .const import DEFAULT_SAFETY_LIMITS
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -68,13 +72,8 @@ def inhg_to_hpa(v: Any) -> Optional[float]:
     return f * 33.8638866667
 
 
-import logging
-from typing import Dict, Any, Tuple, List
-from .const import DEFAULT_SAFETY_LIMITS
-
-_LOGGER = logging.getLogger(__name__)
-
 # Display <-> metric helpers
+
 
 def m_s_to_kmh(v: Any) -> Optional[float]:
     f = _to_float(v)
@@ -90,23 +89,11 @@ def m_s_to_mph(v: Any) -> Optional[float]:
     return f * 2.2369362920544
 
 
-def kmh_to_m_s_safe(v: Any) -> Optional[float]:
-    return kmh_to_m_s(v)
-
-
-def mph_to_m_s_safe(v: Any) -> Optional[float]:
-    return mph_to_m_s(v)
-
-
 def m_to_ft(v: Any) -> Optional[float]:
     f = _to_float(v)
     if f is None:
         return None
     return f / 0.3048
-
-
-def ft_to_m_safe(v: Any) -> Optional[float]:
-    return ft_to_m(v)
 
 
 def c_to_f(v: Any) -> Optional[float]:
@@ -129,6 +116,7 @@ _DISPLAY_TO_CANONICAL = {
 
 def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = "metric") -> Dict[str, Any]:
     """Convert safety values provided in UI/display units into canonical metric keys/values.
+
     - safety: keys as used in the config flow (safety_max_wind, safety_max_wave_height, ...)
     - entry_units: the units the UI was showing ("metric" or "imperial").
 
@@ -141,9 +129,9 @@ def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = 
         out["max_wind_m_s"] = None
     else:
         if entry_units == "metric":
-            out["max_wind_m_s"] = kmh_to_m_s_safe(raw_wind)
+            out["max_wind_m_s"] = kmh_to_m_s(raw_wind)
         else:
-            out["max_wind_m_s"] = mph_to_m_s_safe(raw_wind)
+            out["max_wind_m_s"] = mph_to_m_s(raw_wind)
 
     # Wave height: UI shows m for metric, ft for imperial -> convert to m
     raw_wave = safety.get("safety_max_wave_height")
@@ -153,7 +141,7 @@ def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = 
         if entry_units == "metric":
             out["max_wave_height_m"] = _to_float(raw_wave)
         else:
-            out["max_wave_height_m"] = ft_to_m_safe(raw_wave)
+            out["max_wave_height_m"] = ft_to_m(raw_wave)
 
     # Visibility: UI shows km for metric, miles for imperial -> convert to km
     raw_vis = safety.get("safety_min_visibility")
