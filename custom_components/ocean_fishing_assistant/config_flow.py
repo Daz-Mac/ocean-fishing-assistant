@@ -84,7 +84,7 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("update_interval", default=DEFAULT_UPDATE_INTERVAL): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=False): bool,
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,
-                vol.Optional("species", default=""): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)),
+                vol.Optional("species", default=None): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)),
                 vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
                 vol.Required("safety_max_wind"): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement="km/h", mode="slider")
@@ -222,7 +222,7 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=current.get("persist_last_fetch", False)): bool,
                 vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
-                vol.Optional("species", default=current.get("species", "")): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)), 
+                vol.Optional("species", default=current.get("species", None)): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)), 
                 vol.Optional("units", default=entry_units): vol.In(["metric", "imperial"]),
                 vol.Optional("safety_max_wind", default=wind_default): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement=wind_unit, mode="slider")
