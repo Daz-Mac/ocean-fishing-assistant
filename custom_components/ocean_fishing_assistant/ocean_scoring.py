@@ -322,7 +322,13 @@ def compute_score(
     if wind is None:
         wind = _get_at("wind") or _get_at("wind_speed")
 
-    wave = _get_at("wave_height_m", use_index) or _get_at("swell_wave_height_m", use_index) or _get_at("wave_height", use_index)
+    # Accept multiple possible canonical keys for wave/swell height (ensure meters)
+    wave = (
+        _get_at("wave_height_m", use_index)
+        or _get_at("swell_height_m", use_index)
+        or _get_at("swell_wave_height_m", use_index)
+        or _get_at("wave_height", use_index)
+    )
 
     # Pressure: compute delta next - current if array present
     pressure_arr = data.get("pressure_hpa")
@@ -396,7 +402,7 @@ def compute_score(
         pref_tide = profile.get("preferred_tide_m", DEFAULT_PROFILE["preferred_tide_m"])
         tmin, tmax = float(pref_tide[0]), float(pref_tide[1])
         tide_score = _linear_within_score_10(float(tide), tmin, tmax, tolerance=0.5)
-        tide_reason = f"value={tide}"
+        tide_reason = f"value={tide}m"
     except Exception:
         tide_score = 0.0
         tide_reason = "error"
@@ -407,7 +413,7 @@ def compute_score(
         pref_w = profile.get("preferred_wind_m_s", DEFAULT_PROFILE["preferred_wind_m_s"])
         wmin, wmax = float(pref_w[0]), float(pref_w[1])
         wind_score = _linear_within_score_10(float(wind), wmin, wmax, tolerance=4.0)
-        wind_reason = f"value={wind}"
+        wind_reason = f"value={wind} m/s"
     except Exception:
         wind_score = 0.0
         wind_reason = "error"
@@ -418,14 +424,14 @@ def compute_score(
         max_wave = float(profile.get("max_wave_height_m", DEFAULT_PROFILE["max_wave_height_m"]))
         if wave <= max_wave:
             wave_score = 10.0
-            wave_reason = f"ok (value={wave} <= max={max_wave})"
+            wave_reason = f"ok (value={wave}m <= max={max_wave}m)"
         else:
             limit = max_wave * 2.0 if max_wave > 0 else max_wave + 1.0
             if wave >= limit:
                 wave_score = 0.0
             else:
                 wave_score = 10.0 * (limit - wave) / (limit - max_wave)
-            wave_reason = f"value={wave}"
+            wave_reason = f"value={wave}m"
     except Exception:
         wave_score = 0.0
         wave_reason = "error"
@@ -503,7 +509,7 @@ def compute_score(
         pref_temp = profile.get("preferred_temp_c", DEFAULT_PROFILE["preferred_temp_c"])
         tmin, tmax = float(pref_temp[0]), float(pref_temp[1])
         temp_score = _linear_within_score_10(float(temp), tmin, tmax, tolerance=10.0)
-        temp_reason = f"value={temp}"
+        temp_reason = f"value={temp}C"
     except Exception:
         temp_score = 0.0
         temp_reason = "error"
