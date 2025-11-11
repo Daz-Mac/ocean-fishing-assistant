@@ -135,6 +135,8 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
             val = v
         if k in ("vis", "visibility"):
             return f"Visibility below safe minimum ({val} km)"
+        if k in ("swell", "swell_period"):
+            return f"Swell period below safe minimum ({val} s)"
         return f"{k} < {val}"
     if code == "wind_near_limit":
         if safety_limits:
@@ -158,8 +160,10 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
         if safety_limits:
             ms = safety_limits.get("max_swell_period_s")
             if ms is not None:
-                return f"Swell period approaching configured maximum ({ms} s)"
-        return "Swell period near configured maximum"
+                # note: stored key remains 'max_swell_period_s' for compatibility,
+                # but semantics are treated as a minimum safe swell period in logic.
+                return f"Swell period approaching configured minimum ({ms} s)"
+        return "Swell period near configured minimum"
     return code
 
 
@@ -428,13 +432,16 @@ def compute_score(
                     safety["caution"] = True
                     safety["reasons"].append("vis_near_limit")
 
-            max_swell = _to_float_safe(safety_limits.get("max_swell_period_s"))
+            # Treat configured swell period limit as a minimum safe swell period:
+            # short periods (< limit) are unsafe (choppy), periods slightly above
+            # the minimum can be marked as caution.
+            min_swell = _to_float_safe(safety_limits.get("max_swell_period_s"))
             swell = _get_at("swell_period_s", use_index) if "swell_period_s" in data else None
-            if max_swell is not None and swell is not None:
-                if swell > max_swell:
+            if min_swell is not None and swell is not None:
+                if swell < min_swell:
                     safety["unsafe"] = True
-                    safety["reasons"].append(f"swell>{max_swell}")
-                elif swell > (0.9 * max_swell):
+                    safety["reasons"].append(f"swell<{min_swell}")
+                elif swell < (1.1 * min_swell):
                     safety["caution"] = True
                     safety["reasons"].append("swell_near_limit")
     except Exception:
