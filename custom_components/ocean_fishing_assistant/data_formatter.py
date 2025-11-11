@@ -1,4 +1,3 @@
-# (full contents — replace your existing file)
 # Strict DataFormatter (no fallbacks, fail loudly)
 from __future__ import annotations
 
@@ -142,9 +141,36 @@ class DataFormatter:
                     elif not isinstance(v, (list, tuple)):
                         canonical[k] = v
 
+        # --- NORMALIZE moon_phase from tide proxy or raw payload ---
+        # Prefer explicit top-level moon_phase if provided by raw_payload.
+        # Otherwise, if TideProxy returned 'tide_phase' under canonical["tide"], use that.
+        # Enforce strict alignment: arrays must match timestamps length; scalar values are replicated.
+        moon_phase_set = False
+        # raw_payload top-level moon_phase (preferred)
+        if "moon_phase" in raw_payload:
+            mp = raw_payload.get("moon_phase")
+            if isinstance(mp, (list, tuple)):
+                _ensure_list_length_equal("moon_phase", timestamps, list(mp))
+                canonical["moon_phase"] = list(mp)
+            else:
+                canonical["moon_phase"] = [mp] * len(timestamps)
+            moon_phase_set = True
+
+        # If not set yet, consider tide.tide_phase (TideProxy)
+        if not moon_phase_set and "tide" in canonical and isinstance(canonical["tide"], dict) and "tide_phase" in canonical["tide"]:
+            tp = canonical["tide"].get("tide_phase")
+            if tp is not None:
+                if isinstance(tp, (list, tuple)):
+                    _ensure_list_length_equal("tide_phase", timestamps, list(tp))
+                    canonical["moon_phase"] = list(tp)
+                else:
+                    canonical["moon_phase"] = [tp] * len(timestamps)
+                moon_phase_set = True
+
         # Copy top-level astro/astronomy/moon_phase into canonical so compute_score's _get_moon_phase_for_index() can find them.
+        # Note: we still copied raw_payload['moon_phase'] above (preferred), this loop will not overwrite canonical['moon_phase']
         for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "moon_phase"):
-            if key in raw_payload:
+            if key in raw_payload and key not in canonical:
                 canonical[key] = raw_payload.get(key)
 
         # Also accept 'marine' or 'marine_forecast' if caller attached it (we do not transform)

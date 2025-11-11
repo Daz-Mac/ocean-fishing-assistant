@@ -260,10 +260,11 @@ def compute_score(
         missing.append("moon_phase")
     if not pressure_arr_ok:
         missing.append("pressure_hpa_series_with_future_point")
-
+    
     if missing:
         msg = f"Missing required inputs for scoring at index={use_index} timestamp={timestamps[use_index]}: {', '.join(missing)}"
-        _LOGGER.error(msg)
+        # Do not log here to avoid flooding HA logger for repeated missing-values across many timestamps.
+        # Raise so caller (DataFormatter / Coordinator) can log a single, aggregated diagnostic message.
         raise MissingDataError(msg)
 
     # compute component scores
