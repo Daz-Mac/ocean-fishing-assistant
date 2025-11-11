@@ -1,11 +1,3 @@
-"""
-Config flow for Ocean Fishing Assistant (strict).
-
-- Requires explicit wind_unit selection at setup/options (no implicit detection).
-- Validates and normalizes safety limits using unit_helpers.
-"""
-from __future__ import annotations
-
 import logging
 from typing import Any, Dict, Optional
 
@@ -25,61 +17,53 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None):
-        """Handle the initial config flow step."""
+        """Handle the initial config flow step (user)."""
         errors: Dict[str, str] = {}
 
         if user_input is not None:
-            # Required coordinates
-            lat = user_input.get(CONF_LATITUDE)
-            lon = user_input.get(CONF_LONGITUDE)
-            if lat is None or lon is None:
-                errors["base"] = "missing_coords"
-                return self.async_show_form(step_id="user", data_schema=self._user_schema(), errors=errors)
-
+            # Store coordinates in data; options include runtime flags and required safety limits
             data = {
-                CONF_LATITUDE: lat,
-                CONF_LONGITUDE: lon,
+                CONF_LATITUDE: user_input.get(CONF_LATITUDE),
+                CONF_LONGITUDE: user_input.get(CONF_LONGITUDE),
             }
 
-            entry_units = user_input.get("units")
-            # Collect display safety inputs and convert to metric canonical keys
+            # Collect raw UI safety inputs and convert to canonical metric keys
             display_safety = {
                 "safety_max_wind": user_input.get("safety_max_wind"),
                 "safety_max_wave_height": user_input.get("safety_max_wave_height"),
                 "safety_min_visibility": user_input.get("safety_min_visibility"),
                 "safety_max_swell_period": user_input.get("safety_max_swell_period"),
             }
+            entry_units = user_input.get("units", "metric")
             metric_safety = convert_safety_display_to_metric(display_safety, entry_units=entry_units)
 
-            # Validate & normalize safety limits (strict=False here keeps clamping behavior but we
-            # still require the keys be provided by the user; the flow uses Required for those fields)
+            # Validate & normalize (warn-and-clamp by default)
             normalized_safety, warnings = validate_and_normalize_safety_limits(metric_safety, strict=False)
             for w in warnings:
                 _LOGGER.warning("Safety limits normalization: %s", w)
 
-            # Build deterministic options including required wind_unit provided by UI
             options = {
                 "update_interval": int(user_input.get("update_interval", DEFAULT_UPDATE_INTERVAL)),
                 "persist_last_fetch": bool(user_input.get("persist_last_fetch", False)),
                 "persist_ttl": int(user_input.get("persist_ttl", 3600)),
                 "species": user_input.get("species", ""),
                 "units": entry_units,
-                "wind_unit": user_input.get("wind_unit"),
+                # Deterministic wind unit derived from chosen units (no separate UI for wind unit — strict behavior)
+                "wind_unit": ("km/h" if entry_units == "metric" else "mph"),
                 "safety_limits": normalized_safety,
+                # REQUIRED: sensor name must be provided by user at setup
+                "sensor_name": user_input.get("sensor_name"),
             }
 
-            # Additional validation: ensure wind_unit is one of accepted values
-            if options["wind_unit"] not in ("km/h", "mph", "m/s"):
-                errors["wind_unit"] = "invalid_wind_unit"
-                return self.async_show_form(step_id="user", data_schema=self._user_schema(), errors=errors)
+            # Ensure sensor_name provided (strict)
+            if not options["sensor_name"]:
+                errors["sensor_name"] = "required"
 
-            return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
+            if not errors:
+                return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
 
-        return self.async_show_form(step_id="user", data_schema=self._user_schema(), errors={})
-
-    def _user_schema(self):
-        """Schema for initial setup (wind_unit required)."""
-        return vol.Schema(
+        # Require users to provide explicit safety limits and sensor name at setup. Show sliders (NumberSelector) with metric defaults.
+        schema = vol.Schema(
             {
                 vol.Required(CONF_LATITUDE): cv.latitude,
                 vol.Required(CONF_LONGITUDE): cv.longitude,
@@ -88,8 +72,8 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("persist_ttl", default=3600): cv.positive_int,
                 vol.Optional("species", default=""): cv.string,
                 vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
-                # Make wind unit explicitly required
-                vol.Required("wind_unit", default="km/h"): vol.In(["km/h", "mph", "m/s"]),
+                # New required sensor name (no fallback)
+                vol.Required("sensor_name"): cv.string,
                 vol.Required("safety_max_wind"): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement="km/h", mode="slider")
                 ),
@@ -105,24 +89,28 @@ class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
 
+        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
     @staticmethod
     def async_get_options_flow(config_entry):
         return OFAOptionsFlowHandler(config_entry)
 
 
 class OFAOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for an existing config entry."""
+
     def __init__(self, config_entry):
         self.config_entry = config_entry
 
     async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None):
-        """Options flow: require wind_unit and validate species if provided."""
         errors: Dict[str, str] = {}
         current = dict(self.config_entry.options or {})
 
         if user_input is not None:
+            # validate species exists in species_profiles.json if provided
             species = user_input.get("species") or None
             if species:
-                # Attempt to validate species against packaged profiles; if not found, error
+                # Attempt to load species list from file packaged with integration
                 try:
                     import json
                     import pkgutil
@@ -132,59 +120,59 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                     if species not in profiles:
                         errors["species"] = "invalid_species"
                 except Exception:
-                    errors["species"] = "species_validation_failed"
-
-            entry_units = user_input.get("units", current.get("units", "metric"))
-            display_safety = {
-                "safety_max_wind": user_input.get("safety_max_wind"),
-                "safety_max_wave_height": user_input.get("safety_max_wave_height"),
-                "safety_min_visibility": user_input.get("safety_min_visibility"),
-                "safety_max_swell_period": user_input.get("safety_max_swell_period"),
-            }
-            metric_safety = convert_safety_display_to_metric(display_safety, entry_units=entry_units)
-            normalized_safety, warnings = validate_and_normalize_safety_limits(metric_safety, strict=False)
-            for w in warnings:
-                _LOGGER.warning("Safety limits normalization (options flow): %s", w)
+                    # if we can't validate, accept but warn (no blocking error)
+                    _LOGGER.warning("Failed to validate species list packaged with integration", exc_info=True)
 
             if not errors:
+                # Convert display values (from the options flow) into canonical metric keys
+                entry_units = user_input.get("units", current.get("units", "metric"))
+                display_safety = {
+                    "safety_max_wind": user_input.get("safety_max_wind"),
+                    "safety_max_wave_height": user_input.get("safety_max_wave_height"),
+                    "safety_min_visibility": user_input.get("safety_min_visibility"),
+                    "safety_max_swell_period": user_input.get("safety_max_swell_period"),
+                }
+                metric_safety = convert_safety_display_to_metric(display_safety, entry_units=entry_units)
+                normalized_safety, warnings = validate_and_normalize_safety_limits(metric_safety, strict=False)
+                for w in warnings:
+                    _LOGGER.warning("Safety limits normalization (options flow): %s", w)
+
                 new_options = {
                     "update_interval": int(user_input.get("update_interval", current.get("update_interval", DEFAULT_UPDATE_INTERVAL))),
                     "persist_last_fetch": bool(user_input.get("persist_last_fetch", current.get("persist_last_fetch", False))),
                     "persist_ttl": int(user_input.get("persist_ttl", current.get("persist_ttl", 3600))),
-                    "species": user_input.get("species", current.get("species", "")),
+                    "species": user_input.get("species", current.get("species")),
                     "units": entry_units,
-                    "wind_unit": user_input.get("wind_unit") or current.get("wind_unit"),
+                    "wind_unit": ("km/h" if entry_units == "metric" else "mph"),
                     "safety_limits": normalized_safety,
+                    # sensor_name is required (no fallback)
+                    "sensor_name": user_input.get("sensor_name", current.get("sensor_name")),
                 }
-                # Require wind_unit present and valid
-                if new_options["wind_unit"] not in ("km/h", "mph", "m/s"):
-                    errors["wind_unit"] = "invalid_wind_unit"
-                    return self.async_show_form(step_id="init", data_schema=self._options_schema(current), errors=errors)
 
-                return self.async_create_entry(title="", data=new_options)
+                if not new_options["sensor_name"]:
+                    errors["sensor_name"] = "required"
+                else:
+                    return self.async_create_entry(title="", data=new_options)
 
-        return self.async_show_form(step_id="init", data_schema=self._options_schema(current), errors=errors)
-
-    def _options_schema(self, current: Dict[str, Any]):
-        """Build options schema with defaults from current options."""
-        entry_units = current.get("units", "metric")
-
-        # Compute display defaults from stored metric values if present (back-compat reading)
+        # Build defaults for schema using currently saved options (if present)
         saved_safety = current.get("safety_limits", {}) or {}
 
-        def _pick(keys, default=None):
-            for k in keys:
+        # canonical metric keys we store: max_wind_m_s, max_wave_height_m, min_visibility_km, max_swell_period_s
+        def _pick(key_variants, target=None):
+            for k in key_variants:
                 if k in saved_safety and saved_safety.get(k) is not None:
                     return saved_safety.get(k)
-            return default
+            return target
 
+        entry_units = current.get("units", "metric")
+        # derive display defaults (convert metric stored values to UI units)
         wind_metric = _pick(["max_wind_m_s", "max_wind"], None)
         if wind_metric is not None:
             if entry_units == "metric":
-                wind_default = float(wind_metric) * 3.6
+                wind_default = (float(wind_metric) * 3.6)
                 wind_unit = "km/h"
             else:
-                wind_default = float(wind_metric) * 2.2369362920544
+                wind_default = (float(wind_metric) * 2.2369362920544)
                 wind_unit = "mph"
         else:
             wind_default = None
@@ -216,14 +204,15 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
 
         swell_default = _pick(["max_swell_period_s", "max_swell_period", "max_swell_period_s"], None)
 
-        return vol.Schema(
+        schema = vol.Schema(
             {
                 vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=current.get("persist_last_fetch", False)): bool,
                 vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
                 vol.Optional("species", default=current.get("species", "")): cv.string,
                 vol.Optional("units", default=entry_units): vol.In(["metric", "imperial"]),
-                vol.Required("wind_unit", default=current.get("wind_unit", "km/h")): vol.In(["km/h", "mph", "m/s"]),
+                # sensor_name is required in options flow as well (no fallback)
+                vol.Optional("sensor_name", default=current.get("sensor_name", "")): cv.string,
                 vol.Optional("safety_max_wind", default=wind_default): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement=wind_unit, mode="slider")
                 ),
@@ -238,3 +227,5 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
             }
         )
+
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
