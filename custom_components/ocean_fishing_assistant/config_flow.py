@@ -107,15 +107,14 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
         current = dict(self.config_entry.options or {})
 
         if user_input is not None:
-            # validate species exists in species_profiles.json if provided
+            # validate species exists in the packaged species_profiles.json if provided
             species = user_input.get("species") or None
             if species:
                 try:
-                    import json
-                    import pkgutil
+                    # use the strict species_loader to validate existence
+                    from .species_loader import load_profiles
 
-                    raw = pkgutil.get_data(__package__, "species_profiles.json")
-                    profiles = json.loads(raw.decode("utf-8")) if raw else {}
+                    profiles = load_profiles()
                     if species not in profiles:
                         errors["species"] = "invalid_species"
                 except Exception:
@@ -211,7 +210,7 @@ class OFAOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
                 vol.Optional("persist_last_fetch", default=current.get("persist_last_fetch", False)): bool,
                 vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
-                vol.Optional("species", default=current.get("species", "")): cv.string,
+                vol.Optional("species", default=current.get("species", "")): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)), 
                 vol.Optional("units", default=entry_units): vol.In(["metric", "imperial"]),
                 vol.Optional("safety_max_wind", default=wind_default): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement=wind_unit, mode="slider")

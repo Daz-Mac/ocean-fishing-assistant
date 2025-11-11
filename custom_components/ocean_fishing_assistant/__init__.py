@@ -32,8 +32,19 @@ async def async_setup_entry(hass, entry):
         from .coordinator import OFACoordinator
         from .weather_fetcher import WeatherFetcher
         from .data_formatter import DataFormatter
+        from .species_loader import load_profiles, validate_profiles
     except Exception as exc:
         _LOGGER.exception("Failed to import integration modules for entry %s: %s", entry.entry_id, exc)
+        return False
+
+    # Strictly validate packaged species profiles at startup; fail fast on schema problems
+    try:
+        profiles = load_profiles()
+        validate_profiles(profiles)
+        _LOGGER.debug("Loaded and validated %d species profiles", len(profiles))
+    except Exception as exc:
+        _LOGGER.exception("species_profiles.json failed validation: %s", exc)
+        # fail setup loudly (per project policy)
         return False
 
     formatter = DataFormatter()
@@ -77,6 +88,18 @@ async def async_setup_entry(hass, entry):
         raise ValueError(f"Invalid entry.options['wind_unit']: {wind_unit!r} (strict)")
 
     _LOGGER.debug("Chosen speed_unit for entry %s: %s", entry.entry_id, wind_unit)
+
+    # Validate selected species (if set) exists in the packaged profiles
+    selected_species = entry.options.get("species")
+    if selected_species:
+        try:
+            profiles = load_profiles()
+            if selected_species not in profiles:
+                raise ValueError(f"Selected species '{selected_species}' not found in packaged species_profiles.json (strict)")
+        except Exception as exc:
+            _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
+            return False
+
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit)
     _LOGGER.debug("WeatherFetcher instantiated for entry %s", entry.entry_id)
 
