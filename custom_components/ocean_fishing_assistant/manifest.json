@@ -6,8 +6,7 @@
   "issue_tracker": "https://github.com/Daz-Mac/ocean-fishing-assistant/issues",
   "requirements": [
     "skyfield>=1.46,<2",
-    "jplephem>=2.20,<3",
-    "pandas>=2.2.2,<3"
+    "jplephem>=2.20,<3"
   ],
   "config_flow": true,
   "dependencies": [],
