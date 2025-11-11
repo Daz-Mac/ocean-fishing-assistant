@@ -2,7 +2,6 @@
 Ocean Fishing Assistant - integration entry points (strict).
 """
 import logging
-import inspect
 
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.helpers import aiohttp_client
@@ -38,7 +37,7 @@ async def async_setup_entry(hass, entry):
         return False
 
     formatter = DataFormatter()
-    _LOGGER.debug("DataFormatter instantiated: %s", formatter)
+    _LOGGER.debug("DataFormatter instantiated for entry %s", entry.entry_id)
 
     # Read canonical safety_limits already normalized by config flow; require units present
     units = entry.options.get("units")
@@ -79,7 +78,7 @@ async def async_setup_entry(hass, entry):
 
     _LOGGER.debug("Chosen speed_unit for entry %s: %s", entry.entry_id, wind_unit)
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit)
-    _LOGGER.debug("WeatherFetcher instantiated: %s", fetcher)
+    _LOGGER.debug("WeatherFetcher instantiated for entry %s", entry.entry_id)
 
     coord = OFACoordinator(
         hass,
@@ -95,7 +94,7 @@ async def async_setup_entry(hass, entry):
         units=units,
         safety_limits=safety_limits,
     )
-    _LOGGER.debug("OFACoordinator created for entry %s: %s", entry.entry_id, coord)
+    _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
 
     # try to load persisted last successful fetch before first refresh (fast recovery)
     if entry.options.get("persist_last_fetch", False):
