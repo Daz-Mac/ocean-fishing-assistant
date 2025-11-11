@@ -241,6 +241,74 @@ def _get_moon_phase_for_index(payload: Dict[str, Any], use_index: int) -> Option
     return None
 
 
+def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) -> str:
+    """
+    Convert a machine-coded safety reason into a human-readable string.
+    Uses safety_limits when available to include numeric thresholds.
+    """
+    if not code:
+        return ""
+
+    code = str(code)
+    # Numeric comparisons encoded as "wind>5.0", "wave>2.5", "vis<1.0", "swell>12"
+    if ">" in code:
+        k, v = code.split(">", 1)
+        k = k.strip()
+        try:
+            val = float(v)
+        except Exception:
+            val = v
+        if k in ("wind", "wind_m_s"):
+            return f"Wind exceeds safe limit ({val} m/s)"
+        if k in ("wave", "wave_height"):
+            return f"Wave height exceeds safe limit ({val} m)"
+        if k in ("swell", "swell_period"):
+            return f"Swell period exceeds safe limit ({val} s)"
+        if k in ("vis", "visibility"):
+            return f"Visibility below safe minimum ({val} km)"
+        return f"{k} > {val}"
+
+    if "<" in code:
+        k, v = code.split("<", 1)
+        k = k.strip()
+        try:
+            val = float(v)
+        except Exception:
+            val = v
+        if k in ("vis", "visibility"):
+            return f"Visibility below safe minimum ({val} km)"
+        return f"{k} < {val}"
+
+    # named tokens
+    if code == "wind_near_limit":
+        if safety_limits:
+            mw = safety_limits.get("max_wind_m_s")
+            if mw is not None:
+                return f"Wind approaching configured maximum ({mw} m/s)"
+        return "Wind near configured maximum"
+    if code == "wave_near_limit":
+        if safety_limits:
+            mw = safety_limits.get("max_wave_height_m")
+            if mw is not None:
+                return f"Wave height approaching configured maximum ({mw} m)"
+        return "Wave height near configured maximum"
+    if code == "vis_near_limit":
+        if safety_limits:
+            mv = safety_limits.get("min_visibility_km")
+            if mv is not None:
+                return f"Visibility close to minimum ({mv} km)"
+        return "Visibility near configured minimum"
+    if code == "swell_near_limit":
+        if safety_limits:
+            ms = safety_limits.get("max_swell_period_s")
+            if ms is not None:
+                return f"Swell period approaching configured maximum ({ms} s)"
+        return "Swell period near configured maximum"
+
+    # fallback to returning the raw code
+    return code
+
+
 def compute_score(
     data: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
@@ -574,6 +642,14 @@ def compute_score(
         # Do not fail scoring for safety evaluation errors; log and continue
         _LOGGER.debug("Safety evaluation failed", exc_info=True)
 
+    # Add human-readable reason strings derived from the codes using the safety_limits for context
+    try:
+        reason_codes = safety.get("reasons", []) or []
+        reason_strings = [_format_safety_reason(rc, safety_limits) for rc in reason_codes]
+        safety["reason_strings"] = reason_strings
+    except Exception:
+        safety["reason_strings"] = []
+
     result = {
         "score_10": overall_10,
         "score_100": overall_100,
@@ -746,7 +822,7 @@ def compute_forecast(
                 "components": None,
                 "forecast_raw": {"error": "missing required data", "details": err_text},
                 "profile_used": None,
-                "safety": {"unsafe": False, "caution": False, "reasons": []},
+                "safety": {"unsafe": False, "caution": False, "reasons": [], "reason_strings": []},
             }
         except Exception:
             _LOGGER.debug("Failed to compute forecast index %s", idx, exc_info=True)
@@ -758,7 +834,7 @@ def compute_forecast(
                 "components": None,
                 "forecast_raw": {"error": "unexpected error"},
                 "profile_used": None,
-                "safety": {"unsafe": False, "caution": False, "reasons": []},
+                "safety": {"unsafe": False, "caution": False, "reasons": [], "reason_strings": []},
             }
         out.append(entry)
     return out

@@ -1,5 +1,5 @@
 # Strict sensor entity - surfaces errors loudly so callers see misconfiguration
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -81,6 +81,14 @@ class OFASensor(CoordinatorEntity):
         attrs["units"] = getattr(self.coordinator, "units", None)
         attrs["safety_limits"] = getattr(self.coordinator, "safety_limits", None)
         attrs["safety"] = (current.get("safety") if current else None)
+
+        # Expose both reason codes and human-readable strings for safety reasons (if present)
+        if current and isinstance(current.get("safety"), dict):
+            safety_obj = current.get("safety") or {}
+            # codes
+            attrs["safety_reason_codes"] = list(safety_obj.get("reasons", []) or [])
+            # human-friendly strings (compute_forecast now supplies 'reason_strings')
+            attrs["safety_reason_strings"] = list(safety_obj.get("reason_strings", []) or [])
 
         # Attribution to appear both as explicit key and HA-standard ATTR_ATTRIBUTION for older integrations
         attrs["attribution"] = ATTRIBUTION
