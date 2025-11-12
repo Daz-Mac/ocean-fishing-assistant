@@ -1,24 +1,40 @@
 {
-  "sea_bass": {
-    "common_name": "Sea Bass",
-    "preferred_temp_c": [10, 20],
-    "preferred_wind_m_s": [0, 6],
-    "max_wave_height_m": 2.0,
-    "preferred_tide_m": [0.2, 1.2],
-    "preferred_tide_phase": ["rising", "high"],
-    "preferred_times": [{"start_hour":5,"end_hour":9},{"start_hour":17,"end_hour":19}],
-    "preferred_months": [4,5,6,7,8,9],
-    "moon_preference": ["full"]
+  "version": "1",
+  "species": {
+    "sea_bass": {
+      "name": "Sea Bass",
+      "emoji": "🐟",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "active_months": [4,5,6,7,8,9],
+      "preferred_temp_c": [10,20],
+      "preferred_wind_m_s": [0,6],
+      "max_wave_height_m": 2.0,
+      "preferred_tide_m": [0.2,1.2],
+      "preferred_tide_phase": ["rising","high"],
+      "preferred_times": [{"start_hour":5,"end_hour":9},{"start_hour":17,"end_hour":19}],
+      "moon_preference": ["full"]
+    },
+    "mackerel": {
+      "name": "Mackerel",
+      "emoji": "🐠",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "active_months": [5,6,7,8,9],
+      "preferred_temp_c": [12,22],
+      "preferred_wind_m_s": [0,8],
+      "max_wave_height_m": 1.5,
+      "preferred_tide_m": [0.0,0.8],
+      "preferred_tide_phase": ["falling"],
+      "preferred_times": [{"start_hour":6,"end_hour":10}],
+      "moon_preference": []
+    }
   },
-  "mackerel": {
-    "common_name": "Mackerel",
-    "preferred_temp_c": [12, 22],
-    "preferred_wind_m_s": [0, 8],
-    "max_wave_height_m": 1.5,
-    "preferred_tide_m": [0.0, 0.8],
-    "preferred_tide_phase": ["falling"],
-    "preferred_times": [{"start_hour":6,"end_hour":10}],
-    "preferred_months": [5,6,7,8,9],
-    "moon_preference": []
+  "regions": {
+    "global": {
+      "id": "global",
+      "name": "Global",
+      "habitat": "ocean"
+    }
   }
 }
