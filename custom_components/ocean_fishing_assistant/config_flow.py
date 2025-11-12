@@ -1,242 +1,441 @@
+"""Config flow for Ocean Fishing Assistant (strict, ocean-only)."""
+
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
-from homeassistant.helpers import config_validation as cv
+from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
+import homeassistant.helpers.config_validation as cv
 
-from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL
-from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
+from .const import (
+    DOMAIN,
+    MODE_OCEAN,
+    CONF_NAME,
+    CONF_LATITUDE,
+    CONF_LONGITUDE,
+    CONF_SPECIES_ID,
+    CONF_SPECIES_REGION,
+    CONF_HABITAT_PRESET,
+    CONF_TIME_PERIODS,
+    CONF_THRESHOLDS,
+    CONF_TIMEZONE,
+    CONF_ELEVATION,
+    CONF_MODE,
+    CONF_AUTO_APPLY_THRESHOLDS,
+    CONF_TIDE_MODE,
+    CONF_MARINE_ENABLED,
+    TIDE_MODE_PROXY,
+    HABITAT_PRESETS,
+    TIME_PERIODS_FULL_DAY,
+    TIME_PERIODS_DAWN_DUSK,
+    DEFAULT_NAME,
+    HABITAT_ROCKY_POINT,
+)
+
+from .species_loader import SpeciesLoader
 
 _LOGGER = logging.getLogger(__name__)
 
-# Load species profiles for use in config/options flows. If validation fails, fall back to empty options
-try:
-    from .species_loader import load_profiles, validate_profiles, get_species_options  # local import
 
-    _PROFILES = load_profiles()
-    validate_profiles(_PROFILES)
-    _SPECIES_OPTIONS = get_species_options(_PROFILES)
-except Exception:
-    _LOGGER.exception("Failed to load species profiles for config flow; species dropdown will be empty")
-    _SPECIES_OPTIONS = []
+class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Ocean Fishing Assistant (ocean-only)."""
 
-
-
-class OFAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None):
-        """Handle the initial config flow step (user)."""
-        errors: Dict[str, str] = {}
+    def __init__(self) -> None:
+        self.ocean_config: dict[str, Any] = {}
+        self.species_loader: SpeciesLoader | None = None
 
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Start the flow by jumping to mode select where the user must pick ocean."""
+        if user_input is None:
+            return await self.async_step_select_mode()
+        # If user provided a direct payload with mode, handle accordingly
+        if user_input.get(CONF_MODE) == MODE_OCEAN:
+            return await self.async_step_ocean_location()
+        # If mode not provided or not ocean, force mode selection page
+        return await self.async_step_select_mode()
+
+    async def async_step_select_mode(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Force selection of Ocean mode (explicit)."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # Store coordinates in data; options include runtime flags and required safety limits
-            data = {
-                CONF_LATITUDE: user_input.get(CONF_LATITUDE),
-                CONF_LONGITUDE: user_input.get(CONF_LONGITUDE),
-            }
+            try:
+                if user_input.get(CONF_MODE) == MODE_OCEAN:
+                    return await self.async_step_ocean_location()
+                errors["base"] = "must_select_ocean"
+            except Exception as exc:
+                _LOGGER.exception("Error in select_mode: %s", exc)
+                errors["base"] = "unknown"
 
-            # Collect raw UI safety inputs and convert to canonical metric keys
-            display_safety = {
-                "safety_max_wind": user_input.get("safety_max_wind"),
-                "safety_max_wave_height": user_input.get("safety_max_wave_height"),
-                "safety_min_visibility": user_input.get("safety_min_visibility"),
-                "safety_max_swell_period": user_input.get("safety_max_swell_period"),
-            }
-            entry_units = user_input.get("units", "metric")
-            metric_safety = convert_safety_display_to_metric(display_safety, entry_units=entry_units)
-
-            # Validate & normalize (warn-and-clamp by default)
-            normalized_safety, warnings = validate_and_normalize_safety_limits(metric_safety, strict=False)
-            for w in warnings:
-                _LOGGER.warning("Safety limits normalization: %s", w)
-
-            options = {
-                "update_interval": int(user_input.get("update_interval", DEFAULT_UPDATE_INTERVAL)),
-                "persist_last_fetch": bool(user_input.get("persist_last_fetch", False)),
-                "persist_ttl": int(user_input.get("persist_ttl", 3600)),
-                "species": user_input.get("species", ""),
-                "units": entry_units,
-                # Deterministic wind unit derived from chosen units (no separate UI for wind unit — strict behavior)
-                "wind_unit": ("km/h" if entry_units == "metric" else "mph"),
-                "safety_limits": normalized_safety,
-                # REQUIRED: sensor name must be provided by user at setup
-                "sensor_name": user_input.get("sensor_name"),
-            }
-
-            # Ensure sensor_name provided (strict)
-            if not options["sensor_name"]:
-                errors["sensor_name"] = "required"
-
-            if not errors:
-                return self.async_create_entry(title="Ocean Fishing Assistant", data=data, options=options)
-
-        # Require users to provide explicit safety limits and sensor name at setup.
-        # Show sliders (NumberSelector) with metric defaults. sensor_name placed first so it appears above coordinates.
-        schema = vol.Schema(
-            {
-                vol.Required("sensor_name"): cv.string,
-                vol.Required(CONF_LATITUDE): cv.latitude,
-                vol.Required(CONF_LONGITUDE): cv.longitude,
-                vol.Optional("update_interval", default=DEFAULT_UPDATE_INTERVAL): cv.positive_int,
-                vol.Optional("persist_last_fetch", default=False): bool,
-                vol.Optional("persist_ttl", default=3600): cv.positive_int,
-                vol.Optional("species", default=None): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)),
-                vol.Required("units", default="metric"): vol.In(["metric", "imperial"]),
-                vol.Required("safety_max_wind"): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement="km/h", mode="slider")
-                ),
-                vol.Required("safety_max_wave_height"): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.1, unit_of_measurement="m", mode="slider")
-                ),
-                vol.Required("safety_min_visibility"): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement="km", mode="slider")
-                ),
-                vol.Required("safety_max_swell_period"): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=120, step=1, unit_of_measurement="s", mode="slider")
-                ),
-            }
+        return self.async_show_form(
+            step_id="select_mode",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_MODE, default=MODE_OCEAN): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": MODE_OCEAN, "label": "🌊 Ocean/Shore Fishing"},
+                            ],
+                            mode="list",
+                        )
+                    )
+                }
+            ),
+            errors=errors,
         )
 
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+    async def async_step_ocean_location(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Configure ocean location (name + coordinates)."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                lat = float(user_input[CONF_LATITUDE])
+                lon = float(user_input[CONF_LONGITUDE])
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    errors["base"] = "invalid_coordinates"
+            except (ValueError, KeyError):
+                errors["base"] = "invalid_coordinates"
 
+            if not errors:
+                self.ocean_config.update(user_input)
+                return await self.async_step_ocean_species()
+
+        default_name = user_input.get(CONF_NAME, "") if user_input else ""
+        default_lat = user_input.get(CONF_LATITUDE, "") if user_input else ""
+        default_lon = user_input.get(CONF_LONGITUDE, "") if user_input else ""
+
+        return self.async_show_form(
+            step_id="ocean_location",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_NAME, default=default_name): str,
+                    vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
+                    vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Choose species/region for ocean mode (strict)."""
+        # Ensure loader is available and loaded for species lists
+        if self.species_loader is None:
+            self.species_loader = SpeciesLoader(self.hass)
+            await self.species_loader.async_load_profiles()
+
+        if user_input is not None:
+            species_id = user_input[CONF_SPECIES_ID]
+            # handle the 'general_mixed_<region>' synthetic selection
+            if species_id.startswith("general_mixed_"):
+                species_region = species_id.replace("general_mixed_", "")
+                species_id = "general_mixed"
+            else:
+                species_profile = self.species_loader.get_species(species_id)
+                if species_profile:
+                    available_regions = species_profile.get("regions", ["global"])
+                    species_region = available_regions[0]
+                else:
+                    _LOGGER.error("Selected species_id %s not found in profiles", species_id)
+                    raise RuntimeError("Selected species_id not found")
+
+            self.ocean_config[CONF_SPECIES_ID] = species_id
+            self.ocean_config[CONF_SPECIES_REGION] = species_region
+            return await self.async_step_ocean_habitat()
+
+        # Build options strictly; abort if missing
+        if not getattr(self.species_loader, "_profiles", None):
+            _LOGGER.error("Species profiles missing when building ocean species list; aborting flow.")
+            raise RuntimeError("Missing species profiles for ocean species selection")
+
+        regions = self.species_loader.get_regions_by_type("ocean")
+        if not regions:
+            _LOGGER.error("No ocean regions found in species_profiles.json; aborting flow.")
+            raise RuntimeError("No ocean regions available")
+
+        species_options: list[dict[str, str]] = []
+
+        # SECTION: General regional mixed profiles
+        species_options.append({"value": "separator_regions", "label": "━━━━━ 🎣 GENERAL REGION PROFILES ━━━━━"})
+        for region in regions:
+            region_id = region["id"]
+            region_name = region.get("name", region_id)
+            species_options.append({"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"})
+
+        # SECTION: Specific species
+        species_options.append({"value": "separator_species", "label": "━━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━━"})
+
+        # Collect all ocean-specific species across regions (dedupe)
+        all_species: list[dict[str, Any]] = []
+        for region in regions:
+            region_id = region["id"]
+            if region_id == "global":
+                continue
+            region_species = self.species_loader.get_species_by_region(region_id)
+            for s in region_species:
+                if s.get("habitat") != "ocean":
+                    continue
+                sid = s["id"]
+                if not any(x["id"] == sid for x in all_species):
+                    all_species.append(s)
+
+        all_species.sort(key=lambda s: s.get("name", s["id"]))
+        for species in all_species:
+            emoji = species.get("emoji", "🐟")
+            name = species.get("name", species["id"])
+            species_id = species["id"]
+            active_months = species.get("active_months", [])
+            if len(active_months) == 12:
+                season_info = "Year-round"
+            elif len(active_months) > 0:
+                season_info = f"Active: {len(active_months)} months"
+            else:
+                season_info = ""
+            label = f"{emoji} {name}"
+            if season_info:
+                label += f" ({season_info})"
+            species_options.append({"value": species_id, "label": label})
+
+        return self.async_show_form(
+            step_id="ocean_species",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=species_options, mode="dropdown")
+                    )
+                }
+            ),
+            description_placeholders={"info": "Choose a general region profile for mixed species, or target a specific species."},
+        )
+
+    async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Choose habitat preset for ocean mode."""
+        if user_input is not None:
+            try:
+                raw_hp = user_input.get(CONF_HABITAT_PRESET, "")
+                habitat_preset = str(raw_hp).strip() if raw_hp is not None else ""
+                if not habitat_preset or habitat_preset not in HABITAT_PRESETS:
+                    _LOGGER.error("Invalid or missing habitat_preset submitted: %s", habitat_preset)
+                    raise ValueError("Invalid habitat_preset")
+                self.ocean_config[CONF_HABITAT_PRESET] = habitat_preset
+                return await self.async_step_ocean_time_periods()
+            except Exception as exc:
+                _LOGGER.exception("Unhandled exception in async_step_ocean_habitat: %s", exc)
+                return self.async_show_form(
+                    step_id="ocean_habitat",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
+                                        {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
+                                        {"value": "harbour", "label": "⚓ Harbour/Pier"},
+                                        {"value": "reef", "label": "🪸 Offshore Reef"},
+                                    ],
+                                    mode="list",
+                                )
+                            )
+                        }
+                    ),
+                    errors={"base": "unknown"},
+                )
+
+        return self.async_show_form(
+            step_id="ocean_habitat",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
+                                {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
+                                {"value": "harbour", "label": "⚓ Harbour/Pier"},
+                                {"value": "reef", "label": "🪸 Offshore Reef"},
+                            ],
+                            mode="list",
+                        )
+                    )
+                }
+            ),
+        )
+
+    async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Choose time periods for ocean monitoring."""
+        if user_input is not None:
+            errors: dict[str, str] = {}
+            tp = user_input.get(CONF_TIME_PERIODS)
+            valid = {TIME_PERIODS_FULL_DAY, TIME_PERIODS_DAWN_DUSK}
+            if tp is None or tp not in valid:
+                errors["base"] = "invalid_time_periods"
+                return self.async_show_form(
+                    step_id="ocean_time_periods",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                                    ],
+                                    mode="list",
+                                )
+                            )
+                        }
+                    ),
+                    errors=errors,
+                    description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+                )
+
+            self.ocean_config.update(user_input)
+            return await self.async_step_ocean_thresholds()
+
+        return self.async_show_form(
+            step_id="ocean_time_periods",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                            ],
+                            mode="list",
+                        )
+                    )
+                }
+            ),
+            description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+        )
+
+    async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Configure thresholds and finish ocean config (strict)."""
+        if user_input is not None:
+            try:
+                # Ensure coordinates are present and valid
+                if CONF_LATITUDE not in self.ocean_config or CONF_LONGITUDE not in self.ocean_config:
+                    _LOGGER.error("Latitude/Longitude missing from ocean_config; aborting to surface the issue.")
+                    raise RuntimeError("Missing latitude/longitude in ocean_config")
+
+                lat_raw = self.ocean_config[CONF_LATITUDE]
+                lon_raw = self.ocean_config[CONF_LONGITUDE]
+                latitude = float(lat_raw)
+                longitude = float(lon_raw)
+                if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                    _LOGGER.error("Latitude/longitude out of valid ranges: lat=%s lon=%s", latitude, longitude)
+                    raise ValueError("Latitude/longitude out of range")
+
+                habitat_preset = self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT)
+
+                final_config = {
+                    CONF_MODE: MODE_OCEAN,
+                    CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
+                    CONF_LATITUDE: latitude,
+                    CONF_LONGITUDE: longitude,
+                    CONF_SPECIES_ID: self.ocean_config.get(CONF_SPECIES_ID, "general_mixed"),
+                    CONF_SPECIES_REGION: self.ocean_config.get(CONF_SPECIES_REGION, "global"),
+                    CONF_HABITAT_PRESET: habitat_preset,
+                    CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
+                    CONF_AUTO_APPLY_THRESHOLDS: False,
+                    CONF_TIDE_MODE: TIDE_MODE_PROXY,
+                    CONF_MARINE_ENABLED: True,
+                    CONF_THRESHOLDS: {
+                        "max_wind_speed": user_input["max_wind_speed"],
+                        "max_gust_speed": user_input["max_gust_speed"],
+                        "max_wave_height": user_input["max_wave_height"],
+                        "min_temperature": user_input["min_temperature"],
+                        "max_temperature": user_input["max_temperature"],
+                    },
+                }
+
+                final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
+                final_config[CONF_ELEVATION] = self.hass.config.elevation
+
+                _LOGGER.debug("Creating ocean config entry with data keys: %s", list(final_config.keys()))
+                return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
+            except KeyError as ke:
+                _LOGGER.exception("Missing expected key when building final ocean config: %s", ke)
+                return self._show_ocean_thresholds_form(errors={"base": "unknown"})
+            except Exception as exc:
+                _LOGGER.exception("Unhandled exception in async_step_ocean_thresholds: %s", exc)
+                return self._show_ocean_thresholds_form(errors={"base": "unknown"})
+
+        # Show the form with defaults based on habitat preset
+        return self._show_ocean_thresholds_form()
+
+    def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
+        habitat = HABITAT_PRESETS.get(self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT), HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}))
+        return self.async_show_form(
+            step_id="ocean_thresholds",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("max_wind_speed", default=habitat.get("max_wind_speed", 25)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                    ),
+                    vol.Required("max_gust_speed", default=habitat.get("max_gust_speed", 40)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=15, max=70, step=5, unit_of_measurement="km/h", mode="slider")
+                    ),
+                    vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement="m", mode="slider")
+                    ),
+                    vol.Required("min_temperature", default=5): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=-10, max=20, step=1, unit_of_measurement="°C")
+                    ),
+                    vol.Required("max_temperature", default=35): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=20, max=50, step=1, unit_of_measurement="°C")
+                    ),
+                }
+            ),
+            errors=errors or {},
+            description_placeholders={"info": "Set safe fishing limits based on your habitat and comfort level."},
+        )
+
+    # Options flow (simple)
     @staticmethod
-    def async_get_options_flow(config_entry):
-        return OFAOptionsFlowHandler(config_entry)
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+        return OptionsFlowHandler(config_entry)
 
 
-class OFAOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for an existing config entry."""
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for Ocean Fishing Assistant."""
 
-    def __init__(self, config_entry):
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self.config_entry = config_entry
 
-    async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None):
-        errors: Dict[str, str] = {}
-        current = dict(self.config_entry.options or {})
-
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
-            # validate species exists in the packaged species_profiles.json if provided
-            species = user_input.get("species") or None
-            if species:
-                try:
-                    # use the strict species_loader to validate existence
-                    from .species_loader import load_profiles
+            return self.async_create_entry(title="", data=user_input)
+        return await self.async_step_ocean_options()
 
-                    profiles = load_profiles()
-                    if species not in profiles:
-                        errors["species"] = "invalid_species"
-                except Exception:
-                    _LOGGER.warning("Failed to validate species list packaged with integration", exc_info=True)
-
-            if not errors:
-                # Convert display values (from the options flow) into canonical metric keys
-                entry_units = user_input.get("units", current.get("units", "metric"))
-                display_safety = {
-                    "safety_max_wind": user_input.get("safety_max_wind"),
-                    "safety_max_wave_height": user_input.get("safety_max_wave_height"),
-                    "safety_min_visibility": user_input.get("safety_min_visibility"),
-                    "safety_max_swell_period": user_input.get("safety_max_swell_period"),
-                }
-                metric_safety = convert_safety_display_to_metric(display_safety, entry_units=entry_units)
-                normalized_safety, warnings = validate_and_normalize_safety_limits(metric_safety, strict=False)
-                for w in warnings:
-                    _LOGGER.warning("Safety limits normalization (options flow): %s", w)
-
-                new_options = {
-                    "update_interval": int(
-                        user_input.get("update_interval", current.get("update_interval", DEFAULT_UPDATE_INTERVAL))
+    async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+        thresholds = self.config_entry.data.get(CONF_THRESHOLDS, {})
+        return self.async_show_form(
+            step_id="ocean_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TIME_PERIODS, default=self.config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                            ],
+                            mode="dropdown",
+                        )
                     ),
-                    "persist_last_fetch": bool(user_input.get("persist_last_fetch", current.get("persist_last_fetch", False))),
-                    "persist_ttl": int(user_input.get("persist_ttl", current.get("persist_ttl", 3600))),
-                    "species": user_input.get("species", current.get("species")),
-                    "units": entry_units,
-                    "wind_unit": ("km/h" if entry_units == "metric" else "mph"),
-                    "safety_limits": normalized_safety,
-                    # preserve/update sensor_name in options if provided
-                    "sensor_name": user_input.get("sensor_name", current.get("sensor_name")),
+                    vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                    ),
+                    vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement="m", mode="slider")
+                    ),
                 }
-
-                if not new_options["sensor_name"]:
-                    errors["sensor_name"] = "required"
-                else:
-                    return self.async_create_entry(title="", data=new_options)
-
-        # Build defaults for schema using currently saved options (if present)
-        saved_safety = current.get("safety_limits", {}) or {}
-
-        # canonical metric keys we store: max_wind_m_s, max_wave_height_m, min_visibility_km, max_swell_period_s
-        def _pick(key_variants, target=None):
-            for k in key_variants:
-                if k in saved_safety and saved_safety.get(k) is not None:
-                    return saved_safety.get(k)
-            return target
-
-        entry_units = current.get("units", "metric")
-
-        # derive display defaults (convert metric stored values to UI units)
-        wind_metric = _pick(["max_wind_m_s", "max_wind"], None)
-        if wind_metric is not None:
-            if entry_units == "metric":
-                wind_default = float(wind_metric) * 3.6
-                wind_unit = "km/h"
-            else:
-                wind_default = float(wind_metric) * 2.2369362920544
-                wind_unit = "mph"
-        else:
-            wind_default = None
-            wind_unit = "km/h" if entry_units == "metric" else "mph"
-
-        wave_metric = _pick(["max_wave_height_m", "max_wave_height"], None)
-        if wave_metric is not None:
-            if entry_units == "metric":
-                wave_default = float(wave_metric)
-                wave_unit = "m"
-            else:
-                wave_default = float(wave_metric) / 0.3048
-                wave_unit = "ft"
-        else:
-            wave_default = None
-            wave_unit = "m" if entry_units == "metric" else "ft"
-
-        vis_metric = _pick(["min_visibility_km", "min_visibility"], None)
-        if vis_metric is not None:
-            if entry_units == "metric":
-                vis_default = float(vis_metric)
-                vis_unit = "km"
-            else:
-                vis_default = float(vis_metric) / 1.609344
-                vis_unit = "mi"
-        else:
-            vis_default = None
-            vis_unit = "km" if entry_units == "metric" else "mi"
-
-        swell_default = _pick(["max_swell_period_s", "max_swell_period", "max_swell_period_s"], None)
-
-        schema = vol.Schema(
-            {
-                vol.Optional("sensor_name", default=current.get("sensor_name", "")): cv.string,
-                vol.Optional("update_interval", default=current.get("update_interval", DEFAULT_UPDATE_INTERVAL)): cv.positive_int,
-                vol.Optional("persist_last_fetch", default=current.get("persist_last_fetch", False)): bool,
-                vol.Optional("persist_ttl", default=current.get("persist_ttl", 3600)): cv.positive_int,
-                vol.Optional("species", default=current.get("species", None)): selector.SelectSelector(selector.SelectSelectorConfig(options=_SPECIES_OPTIONS, custom_value_allowed=True)), 
-                vol.Optional("units", default=entry_units): vol.In(["metric", "imperial"]),
-                vol.Optional("safety_max_wind", default=wind_default): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=10, max=100, step=1, unit_of_measurement=wind_unit, mode="slider")
-                ),
-                vol.Optional("safety_max_wave_height", default=wave_default): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.1, unit_of_measurement=wave_unit, mode="slider")
-                ),
-                vol.Optional("safety_min_visibility", default=vis_default): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit, mode="slider")
-                ),
-                vol.Optional("safety_max_swell_period", default=swell_default): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=120, step=1, unit_of_measurement="s", mode="slider")
-                ),
-            }
+            ),
         )
-
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
