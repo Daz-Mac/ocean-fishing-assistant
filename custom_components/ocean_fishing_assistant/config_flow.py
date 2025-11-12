@@ -247,28 +247,47 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             valid = {TIME_PERIODS_FULL_DAY, TIME_PERIODS_DAWN_DUSK}
             if tp is None or tp not in valid:
                 errors["base"] = "invalid_time_periods"
-            return self.async_show_form(
-                step_id="ocean_time_periods",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
-                            selector.SelectSelectorConfig(
-                                options=[
-                                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
-                                ],
-                                mode="list",
+                return self.async_show_form(
+                    step_id="ocean_time_periods",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                                    ],
+                                    mode="list",
+                                )
                             )
-                        )
-                    }
-                ),
-                errors=errors,
-                description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
-            )
+                        }
+                    ),
+                    errors=errors,
+                    description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+                )
 
-        self.ocean_config.update(user_input)
-        # Ask units next so that thresholds form can render correct unit labels.
-        return await self.async_step_ocean_units()
+            # valid input -> save and continue
+            self.ocean_config.update(user_input)
+            return await self.async_step_ocean_units()
+
+        # Show the form for first visit (user_input is None)
+        return self.async_show_form(
+            step_id="ocean_time_periods",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                            ],
+                            mode="list",
+                        )
+                    )
+                }
+            ),
+            description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+        )
 
     # ----
     # Units selection (NEW) - must be chosen before thresholds are rendered
@@ -477,11 +496,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                        selector.NumberSelectorConfig(min=0, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
                     # options uses the renamed storage key min_swell_period_s
                     vol.Required("min_swell_period_s", default=thresholds.get("min_swell_period_s", 10)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
+                        selector.NumberSelectorConfig(min=0, max=20, step=1, unit_of_measurement="s")
                     ),
                 }
             ),
