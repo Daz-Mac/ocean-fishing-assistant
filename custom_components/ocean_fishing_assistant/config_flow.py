@@ -1,9 +1,5 @@
-"""Config flow for Ocean Fishing Assistant (strict, ocean-only).
+"""Config flow for Ocean Fishing Assistant (strict, ocean-only)."""
 
-This version requires the user to explicitly choose `units` during config and
-stores `units`, `wind_unit` and `safety_limits` in the created entry `data`.
-No migrations or fallbacks are performed in the integration runtime.
-"""
 from __future__ import annotations
 
 import logging
@@ -40,6 +36,7 @@ from .const import (
 )
 
 from .species_loader import SpeciesLoader
+from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,9 +54,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Start the ocean-only flow; forward to ocean_location step."""
         return await self.async_step_ocean_location(user_input)
 
-    # ---------------------------
+    # ----
     # Ocean location
-    # ---------------------------
+    # ----
     async def async_step_ocean_location(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure ocean location (name and coordinates)."""
         errors: dict[str, str] = {}
@@ -92,9 +89,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ---------------------------
+    # ----
     # Ocean species/region selection
-    # ---------------------------
+    # ----
     async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose species/region for ocean mode (strict)."""
         # Ensure loader is available and loaded for species lists
@@ -134,14 +131,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         species_options: list[dict[str, str]] = []
 
         # SECTION: General regional mixed profiles
-        species_options.append({"value": "separator_regions", "label": "━━━━━ 🎣 GENERAL REGION PROFILES ━━━━━"})
+        species_options.append({"value": "separator_regions", "label": "━━━━ 🎣 GENERAL REGION PROFILES ━━━━━"})
         for region in regions:
             region_id = region["id"]
             region_name = region.get("name", region_id)
             species_options.append({"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"})
 
         # SECTION: Specific species
-        species_options.append({"value": "separator_species", "label": "━━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━━"})
+        species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━━"})
 
         # Collect all ocean-specific species across regions (dedupe, include 'global')
         all_species: list[dict[str, Any]] = []
@@ -184,9 +181,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"info": "Choose a general region profile for mixed species, or target a specific species."},
         )
 
-    # ---------------------------
+    # ----
     # Habitat selection
-    # ---------------------------
+    # ----
     async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose habitat preset for ocean mode."""
         if user_input is not None:
@@ -239,9 +236,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    # ---------------------------
+    # ----
     # Time periods
-    # ---------------------------
+    # ----
     async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose time periods for ocean monitoring."""
         if user_input is not None:
@@ -270,7 +267,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             self.ocean_config.update(user_input)
-            return await self.async_step_ocean_thresholds()
+            # Ask units next so that thresholds form can render correct unit labels.
+            return await self.async_step_ocean_units()
 
         return self.async_show_form(
             step_id="ocean_time_periods",
@@ -290,11 +288,52 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
         )
 
-    # ---------------------------
-    # Thresholds, units & finish
-    # ---------------------------
+    # ----
+    # Units selection (NEW) - must be chosen before thresholds are rendered
+    # ----
+    async def async_step_ocean_units(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Ask user which display units they want (metric/imperial)."""
+        if user_input is not None:
+            units = user_input.get("units")
+            if units not in ("metric", "imperial"):
+                return self.async_show_form(
+                    step_id="ocean_units",
+                    data_schema=vol.Schema({vol.Required("units", default="metric"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                            ],
+                            mode="dropdown",
+                        )
+                    )}),
+                    errors={"base": "invalid_units"},
+                )
+            self.ocean_config["units"] = units
+            return await self.async_step_ocean_thresholds()
+
+        return self.async_show_form(
+            step_id="ocean_units",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("units", default="metric"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                            ],
+                            mode="dropdown",
+                        )
+                    )
+                }
+            ),
+        )
+
+    # ----
+    # Thresholds & finish
+    # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Configure units, thresholds and finish ocean config (strict)."""
+        """Configure thresholds and finish ocean config (strict)."""
         if user_input is not None:
             try:
                 # Ensure coordinates are present and valid
@@ -311,27 +350,24 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     raise ValueError("Latitude/longitude out of range")
 
                 habitat_preset = self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT)
-
-                # Required: units must be present (strict)
-                units = user_input.get("units")
-                if units not in ("metric", "imperial"):
-                    _LOGGER.error("Invalid or missing units in thresholds step: %s", units)
-                    raise ValueError("Invalid units selection")
-
-                # Deterministic mapping for wind unit from units
+                units = self.ocean_config.get("units", "metric")
                 wind_unit = "km/h" if units == "metric" else "mph"
 
-                # Build canonical safety_limits from the user inputs (these are the values the user explicitly sets)
-                safety_limits = {
-                    "max_wind_speed": user_input["max_wind_speed"],
-                    "max_gust_speed": user_input["max_gust_speed"],
-                    "max_wave_height": user_input["max_wave_height"],
-                    "min_temperature": user_input["min_temperature"],
-                    "max_temperature": user_input["max_temperature"],
+                # Build a display->canonical safety dict then convert -> validate/normalize
+                safety_display = {
+                    "safety_max_wind": user_input["max_wind_speed"],
+                    "safety_max_wave_height": user_input["max_wave_height"],
+                    "safety_min_visibility": None,
+                    "safety_max_swell_period": None,
                 }
+                canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
+                normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
+
+                # Build canonical safety_limits to store
+                safety_limits = normalized_limits
 
                 final_config = {
-                    # Note: this integration is ocean-only; we do not include a "mode" key.
+                    # integration is ocean-only
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
                     CONF_LATITUDE: latitude,
                     CONF_LONGITUDE: longitude,
@@ -342,12 +378,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_AUTO_APPLY_THRESHOLDS: False,
                     CONF_TIDE_MODE: TIDE_MODE_PROXY,
                     CONF_MARINE_ENABLED: True,
-                    # Store the canonical options in the created entry's data so async_setup_entry
-                    # can be strict and expect them to exist.
+                    # store both user thresholds (for UI/options) and canonical safety_limits (for runtime)
+                    CONF_THRESHOLDS: {
+                        "max_wind_speed": user_input["max_wind_speed"],
+                        "max_gust_speed": user_input.get("max_gust_speed"),
+                        "max_wave_height": user_input["max_wave_height"],
+                        "min_temperature": user_input["min_temperature"],
+                        "max_temperature": user_input["max_temperature"],
+                    },
+                    # Strict runtime keys required by async_setup_entry
                     "units": units,
                     "wind_unit": wind_unit,
                     "safety_limits": safety_limits,
-                    CONF_THRESHOLDS: safety_limits,
                 }
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
@@ -362,43 +404,39 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unhandled exception in async_step_ocean_thresholds: %s", exc)
                 return self._show_ocean_thresholds_form(errors={"base": "unknown"})
 
-        # Show the form with defaults based on habitat preset and require explicit units selection
         return self._show_ocean_thresholds_form()
 
     def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
         habitat = HABITAT_PRESETS.get(self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT), HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}))
+        units = self.ocean_config.get("units", "metric")
+        # map display units for selector labels
+        wind_unit_label = "km/h" if units == "metric" else "mph"
+        wave_unit_label = "m" if units == "metric" else "ft"
+        temp_unit_label = "°C" if units == "metric" else "°F"
+
         return self.async_show_form(
             step_id="ocean_thresholds",
             data_schema=vol.Schema(
                 {
-                    vol.Required("units", default="metric"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
-                            ],
-                            mode="dropdown",
-                        )
-                    ),
                     vol.Required("max_wind_speed", default=habitat.get("max_wind_speed", 25)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_gust_speed", default=habitat.get("max_gust_speed", 40)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=15, max=70, step=5, unit_of_measurement="km/h", mode="slider")
+                        selector.NumberSelectorConfig(min=15, max=70, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement="m", mode="slider")
+                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=-10, max=20, step=1, unit_of_measurement="°C")
+                        selector.NumberSelectorConfig(min=-30, max=50, step=1, unit_of_measurement=temp_unit_label)
                     ),
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=20, max=50, step=1, unit_of_measurement="°C")
+                        selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
                     ),
                 }
             ),
             errors=errors or {},
-            description_placeholders={"info": "Set safe fishing limits and choose the units to use for this integration."},
+            description_placeholders={"info": "Set safe fishing limits based on your habitat and comfort level."},
         )
 
     # Options flow (simple)
@@ -423,6 +461,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
         thresholds = self.config_entry.data.get(CONF_THRESHOLDS, {})
+        # show units-driven labels based on stored units in config_entry.data
+        units = self.config_entry.data.get("units", "metric")
+        wind_unit_label = "km/h" if units == "metric" else "mph"
+        wave_unit_label = "m" if units == "metric" else "ft"
+
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(
@@ -437,10 +480,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         )
                     ),
                     vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement="m", mode="slider")
+                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
                 }
             ),
