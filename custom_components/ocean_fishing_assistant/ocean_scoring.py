@@ -123,6 +123,8 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
             return f"Wave height exceeds safe limit ({val} m)"
         if k in ("swell", "swell_period"):
             return f"Swell period exceeds safe limit ({val} s)"
+        if k in ("gust", "wind_gust"):
+            return f"Gust exceeds safe limit ({val} m/s)"
         if k in ("vis", "visibility"):
             return f"Visibility below safe minimum ({val} km)"
         return f"{k} > {val}"
@@ -164,6 +166,12 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
                 # but semantics are treated as a minimum safe swell period in logic.
                 return f"Swell period approaching configured minimum ({ms} s)"
         return "Swell period near configured minimum"
+    if code == "gust_near_limit":
+        if safety_limits:
+            mg = safety_limits.get("max_gust_m_s")
+            if mg is not None:
+                return f"Gust approaching configured maximum ({mg} m/s)"
+        return "Gust near configured maximum"
     return code
 
 
@@ -422,6 +430,17 @@ def compute_score(
                     safety["caution"] = True
                     safety["reasons"].append("wave_near_limit")
 
+            # Gust checks (new)
+            max_gust = _to_float_safe(safety_limits.get("max_gust_m_s"))
+            gust = _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None
+            if max_gust is not None and gust is not None:
+                if gust > max_gust:
+                    safety["unsafe"] = True
+                    safety["reasons"].append(f"gust>{max_gust}")
+                elif gust > (0.9 * max_gust):
+                    safety["caution"] = True
+                    safety["reasons"].append("gust_near_limit")
+
             min_vis = _to_float_safe(safety_limits.get("min_visibility_km"))
             vis = _get_at("visibility_km", use_index) if "visibility_km" in data else None
             if min_vis is not None and vis is not None:
@@ -466,6 +485,9 @@ def compute_score(
             "temperature": temp,
             "timestamp": timestamps[use_index],
             "moon_phase": moon_phase_val,
+            # expose gust and swell period in the raw result for debugging/consumers
+            "wind_gust": _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None,
+            "swell_period_s": _get_at("swell_period_s", use_index) if "swell_period_s" in data else None,
         },
         "profile_used": profile.get("common_name", "unknown"),
         "safety": safety,
@@ -493,6 +515,8 @@ def compute_forecast(
                 "formatted_weather": {
                     "temperature": payload.get("temperature_c")[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),
                     "wind": payload.get("wind_m_s")[idx] if isinstance(payload.get("wind_m_s"), (list, tuple)) else payload.get("wind_m_s"),
+                    "wind_gust": payload.get("wind_max_m_s")[idx] if isinstance(payload.get("wind_max_m_s"), (list, tuple)) else payload.get("wind_max_m_s"),
+                    "swell_period_s": payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) else payload.get("swell_period_s"),
                     "pressure_hpa": payload.get("pressure_hpa")[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
                 },
                 # No searching for astro/marine blocks — strictly report moon_phase if available

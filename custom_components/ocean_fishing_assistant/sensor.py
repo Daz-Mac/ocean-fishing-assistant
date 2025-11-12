@@ -110,6 +110,39 @@ class OFASensor(CoordinatorEntity):
             # human-friendly strings (compute_forecast supplies 'reason_strings')
             attrs["safety_reason_strings"] = list(safety_obj.get("reason_strings", []) or [])
 
+        # Expose current gust and swell period as top-level attributes for easy access.
+        # Prefer the compact formatted_weather inside the per-timestamp forecast, fall back to raw payload current snapshot.
+        current_gust = None
+        current_swell = None
+        try:
+            if current and isinstance(current.get("forecast_raw"), dict):
+                formatted = current.get("forecast_raw", {}).get("formatted_weather") or {}
+                current_gust = formatted.get("wind_gust")
+                current_swell = formatted.get("swell_period_s")
+        except Exception:
+            current_gust = None
+            current_swell = None
+
+        # Fallback to raw_payload.current if formatted entries are missing
+        if current_gust is None:
+            try:
+                raw_current = raw.get("current") if isinstance(raw, dict) else None
+                if raw_current and isinstance(raw_current, dict):
+                    current_gust = raw_current.get("wind_gust") or raw_current.get("wind_max_m_s")
+            except Exception:
+                current_gust = None
+
+        if current_swell is None:
+            try:
+                raw_current = raw.get("current") if isinstance(raw, dict) else None
+                if raw_current and isinstance(raw_current, dict):
+                    current_swell = raw_current.get("swell_period_s")
+            except Exception:
+                current_swell = None
+
+        attrs["current_wind_gust"] = current_gust
+        attrs["current_swell_period_s"] = current_swell
+
         # Attribution to appear both as explicit key and HA-standard ATTR_ATTRIBUTION for older integrations
         attrs["attribution"] = ATTRIBUTION
         attrs[ATTR_ATTRIBUTION] = ATTRIBUTION
