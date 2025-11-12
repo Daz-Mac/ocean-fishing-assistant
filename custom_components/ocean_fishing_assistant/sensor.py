@@ -6,7 +6,7 @@ from homeassistant.const import ATTR_ATTRIBUTION
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_NAME
 
 ATTRIBUTION = "Data provided by Open-Meteo"
 
@@ -19,7 +19,7 @@ class OFASensor(CoordinatorEntity):
         - Fails loudly if coordinator lacks expected data.
         - Requires explicit `name` (no defaults or fallbacks).
         - The integration expects the configured name to be provided via
-          config entry options under the key "sensor_name". The runtime
+          the config entry data under the key CONF_NAME. The runtime
           name used for the entity will be prefixed with
           "ocean_fishing_assistant_" (unless the provided name already
           starts with that prefix).
@@ -112,7 +112,7 @@ class OFASensor(CoordinatorEntity):
 
         # Attribution to appear both as explicit key and HA-standard ATTR_ATTRIBUTION for older integrations
         attrs["attribution"] = ATTRIBUTION
-        attrs[ATTR_ATTRIBUTION] = ATTR_ATTRIBUTION
+        attrs[ATTR_ATTRIBUTION] = ATTRIBUTION
         return attrs
 
 
@@ -123,26 +123,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     Expects coordinator instance to be stored in hass.data[DOMAIN][entry.entry_id].
 
     Strict behavior:
-      - Requires entry.options["sensor_name"] to be set by the user during config/options.
+      - Requires entry.data[CONF_NAME] to be set by the user during config.
       - No default or fallback names are used.
       - The configured name will be deterministically prefixed with "ocean_fishing_assistant_" if not already.
-      - If the required option is missing, setup fails loudly by raising RuntimeError.
+      - If the required key is missing, setup fails loudly by raising RuntimeError.
     """
     coordinator = hass.data[DOMAIN].get(entry.entry_id) if hass.data.get(DOMAIN) else None
     if coordinator is None:
         raise RuntimeError("Coordinator not found in hass.data for this config entry (strict)")
 
-    # Enforce presence of explicit configured sensor name (no fallbacks).
     try:
-        opts = entry.options or {}
-        sensor_name = opts.get("sensor_name")
+        # Read name from entry.data (strict — the config flow must have stored this)
+        sensor_name = entry.data.get(CONF_NAME)
     except Exception:
-        raise RuntimeError("Failed to read config entry options; 'sensor_name' is required (strict)")
+        raise RuntimeError("Failed to read config entry data; 'name' (CONF_NAME) is required (strict)")
 
     if not sensor_name:
         raise RuntimeError(
-            "Missing required option 'sensor_name' in config entry options; "
-            "the Ocean Fishing Assistant integration requires the user to set a sensor name during configuration (strict)."
+            "Missing required name in config entry data; the Ocean Fishing Assistant integration requires the user to set a name during configuration (strict)."
         )
 
     # Ensure prefixing per policy (deterministic transformation).
