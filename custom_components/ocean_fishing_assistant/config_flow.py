@@ -1,5 +1,9 @@
-"""Config flow for Ocean Fishing Assistant (strict, ocean-only)."""
+"""Config flow for Ocean Fishing Assistant (strict, ocean-only).
 
+This version requires the user to explicitly choose `units` during config and
+stores `units`, `wind_unit` and `safety_limits` in the created entry `data`.
+No migrations or fallbacks are performed in the integration runtime.
+"""
 from __future__ import annotations
 
 import logging
@@ -96,19 +100,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Ensure loader is available and loaded for species lists
         if self.species_loader is None:
             self.species_loader = SpeciesLoader(self.hass)
-            try:
-                await self.species_loader.async_load_profiles()
-            except Exception as exc:
-                _LOGGER.exception("Failed to load species profiles for config flow: %s", exc)
-                # Surface a form-level error instead of raising to avoid server 500
-                return self.async_show_form(
-                    step_id="ocean_species",
-                    data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=[], mode="dropdown")
-                    )}),
-                    errors={"base": "missing_species_profiles"},
-                    description_placeholders={"info": "Species profiles unavailable; check logs."},
-                )
+            await self.species_loader.async_load_profiles()
 
         if user_input is not None:
             species_id = user_input[CONF_SPECIES_ID]
@@ -123,14 +115,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     species_region = available_regions[0]
                 else:
                     _LOGGER.error("Selected species_id %s not found in profiles", species_id)
-                    # Show the form again with an error instead of raising
-                    return self.async_show_form(
-                        step_id="ocean_species",
-                        data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                            selector.SelectSelectorConfig(options=[], mode="dropdown")
-                        )}),
-                        errors={"base": "invalid_species"},
-                    )
+                    raise RuntimeError("Selected species_id not found")
 
             self.ocean_config[CONF_SPECIES_ID] = species_id
             self.ocean_config[CONF_SPECIES_REGION] = species_region
@@ -139,24 +124,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Build options strictly; abort if missing
         if not getattr(self.species_loader, "_profiles", None):
             _LOGGER.error("Species profiles missing when building ocean species list; aborting flow.")
-            return self.async_show_form(
-                step_id="ocean_species",
-                data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=[], mode="dropdown")
-                )}),
-                errors={"base": "missing_species_profiles"},
-            )
+            raise RuntimeError("Missing species profiles for ocean species selection")
 
         regions = self.species_loader.get_regions_by_type("ocean")
         if not regions:
             _LOGGER.error("No ocean regions found in species_profiles.json; aborting flow.")
-            return self.async_show_form(
-                step_id="ocean_species",
-                data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=[], mode="dropdown")
-                )}),
-                errors={"base": "no_ocean_regions"},
-            )
+            raise RuntimeError("No ocean regions available")
 
         species_options: list[dict[str, str]] = []
 
@@ -170,11 +143,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # SECTION: Specific species
         species_options.append({"value": "separator_species", "label": "━━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━━"})
 
-        # Collect all ocean-specific species across regions (dedupe)
+        # Collect all ocean-specific species across regions (dedupe, include 'global')
         all_species: list[dict[str, Any]] = []
         for region in regions:
             region_id = region["id"]
-            # include 'global' too — species that only list "global" should still appear
             region_species = self.species_loader.get_species_by_region(region_id)
             for s in region_species:
                 if s.get("habitat") != "ocean":
@@ -182,8 +154,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 sid = s["id"]
                 if not any(x["id"] == sid for x in all_species):
                     all_species.append(s)
-
-        _LOGGER.debug("Built species list for UI: regions=%d species=%d", len(regions), len(all_species))
 
         all_species.sort(key=lambda s: s.get("name", s["id"]))
         for species in all_species:
@@ -321,10 +291,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ---------------------------
-    # Thresholds & finish
+    # Thresholds, units & finish
     # ---------------------------
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Configure thresholds and finish ocean config (strict)."""
+        """Configure units, thresholds and finish ocean config (strict)."""
         if user_input is not None:
             try:
                 # Ensure coordinates are present and valid
@@ -342,6 +312,24 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 habitat_preset = self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT)
 
+                # Required: units must be present (strict)
+                units = user_input.get("units")
+                if units not in ("metric", "imperial"):
+                    _LOGGER.error("Invalid or missing units in thresholds step: %s", units)
+                    raise ValueError("Invalid units selection")
+
+                # Deterministic mapping for wind unit from units
+                wind_unit = "km/h" if units == "metric" else "mph"
+
+                # Build canonical safety_limits from the user inputs (these are the values the user explicitly sets)
+                safety_limits = {
+                    "max_wind_speed": user_input["max_wind_speed"],
+                    "max_gust_speed": user_input["max_gust_speed"],
+                    "max_wave_height": user_input["max_wave_height"],
+                    "min_temperature": user_input["min_temperature"],
+                    "max_temperature": user_input["max_temperature"],
+                }
+
                 final_config = {
                     # Note: this integration is ocean-only; we do not include a "mode" key.
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
@@ -354,13 +342,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_AUTO_APPLY_THRESHOLDS: False,
                     CONF_TIDE_MODE: TIDE_MODE_PROXY,
                     CONF_MARINE_ENABLED: True,
-                    CONF_THRESHOLDS: {
-                        "max_wind_speed": user_input["max_wind_speed"],
-                        "max_gust_speed": user_input["max_gust_speed"],
-                        "max_wave_height": user_input["max_wave_height"],
-                        "min_temperature": user_input["min_temperature"],
-                        "max_temperature": user_input["max_temperature"],
-                    },
+                    # Store the canonical options in the created entry's data so async_setup_entry
+                    # can be strict and expect them to exist.
+                    "units": units,
+                    "wind_unit": wind_unit,
+                    "safety_limits": safety_limits,
+                    CONF_THRESHOLDS: safety_limits,
                 }
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
@@ -375,7 +362,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unhandled exception in async_step_ocean_thresholds: %s", exc)
                 return self._show_ocean_thresholds_form(errors={"base": "unknown"})
 
-        # Show the form with defaults based on habitat preset
+        # Show the form with defaults based on habitat preset and require explicit units selection
         return self._show_ocean_thresholds_form()
 
     def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
@@ -384,6 +371,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="ocean_thresholds",
             data_schema=vol.Schema(
                 {
+                    vol.Required("units", default="metric"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                            ],
+                            mode="dropdown",
+                        )
+                    ),
                     vol.Required("max_wind_speed", default=habitat.get("max_wind_speed", 25)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
                     ),
@@ -402,7 +398,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors or {},
-            description_placeholders={"info": "Set safe fishing limits based on your habitat and comfort level."},
+            description_placeholders={"info": "Set safe fishing limits and choose the units to use for this integration."},
         )
 
     # Options flow (simple)
