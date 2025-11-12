@@ -1,12 +1,16 @@
 """
-Ocean Fishing Assistant - integration entry points (strict).
+Ocean Fishing Assistant - integration entry points (strict, ocean-only).
+
+This implementation expects required values (including `units` and
+`safety_limits`) to be present in the created config entry `data`.
+If they are missing or invalid, setup fails loudly (ValueError / return False).
 """
 import logging
 
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.helpers import aiohttp_client
 
-from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, DEFAULT_SAFETY_LIMITS
+from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, DEFAULT_SAFETY_LIMITS, CONF_SPECIES_ID, CONF_SPECIES_REGION, CONF_THRESHOLDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ async def async_setup_entry(hass, entry):
         "Fetch cache initialized for domain %s (current keys: %s)", DOMAIN, list(fetch_cache.keys())[:10]
     )
 
+    # Coordinates come from entry.data (flow writes these into data)
     lat = entry.data.get(CONF_LATITUDE)
     lon = entry.data.get(CONF_LONGITUDE)
     _LOGGER.debug("Config entry %s coordinates lat=%s lon=%s", entry.entry_id, lat, lon)
@@ -58,48 +63,43 @@ async def async_setup_entry(hass, entry):
     formatter = DataFormatter()
     _LOGGER.debug("DataFormatter instantiated for entry %s", entry.entry_id)
 
-    # Read canonical safety_limits already normalized by config flow; require units present
-    units = entry.options.get("units")
+    # --- Read required canonical values from entry.data (strict: no migrations) ---
+    units = entry.data.get("units")
     if not units:
-        raise ValueError("Entry options missing 'units' (strict)")
+        _LOGGER.error("Config entry %s missing required 'units' in entry.data (strict)", entry.entry_id)
+        raise ValueError("Entry data missing 'units' (strict)")
 
-    safety_limits = entry.options.get("safety_limits")
+    safety_limits = entry.data.get("safety_limits")
     if safety_limits is None:
-        raise ValueError("Entry options missing 'safety_limits' (strict)")
+        _LOGGER.error("Config entry %s missing required 'safety_limits' in entry.data (strict)", entry.entry_id)
+        raise ValueError("Entry data missing 'safety_limits' (strict)")
 
-    # Determine expected wind unit deterministically from the selected units
+    # Deterministic wind unit mapping — ensure the flow stored wind_unit consistent with units
     expected_wind_unit = "km/h" if units == "metric" else "mph" if units == "imperial" else None
     if expected_wind_unit is None:
-        raise ValueError(f"Unsupported entry.options['units']: {units!r} (strict)")
+        _LOGGER.error("Config entry %s has unsupported units=%r (strict)", entry.entry_id, units)
+        raise ValueError(f"Unsupported entry.data['units']: {units!r} (strict)")
 
-    # If wind_unit is missing or mismatched, migrate the entry options to the deterministic mapping.
-    current_wind_unit = entry.options.get("wind_unit")
-    if current_wind_unit != expected_wind_unit:
-        _LOGGER.info(
-            "Config entry %s wind_unit mismatch or missing (current=%s expected=%s). Migrating entry.options to deterministic wind unit.",
+    wind_unit = entry.data.get("wind_unit")
+    if wind_unit != expected_wind_unit:
+        _LOGGER.error(
+            "Config entry %s wind_unit mismatch or missing (found=%r expected=%r) — entry must be created with correct wind_unit (strict)",
             entry.entry_id,
-            current_wind_unit,
+            wind_unit,
             expected_wind_unit,
         )
-        # Build new options dict based on existing options but with corrected wind_unit
-        new_options = dict(entry.options or {})
-        new_options["wind_unit"] = expected_wind_unit
-        # Persist update to the config entry so future setups use correct mapping
-        hass.config_entries.async_update_entry(entry, options=new_options)
-        # Use updated value going forward
-        wind_unit = expected_wind_unit
-    else:
-        wind_unit = current_wind_unit
+        raise ValueError("Entry data 'wind_unit' missing or mismatched (strict)")
 
-    # Final validation of wind_unit value
+    # Validate allowed wind unit values
     if wind_unit not in ("km/h", "mph", "m/s"):
-        raise ValueError(f"Invalid entry.options['wind_unit']: {wind_unit!r} (strict)")
+        _LOGGER.error("Config entry %s has invalid wind_unit=%r (strict)", entry.entry_id, wind_unit)
+        raise ValueError(f"Invalid entry.data['wind_unit']: {wind_unit!r} (strict)")
 
     _LOGGER.debug("Chosen speed_unit for entry %s: %s", entry.entry_id, wind_unit)
 
     # Validate selected species (if set) exists in the packaged profiles
-    selected_species = entry.options.get("species")
-    selected_region = entry.options.get("species_region")
+    selected_species = entry.data.get(CONF_SPECIES_ID)
+    selected_region = entry.data.get(CONF_SPECIES_REGION)
     if selected_species:
         try:
             # Synthetic selection pattern: "general_mixed_<region>"
@@ -119,7 +119,7 @@ async def async_setup_entry(hass, entry):
                 # require explicit region to be present and valid
                 if not selected_region:
                     raise ValueError(
-                        "Selected species 'general_mixed' requires 'species_region' option to be set (strict)"
+                        "Selected species 'general_mixed' requires 'species_region' in entry.data (strict)"
                     )
                 region_info = loader.get_region_info(selected_region)
                 if not region_info:
@@ -145,6 +145,7 @@ async def async_setup_entry(hass, entry):
             _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
             return False
 
+    # Create WeatherFetcher and coordinator using values from entry.data
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit)
     _LOGGER.debug("WeatherFetcher instantiated for entry %s", entry.entry_id)
 
@@ -155,17 +156,17 @@ async def async_setup_entry(hass, entry):
         formatter=formatter,
         lat=lat,
         lon=lon,
-        update_interval=entry.options.get("update_interval", DEFAULT_UPDATE_INTERVAL),
-        store_enabled=entry.options.get("persist_last_fetch", False),
-        ttl=entry.options.get("persist_ttl", 3600),
-        species=entry.options.get("species"),
+        update_interval=entry.data.get("update_interval", DEFAULT_UPDATE_INTERVAL),
+        store_enabled=entry.data.get("persist_last_fetch", False),
+        ttl=entry.data.get("persist_ttl", 3600),
+        species=entry.data.get(CONF_SPECIES_ID),
         units=units,
         safety_limits=safety_limits,
     )
     _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
 
     # try to load persisted last successful fetch before first refresh (fast recovery)
-    if entry.options.get("persist_last_fetch", False):
+    if entry.data.get("persist_last_fetch", False):
         _LOGGER.debug(
             "persist_last_fetch enabled for entry %s; attempting to load persisted data", entry.entry_id
         )
