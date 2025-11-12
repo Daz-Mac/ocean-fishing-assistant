@@ -96,7 +96,19 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Ensure loader is available and loaded for species lists
         if self.species_loader is None:
             self.species_loader = SpeciesLoader(self.hass)
-            await self.species_loader.async_load_profiles()
+            try:
+                await self.species_loader.async_load_profiles()
+            except Exception as exc:
+                _LOGGER.exception("Failed to load species profiles for config flow: %s", exc)
+                # Surface a form-level error instead of raising to avoid server 500
+                return self.async_show_form(
+                    step_id="ocean_species",
+                    data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=[], mode="dropdown")
+                    )}),
+                    errors={"base": "missing_species_profiles"},
+                    description_placeholders={"info": "Species profiles unavailable; check logs."},
+                )
 
         if user_input is not None:
             species_id = user_input[CONF_SPECIES_ID]
@@ -111,7 +123,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     species_region = available_regions[0]
                 else:
                     _LOGGER.error("Selected species_id %s not found in profiles", species_id)
-                    raise RuntimeError("Selected species_id not found")
+                    # Show the form again with an error instead of raising
+                    return self.async_show_form(
+                        step_id="ocean_species",
+                        data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                            selector.SelectSelectorConfig(options=[], mode="dropdown")
+                        )}),
+                        errors={"base": "invalid_species"},
+                    )
 
             self.ocean_config[CONF_SPECIES_ID] = species_id
             self.ocean_config[CONF_SPECIES_REGION] = species_region
@@ -120,12 +139,24 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Build options strictly; abort if missing
         if not getattr(self.species_loader, "_profiles", None):
             _LOGGER.error("Species profiles missing when building ocean species list; aborting flow.")
-            raise RuntimeError("Missing species profiles for ocean species selection")
+            return self.async_show_form(
+                step_id="ocean_species",
+                data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=[], mode="dropdown")
+                )}),
+                errors={"base": "missing_species_profiles"},
+            )
 
         regions = self.species_loader.get_regions_by_type("ocean")
         if not regions:
             _LOGGER.error("No ocean regions found in species_profiles.json; aborting flow.")
-            raise RuntimeError("No ocean regions available")
+            return self.async_show_form(
+                step_id="ocean_species",
+                data_schema=vol.Schema({vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=[], mode="dropdown")
+                )}),
+                errors={"base": "no_ocean_regions"},
+            )
 
         species_options: list[dict[str, str]] = []
 
@@ -143,8 +174,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         all_species: list[dict[str, Any]] = []
         for region in regions:
             region_id = region["id"]
-            if region_id == "global":
-                continue
+            # include 'global' too — species that only list "global" should still appear
             region_species = self.species_loader.get_species_by_region(region_id)
             for s in region_species:
                 if s.get("habitat") != "ocean":
@@ -153,12 +183,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not any(x["id"] == sid for x in all_species):
                     all_species.append(s)
 
+        _LOGGER.debug("Built species list for UI: regions=%d species=%d", len(regions), len(all_species))
+
         all_species.sort(key=lambda s: s.get("name", s["id"]))
         for species in all_species:
             emoji = species.get("emoji", "🐟")
             name = species.get("name", species["id"])
             species_id = species["id"]
-            active_months = species.get("active_months", [])
+            active_months = species.get("active_months", []) or species.get("preferred_months", [])
             if len(active_months) == 12:
                 season_info = "Year-round"
             elif len(active_months) > 0:
