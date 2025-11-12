@@ -19,29 +19,37 @@ async def async_setup_entry(hass, entry):
     _LOGGER.debug("Acquired aiohttp session: %s", session)
 
     fetch_cache = hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
-    _LOGGER.debug("Fetch cache initialized for domain %s (current keys: %s)", DOMAIN, list(fetch_cache.keys())[:10])
+    _LOGGER.debug(
+        "Fetch cache initialized for domain %s (current keys: %s)", DOMAIN, list(fetch_cache.keys())[:10]
+    )
 
     lat = entry.data.get(CONF_LATITUDE)
     lon = entry.data.get(CONF_LONGITUDE)
     _LOGGER.debug("Config entry %s coordinates lat=%s lon=%s", entry.entry_id, lat, lon)
     if lat is None or lon is None:
-        _LOGGER.error("Config entry missing latitude/longitude; aborting setup for entry %s", entry.entry_id)
+        _LOGGER.error(
+            "Config entry missing latitude/longitude; aborting setup for entry %s", entry.entry_id
+        )
         return False
 
     try:
         from .coordinator import OFACoordinator
         from .weather_fetcher import WeatherFetcher
         from .data_formatter import DataFormatter
-        from .species_loader import load_profiles, validate_profiles
+        from .species_loader import SpeciesLoader
     except Exception as exc:
-        _LOGGER.exception("Failed to import integration modules for entry %s: %s", entry.entry_id, exc)
+        _LOGGER.exception(
+            "Failed to import integration modules for entry %s: %s", entry.entry_id, exc
+        )
         return False
 
     # Strictly validate packaged species profiles at startup; fail fast on schema problems
     try:
-        profiles = load_profiles()
-        validate_profiles(profiles)
-        _LOGGER.debug("Loaded and validated %d species profiles", len(profiles))
+        loader = SpeciesLoader(hass)
+        await loader.async_load_profiles()
+        _LOGGER.debug(
+            "Loaded and validated species profiles (count=%d)", len(loader.get_all_species())
+        )
     except Exception as exc:
         _LOGGER.exception("species_profiles.json failed validation: %s", exc)
         # fail setup loudly (per project policy)
@@ -91,11 +99,48 @@ async def async_setup_entry(hass, entry):
 
     # Validate selected species (if set) exists in the packaged profiles
     selected_species = entry.options.get("species")
+    selected_region = entry.options.get("species_region")
     if selected_species:
         try:
-            profiles = load_profiles()
-            if selected_species not in profiles:
-                raise ValueError(f"Selected species '{selected_species}' not found in packaged species_profiles.json (strict)")
+            # Synthetic selection pattern: "general_mixed_<region>"
+            if isinstance(selected_species, str) and selected_species.startswith("general_mixed_"):
+                region = selected_species.replace("general_mixed_", "")
+                region_info = loader.get_region_info(region)
+                if not region_info:
+                    raise ValueError(
+                        f"Selected synthetic region '{region}' not found in species_profiles.json (strict)"
+                    )
+                if region_info.get("habitat") != "ocean":
+                    raise ValueError(
+                        f"Selected synthetic region '{region}' is not an ocean region (strict)"
+                    )
+                # ok: synthetic general_mixed_<region> is valid
+            elif selected_species == "general_mixed":
+                # require explicit region to be present and valid
+                if not selected_region:
+                    raise ValueError(
+                        "Selected species 'general_mixed' requires 'species_region' option to be set (strict)"
+                    )
+                region_info = loader.get_region_info(selected_region)
+                if not region_info:
+                    raise ValueError(
+                        f"Selected species_region '{selected_region}' not found in species_profiles.json (strict)"
+                    )
+                if region_info.get("habitat") != "ocean":
+                    raise ValueError(
+                        f"Selected species_region '{selected_region}' is not an ocean region (strict)"
+                    )
+            else:
+                # Validate a specific species id exists and is ocean habitat
+                sp = loader.get_species(selected_species)
+                if not sp:
+                    raise ValueError(
+                        f"Selected species '{selected_species}' not found in packaged species_profiles.json (strict)"
+                    )
+                if sp.get("habitat") != "ocean":
+                    raise ValueError(
+                        f"Selected species '{selected_species}' is not an ocean species (strict)"
+                    )
         except Exception as exc:
             _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
             return False
@@ -121,7 +166,9 @@ async def async_setup_entry(hass, entry):
 
     # try to load persisted last successful fetch before first refresh (fast recovery)
     if entry.options.get("persist_last_fetch", False):
-        _LOGGER.debug("persist_last_fetch enabled for entry %s; attempting to load persisted data", entry.entry_id)
+        _LOGGER.debug(
+            "persist_last_fetch enabled for entry %s; attempting to load persisted data", entry.entry_id
+        )
         try:
             loaded = await coord.async_load_from_store()
             if loaded:
@@ -142,9 +189,7 @@ async def async_setup_entry(hass, entry):
     _LOGGER.debug("Stored coordinator in hass.data[%s][%s]", DOMAIN, entry.entry_id)
 
     # forward entry to sensors
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
-    )
+    hass.async_create_task(hass.config_entries.async_forward_entry_setups(entry, ["sensor"]))
 
     _LOGGER.debug("async_setup_entry completed for entry %s", entry.entry_id)
     return True
@@ -155,7 +200,9 @@ async def async_unload_entry(hass, entry):
     _LOGGER.debug("Starting async_unload_entry for entry %s", entry.entry_id)
     try:
         unload_ok = await hass.config_entries.async_forward_entry_unload(entry, "sensor")
-        _LOGGER.debug("Forwarded unload for entry %s to sensor platform, result=%s", entry.entry_id, unload_ok)
+        _LOGGER.debug(
+            "Forwarded unload for entry %s to sensor platform, result=%s", entry.entry_id, unload_ok
+        )
     except Exception:
         _LOGGER.exception("Error while forwarding unload for entry %s", entry.entry_id)
         unload_ok = False
@@ -166,5 +213,7 @@ async def async_unload_entry(hass, entry):
     except Exception:
         _LOGGER.exception("Failed to remove entry %s from hass.data", entry.entry_id)
 
-    _LOGGER.debug("async_unload_entry finished for entry %s, unload_ok=%s", entry.entry_id, unload_ok)
+    _LOGGER.debug(
+        "async_unload_entry finished for entry %s, unload_ok=%s", entry.entry_id, unload_ok
+    )
     return unload_ok
