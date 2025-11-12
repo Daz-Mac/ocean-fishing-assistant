@@ -356,9 +356,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Build a display->canonical safety dict then convert -> validate/normalize
                 safety_display = {
                     "safety_max_wind": user_input["max_wind_speed"],
+                    "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": None,
-                    "safety_max_swell_period": None,
+                    "safety_max_swell_period": user_input.get("max_swell_period"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -385,6 +386,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "max_wave_height": user_input["max_wave_height"],
                         "min_temperature": user_input["min_temperature"],
                         "max_temperature": user_input["max_temperature"],
+                        "max_swell_period": user_input.get("max_swell_period"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -422,10 +424,13 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_gust_speed", default=habitat.get("max_gust_speed", 40)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=15, max=70, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                    ),
+                    vol.Required("max_swell_period", default=10): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-30, max=50, step=1, unit_of_measurement=temp_unit_label)
@@ -482,8 +487,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
+                    vol.Required("max_gust_speed", default=thresholds.get("max_gust_speed", 40)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+                    ),
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                    ),
+                    vol.Required("max_swell_period", default=thresholds.get("max_swell_period", 10)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                 }
             ),
