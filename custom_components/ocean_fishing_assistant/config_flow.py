@@ -131,14 +131,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         species_options: list[dict[str, str]] = []
 
         # SECTION: General regional mixed profiles
-        species_options.append({"value": "separator_regions", "label": "━━━━ 🎣 GENERAL REGION PROFILES ━━━━━"})
+        species_options.append({"value": "separator_regions", "label": "━━━━ 🎣 GENERAL REGION PROFILES ━━━━"})
         for region in regions:
             region_id = region["id"]
             region_name = region.get("name", region_id)
             species_options.append({"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"})
 
         # SECTION: Specific species
-        species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━━"})
+        species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━"})
 
         # Collect all ocean-specific species across regions (dedupe, include 'global')
         all_species: list[dict[str, Any]] = []
@@ -247,46 +247,28 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             valid = {TIME_PERIODS_FULL_DAY, TIME_PERIODS_DAWN_DUSK}
             if tp is None or tp not in valid:
                 errors["base"] = "invalid_time_periods"
-                return self.async_show_form(
-                    step_id="ocean_time_periods",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
-                                selector.SelectSelectorConfig(
-                                    options=[
-                                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
-                                    ],
-                                    mode="list",
-                                )
+            return self.async_show_form(
+                step_id="ocean_time_periods",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                            selector.SelectSelectorConfig(
+                                options=[
+                                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                                ],
+                                mode="list",
                             )
-                        }
-                    ),
-                    errors=errors,
-                    description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
-                )
-
-            self.ocean_config.update(user_input)
-            # Ask units next so that thresholds form can render correct unit labels.
-            return await self.async_step_ocean_units()
-
-        return self.async_show_form(
-            step_id="ocean_time_periods",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
-                            ],
-                            mode="list",
                         )
-                    )
-                }
-            ),
-            description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
-        )
+                    }
+                ),
+                errors=errors,
+                description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+            )
+
+        self.ocean_config.update(user_input)
+        # Ask units next so that thresholds form can render correct unit labels.
+        return await self.async_step_ocean_units()
 
     # ----
     # Units selection (NEW) - must be chosen before thresholds are rendered
@@ -359,7 +341,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": None,
-                    "safety_max_swell_period": user_input.get("max_swell_period"),
+                    # Note: convert_safety_display_to_metric expects the display key 'safety_max_swell_period'.
+                    # We now source the value from the renamed UI/storage field 'min_swell_period_s'.
+                    "safety_max_swell_period": user_input.get("min_swell_period_s"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -386,7 +370,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "max_wave_height": user_input["max_wave_height"],
                         "min_temperature": user_input["min_temperature"],
                         "max_temperature": user_input["max_temperature"],
-                        "max_swell_period": user_input.get("max_swell_period"),
+                        # renamed UI/storage key for swell period to min_swell_period_s
+                        "min_swell_period_s": user_input.get("min_swell_period_s"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -429,7 +414,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    vol.Required("max_swell_period", default=10): selector.NumberSelector(
+                    # renamed field name for UI/storage: min_swell_period_s
+                    vol.Required("min_swell_period_s", default=10): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
@@ -493,7 +479,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    vol.Required("max_swell_period", default=thresholds.get("max_swell_period", 10)): selector.NumberSelector(
+                    # options uses the renamed storage key min_swell_period_s
+                    vol.Required("min_swell_period_s", default=thresholds.get("min_swell_period_s", 10)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                 }
