@@ -121,8 +121,9 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
             return f"Wind exceeds safe limit ({val} m/s)"
         if k in ("wave", "wave_height"):
             return f"Wave height exceeds safe limit ({val} m)"
+        # For swell we treat configured value as a minimum; ">" codes are unlikely but handle gracefully
         if k in ("swell", "swell_period"):
-            return f"Swell period exceeds safe limit ({val} s)"
+            return f"Swell period below safe minimum ({val} s)"
         if k in ("gust", "wind_gust"):
             return f"Gust exceeds safe limit ({val} m/s)"
         if k in ("vis", "visibility"):
@@ -160,10 +161,8 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
         return "Visibility near configured minimum"
     if code == "swell_near_limit":
         if safety_limits:
-            ms = safety_limits.get("max_swell_period_s")
+            ms = safety_limits.get("min_swell_period_s")
             if ms is not None:
-                # note: stored key remains 'max_swell_period_s' for compatibility,
-                # but semantics are treated as a minimum safe swell period in logic.
                 return f"Swell period approaching configured minimum ({ms} s)"
         return "Swell period near configured minimum"
     if code == "gust_near_limit":
@@ -430,7 +429,7 @@ def compute_score(
                     safety["caution"] = True
                     safety["reasons"].append("wave_near_limit")
 
-            # Gust checks (new)
+            # Gust checks
             max_gust = _to_float_safe(safety_limits.get("max_gust_m_s"))
             gust = _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None
             if max_gust is not None and gust is not None:
@@ -451,10 +450,9 @@ def compute_score(
                     safety["caution"] = True
                     safety["reasons"].append("vis_near_limit")
 
-            # Treat configured swell period limit as a minimum safe swell period:
-            # short periods (< limit) are unsafe (choppy), periods slightly above
-            # the minimum can be marked as caution.
-            min_swell = _to_float_safe(safety_limits.get("max_swell_period_s"))
+            # Swell: configured canonical key is min_swell_period_s and represents a minimum safe swell period.
+            # Shorter swell periods (< min_swell_period_s) are considered unsafe (choppy); slightly above minimum -> caution.
+            min_swell = _to_float_safe(safety_limits.get("min_swell_period_s"))
             swell = _get_at("swell_period_s", use_index) if "swell_period_s" in data else None
             if min_swell is not None and swell is not None:
                 if swell < min_swell:

@@ -111,7 +111,7 @@ _DISPLAY_TO_CANONICAL = {
     "safety_max_wind": "max_wind_m_s",
     "safety_max_wave_height": "max_wave_height_m",
     "safety_min_visibility": "min_visibility_km",
-    "safety_max_swell_period": "max_swell_period_s",
+    "safety_max_swell_period": "min_swell_period_s",  # stored key renamed to min_swell_period_s
     "safety_max_gust": "max_gust_m_s",
 }
 
@@ -163,13 +163,12 @@ def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = 
         if entry_units == "metric":
             out["min_visibility_km"] = _to_float(raw_vis)
         else:
-            # assume miles -> km
             miles = _to_float(raw_vis)
             out["min_visibility_km"] = miles_to_km(miles) if miles is not None else None
 
-    # Swell period: UI shows seconds in both systems; keep as seconds
+    # Swell period: UI shows seconds in both systems; store as min_swell_period_s canonical key
     raw_swell = safety.get("safety_max_swell_period")
-    out["max_swell_period_s"] = _to_float(raw_swell) if raw_swell is not None else None
+    out["min_swell_period_s"] = _to_float(raw_swell) if raw_swell is not None else None
 
     return out
 
@@ -180,7 +179,7 @@ _SAFETY_SCHEMA = {
     "max_wind_m_s": ("m/s", 0.0, 60.0, DEFAULT_SAFETY_LIMITS.get("max_wind_m_s", 15.0), False),
     "max_gust_m_s": ("m/s", 0.0, 80.0, None, True),
     "min_visibility_km": ("km", 0.0, 200.0, None, True),
-    "max_swell_period_s": ("s", 0.0, 120.0, None, True),
+    "min_swell_period_s": ("s", 0.0, 120.0, None, True),  # renamed key
 }
 
 
@@ -198,7 +197,6 @@ def validate_and_normalize_safety_limits(safety_limits: Dict[str, Any], strict: 
         if raw is None:
             normalized[key] = default
             continue
-        # raw expected numeric already (float) because conversion done earlier
         try:
             val = float(raw)
         except Exception:
@@ -208,7 +206,6 @@ def validate_and_normalize_safety_limits(safety_limits: Dict[str, Any], strict: 
             warnings.append(msg + "; using default/None")
             normalized[key] = default
             continue
-        # clamp
         if val < vmin:
             warnings.append(f"safety_limits[{key}]={val} below min {vmin}; clamping to {vmin}")
             val = float(vmin)
