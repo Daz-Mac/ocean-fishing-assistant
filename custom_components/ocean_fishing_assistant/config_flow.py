@@ -14,7 +14,6 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import (
     DOMAIN,
-    MODE_OCEAN,
     CONF_NAME,
     CONF_LATITUDE,
     CONF_LONGITUDE,
@@ -25,7 +24,6 @@ from .const import (
     CONF_THRESHOLDS,
     CONF_TIMEZONE,
     CONF_ELEVATION,
-    CONF_MODE,
     CONF_AUTO_APPLY_THRESHOLDS,
     CONF_TIDE_MODE,
     CONF_MARINE_ENABLED,
@@ -52,46 +50,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.species_loader: SpeciesLoader | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Start the flow by jumping to mode select where the user must pick ocean."""
-        if user_input is None:
-            return await self.async_step_select_mode()
-        # If user provided a direct payload with mode, handle accordingly
-        if user_input.get(CONF_MODE) == MODE_OCEAN:
-            return await self.async_step_ocean_location()
-        # If mode not provided or not ocean, force mode selection page
-        return await self.async_step_select_mode()
+        """Start the ocean-only flow; forward to ocean_location step."""
+        return await self.async_step_ocean_location(user_input)
 
-    async def async_step_select_mode(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Force selection of Ocean mode (explicit)."""
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            try:
-                if user_input.get(CONF_MODE) == MODE_OCEAN:
-                    return await self.async_step_ocean_location()
-                errors["base"] = "must_select_ocean"
-            except Exception as exc:
-                _LOGGER.exception("Error in select_mode: %s", exc)
-                errors["base"] = "unknown"
-
-        return self.async_show_form(
-            step_id="select_mode",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_MODE, default=MODE_OCEAN): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": MODE_OCEAN, "label": "🌊 Ocean/Shore Fishing"},
-                            ],
-                            mode="list",
-                        )
-                    )
-                }
-            ),
-            errors=errors,
-        )
-
+    # ---------------------------
+    # Ocean location
+    # ---------------------------
     async def async_step_ocean_location(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Configure ocean location (name + coordinates)."""
+        """Configure ocean location (name and coordinates)."""
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
@@ -122,6 +88,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    # ---------------------------
+    # Ocean species/region selection
+    # ---------------------------
     async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose species/region for ocean mode (strict)."""
         # Ensure loader is available and loaded for species lists
@@ -132,7 +101,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             species_id = user_input[CONF_SPECIES_ID]
             # handle the 'general_mixed_<region>' synthetic selection
-            if species_id.startswith("general_mixed_"):
+            if isinstance(species_id, str) and species_id.startswith("general_mixed_"):
                 species_region = species_id.replace("general_mixed_", "")
                 species_id = "general_mixed"
             else:
@@ -213,6 +182,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"info": "Choose a general region profile for mixed species, or target a specific species."},
         )
 
+    # ---------------------------
+    # Habitat selection
+    # ---------------------------
     async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose habitat preset for ocean mode."""
         if user_input is not None:
@@ -265,6 +237,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    # ---------------------------
+    # Time periods
+    # ---------------------------
     async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose time periods for ocean monitoring."""
         if user_input is not None:
@@ -313,6 +288,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
         )
 
+    # ---------------------------
+    # Thresholds & finish
+    # ---------------------------
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
         if user_input is not None:
@@ -333,7 +311,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 habitat_preset = self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT)
 
                 final_config = {
-                    CONF_MODE: MODE_OCEAN,
+                    # Note: this integration is ocean-only; we do not include a "mode" key.
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
                     CONF_LATITUDE: latitude,
                     CONF_LONGITUDE: longitude,
