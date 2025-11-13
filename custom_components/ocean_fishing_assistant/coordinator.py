@@ -10,7 +10,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN
+from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN, CONF_TIME_PERIODS
 from .tide_proxy import TideProxy
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,10 +31,12 @@ class OFACoordinator(DataUpdateCoordinator):
         species: Optional[str] = None,
         units: str = "metric",
         safety_limits: Optional[dict] = None,
+        time_periods_mode: str = "full_day",
     ):
         """
         - fetcher must be constructed with the user-selected wind unit (strict).
         - coordinator validates fetcher.speed_unit matches options.
+        - time_periods_mode: one of the CONF_TIME_PERIODS values (full_day/dawn_dusk)
         """
         super().__init__(
             hass,
@@ -53,6 +55,7 @@ class OFACoordinator(DataUpdateCoordinator):
         self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
         self._ttl = int(ttl)
         self._tide_proxy = TideProxy(hass, self.lat, self.lon)
+        self.time_periods_mode = time_periods_mode or "full_day"
 
         # Validate fetcher speed unit matches the configured units selection (strict enforcement)
         expected_speed_unit = None
@@ -154,6 +157,19 @@ class OFACoordinator(DataUpdateCoordinator):
                 else:
                     raw.setdefault("tide", {})[k] = v
 
+            # Precompute period indices using TideProxy + Skyfield (strict)
+            # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
+            try:
+                period_indices = await self._tide_proxy.compute_period_indices_for_timestamps(
+                    timestamps,
+                    mode=self.time_periods_mode,
+                    dawn_window_hours=1.0,
+                )
+            except Exception:
+                _LOGGER.exception("Failed to compute time-period indices from Skyfield (strict)")
+                # propagate strict failure
+                raise
+
             # Attach current snapshot (strict)
             if not hasattr(self.fetcher, "get_weather_data"):
                 raise RuntimeError("Fetcher does not implement get_weather_data (strict)")
@@ -184,12 +200,13 @@ class OFACoordinator(DataUpdateCoordinator):
 
             raw["current"] = current
 
-            # Run strict formatter (errors propagate)
+            # Run strict formatter (errors propagate). Pass precomputed period indices so DataFormatter uses them.
             data = self.formatter.validate(
                 raw,
                 species_profile=self.species,
                 units=self.units,
                 safety_limits=self.safety_limits,
+                precomputed_period_indices=period_indices,
             )
 
             # persist

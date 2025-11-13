@@ -66,7 +66,6 @@ class TideProxy:
         try:
             self._loader = Loader(self._data_dir)
         except Exception:
-            # If Loader construction itself fails, log and re-raise so setup fails early.
             _LOGGER.exception("Failed to create Skyfield Loader. Ensure 'skyfield' is installed.")
             raise
 
@@ -332,6 +331,185 @@ class TideProxy:
         except Exception:
             hour = now.hour + now.minute / 60.0
             return 0 < hour < 12.42
+
+    async def compute_period_indices_for_timestamps(
+        self,
+        timestamps: Sequence[str],
+        mode: str = "full_day",
+        dawn_window_hours: float = 1.0,
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """
+        Compute period -> hourly-index mapping for the provided hourly timestamps.
+
+        - timestamps: sequence of ISO timestamp strings or comparable values (expected UTC).
+        - mode: "dawn_dusk" or "full_day" (4 periods).
+        - dawn_window_hours: half-width of dawn/dusk window in hours (±dawn_window_hours around sunrise/sunset).
+
+        Returns mapping:
+          { "YYYY-MM-DD": { "period_name": { "indices": [idx,...], "start": "ISOZ", "end": "ISOZ" }, ... }, ... }
+
+        Strict behavior:
+          - If Skyfield cannot compute sunrise/sunset for a required date, raise an exception.
+          - All datetimes in returned mapping are timezone-aware UTC ISO strings ending with Z.
+        """
+        # Parse timestamps into aware UTC datetimes
+        dt_objs: List[datetime] = []
+        for ts in timestamps:
+            parsed = dt_util.parse_datetime(str(ts))
+            if parsed is None:
+                # last-resort numeric epoch
+                try:
+                    v = float(ts)
+                    if v > 1e12:
+                        v = v / 1000.0
+                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                except Exception as exc:
+                    raise ValueError(f"Unable to parse timestamp '{ts}': {exc}") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+            dt_objs.append(parsed)
+
+        if not dt_objs:
+            return {}
+
+        # Build mapping of index -> dt for quick reference
+        index_dt_pairs = list(enumerate(dt_objs))
+
+        # Determine set of dates we need to cover (based on timestamp datetimes)
+        dates_needed = sorted({dt.date() for dt in dt_objs})
+
+        # Ensure skyfield loaded
+        await self._ensure_loaded()
+        sf_ts = self._sf_ts
+        sf_eph = self._sf_eph
+        sf_wgs = self._sf_wgs
+        sf_almanac = self._sf_almanac
+
+        earth = sf_eph["earth"]
+        topos = sf_wgs.latlon(self.latitude, self.longitude)
+        sun = sf_eph["sun"]
+
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+        # Helper to produce ISOZ string from aware UTC datetime
+        def _iso_z(dt: datetime) -> str:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.isoformat().replace("+00:00", "Z")
+
+        # Pre-calc seconds for small offset checks
+        for d in dates_needed:
+            try:
+                # search window: from 00:00 UTC of date d to 00:00 UTC of next day
+                day_start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+                day_end = day_start + timedelta(days=1)
+
+                t0 = sf_ts.utc(day_start.year, day_start.month, day_start.day, 0, 0, 0)
+                t1 = sf_ts.utc(day_end.year, day_end.month, day_end.day, 0, 0, 0)
+
+                # For sunrise/sunset mode, use almanac.sunrise_sunset
+                if mode == "dawn_dusk":
+                    f = sf_almanac.sunrise_sunset(sf_eph, topos)
+                    times, events = sf_almanac.find_discrete(t0, t1, f)
+
+                    sunrise_dt: Optional[datetime] = None
+                    sunset_dt: Optional[datetime] = None
+
+                    # If find_discrete returns nothing (polar day/night or other issues), raise strict error
+                    if not times:
+                        raise RuntimeError(f"No sunrise/sunset events found for date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}")
+
+                    # Classify events by checking whether sun is above horizon shortly after the event
+                    for t in times:
+                        try:
+                            evt_dt = t.utc_datetime().replace(tzinfo=timezone.utc)
+                        except Exception:
+                            # fallback to tt epoch if needed
+                            evt_dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
+                        # create a small offset time (30s after event) to sample sun altitude
+                        # Use skyfield timescale to create the sample time (allows fraction seconds)
+                        sample_seconds = evt_dt.second + 30.0
+                        sample_t = sf_ts.utc(evt_dt.year, evt_dt.month, evt_dt.day, evt_dt.hour, evt_dt.minute, sample_seconds)
+                        astrom = (earth + topos).at(sample_t).observe(sun).apparent()
+                        alt, az, dist = astrom.altaz()
+                        alt_deg = float(getattr(alt, "degrees", alt.degrees))
+                        if alt_deg > 0:
+                            # sun is above horizon after event => sunrise
+                            if sunrise_dt is None:
+                                sunrise_dt = evt_dt
+                        else:
+                            # sun remains below horizon after event => sunset
+                            if sunset_dt is None:
+                                sunset_dt = evt_dt
+                        # If both found, break early
+                        if sunrise_dt and sunset_dt:
+                            break
+
+                    if sunrise_dt is None or sunset_dt is None:
+                        # In some rare cases events might be found but classification fails; raise strictly
+                        raise RuntimeError(f"Unable to determine sunrise or sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+
+                    # Build dawn/dusk windows (±dawn_window_hours)
+                    dawn_start = sunrise_dt - timedelta(hours=dawn_window_hours)
+                    dawn_end = sunrise_dt + timedelta(hours=dawn_window_hours)
+                    dusk_start = sunset_dt - timedelta(hours=dawn_window_hours)
+                    dusk_end = sunset_dt + timedelta(hours=dawn_window_hours)
+
+                    # The period is attributed to the date of the event itself (sunrise_dt.date() or sunset_dt.date())
+                    date_key = d.isoformat()
+                    result.setdefault(date_key, {})
+
+                    # iterate hourly timestamps and include indices that fall within the windows
+                    dawn_indices: List[int] = []
+                    dusk_indices: List[int] = []
+                    for idx, dt in index_dt_pairs:
+                        if dt >= dawn_start and dt < dawn_end:
+                            dawn_indices.append(idx)
+                        if dt >= dusk_start and dt < dusk_end:
+                            dusk_indices.append(idx)
+
+                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z(dawn_start), "end": _iso_z(dawn_end)}
+                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z(dusk_start), "end": _iso_z(dusk_end)}
+
+                else:
+                    # Full day mode: build 4 absolute periods per date using absolute datetimes
+                    date_key = d.isoformat()
+                    result.setdefault(date_key, {})
+
+                    # period boundaries (absolute)
+                    p00_start = day_start
+                    p00_end = day_start + timedelta(hours=6)
+                    p06_start = p00_end
+                    p06_end = day_start + timedelta(hours=12)
+                    p12_start = p06_end
+                    p12_end = day_start + timedelta(hours=18)
+                    p18_start = p12_end
+                    p18_end = day_end  # 24:00 of that date
+
+                    periods = [
+                        ("period_00_06", p00_start, p00_end),
+                        ("period_06_12", p06_start, p06_end),
+                        ("period_12_18", p12_start, p12_end),
+                        ("period_18_24", p18_start, p18_end),
+                    ]
+
+                    for pname, pstart, pend in periods:
+                        indices: List[int] = []
+                        for idx, dt in index_dt_pairs:
+                            if dt >= pstart and dt < pend:
+                                indices.append(idx)
+                        result[date_key][pname] = {"indices": indices, "start": _iso_z(pstart), "end": _iso_z(pend)}
+
+            except Exception as exc:
+                _LOGGER.exception("compute_period_indices_for_timestamps failed for date %s: %s", d.isoformat(), exc)
+                # Strict: propagate error so caller can fail loudly
+                raise
+
+        return result
 
 
 # -- module level helpers ----------------------------------------------------

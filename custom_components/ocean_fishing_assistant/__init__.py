@@ -10,7 +10,7 @@ import logging
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.helpers import aiohttp_client
 
-from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, DEFAULT_SAFETY_LIMITS, CONF_SPECIES_ID, CONF_SPECIES_REGION, CONF_THRESHOLDS
+from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, DEFAULT_SAFETY_LIMITS, CONF_SPECIES_ID, CONF_SPECIES_REGION, CONF_THRESHOLDS, CONF_TIME_PERIODS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -158,6 +158,8 @@ async def async_setup_entry(hass, entry):
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit)
     _LOGGER.debug("WeatherFetcher instantiated for entry %s", entry.entry_id)
 
+    time_periods_mode = entry.data.get(CONF_TIME_PERIODS, "full_day")
+
     coord = OFACoordinator(
         hass,
         entry.entry_id,
@@ -171,6 +173,7 @@ async def async_setup_entry(hass, entry):
         species=resolved_species,
         units=units,
         safety_limits=safety_limits,
+        time_periods_mode=time_periods_mode,
     )
     _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
 

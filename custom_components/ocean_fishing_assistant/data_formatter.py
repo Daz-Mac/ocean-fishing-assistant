@@ -47,13 +47,17 @@ class DataFormatter:
     def __init__(self) -> None:
         pass
 
-    def validate(self, raw_payload: Dict[str, Any], species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None) -> Dict[str, Any]:
+    def validate(self, raw_payload: Dict[str, Any], species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None, precomputed_period_indices: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Validate and normalize raw_payload into strict canonical shape:
         - 'timestamps' list
         - canonical arrays using canonical keys
         - compute per_timestamp_forecasts via ocean_scoring.compute_forecast (errors propagate)
         - compute period_forecasts via strict aggregator (errors propagate)
+
+        If precomputed_period_indices is provided, it should be a mapping:
+          { date: { period_name: { "indices": [idx,...], "start": ISOZ, "end": ISOZ }, ... }, ... }
+        where indices reference positions into the canonical timestamps (0-based).
         """
         if not isinstance(raw_payload, dict):
             raise ValueError("raw_payload must be a dict (strict)")
@@ -277,55 +281,103 @@ class DataFormatter:
                 row["_forecast_entry"] = per_ts_forecasts[i]
             hourly_like.append(row)
 
-        default_periods = [
-            {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
-            {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
-            {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
-            {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
-        ]
-
-        period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload, units=units)
-
+        # If precomputed_period_indices provided, use that mapping to build period forecasts.
         period_forecasts: Dict[str, Dict[str, Any]] = {}
-        for date_key, pmap in period_agg.items():
-            period_forecasts[date_key] = {}
-            for pname, pdata in pmap.items():
-                indices = pdata.get("indices") or []
-                per_ts_entries = []
-                for idx in indices:
-                    if idx < len(hourly_like):
-                        fe = hourly_like[idx].get("_forecast_entry")
-                        if fe:
-                            per_ts_entries.append(fe)
-                score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
-                score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
-                components = None
-                if per_ts_entries:
-                    keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
-                    out_comp = {}
-                    for k in keys:
-                        vals = []
-                        for e in per_ts_entries:
-                            c = e.get("components") or {}
-                            if k in c and c[k].get("score_10") is not None:
-                                vals.append(float(c[k]["score_10"]))
-                        if vals:
-                            avg = float(sum(vals) / len(vals))
-                            out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
-                    components = out_comp or None
-                profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
-                safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
-                          "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
-                          "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
-                summary = dict(pdata)
-                summary.update({
-                    "score_10": round(score_10, 3) if score_10 is not None else None,
-                    "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
-                    "components": components,
-                    "profile_used": profile_used,
-                    "safety": safety,
-                })
-                period_forecasts[date_key][pname] = summary
+        if precomputed_period_indices is not None:
+            # iterate keys in sorted order, but limit to 7 days for compatibility with previous days param
+            for date_key in sorted(precomputed_period_indices.keys())[:7]:
+                pmap = precomputed_period_indices.get(date_key) or {}
+                period_forecasts[date_key] = {}
+                for pname, pdata in pmap.items():
+                    indices = pdata.get("indices") or []
+                    per_ts_entries = []
+                    for idx in indices:
+                        if idx < len(hourly_like):
+                            fe = hourly_like[idx].get("_forecast_entry")
+                            if fe:
+                                per_ts_entries.append(fe)
+                    score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
+                    score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
+                    components = None
+                    if per_ts_entries:
+                        keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
+                        out_comp = {}
+                        for k in keys:
+                            vals = []
+                            for e in per_ts_entries:
+                                c = e.get("components") or {}
+                                if k in c and c[k].get("score_10") is not None:
+                                    vals.append(float(c[k]["score_10"]))
+                            if vals:
+                                avg = float(sum(vals) / len(vals))
+                                out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
+                        components = out_comp or None
+                    profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
+                    safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
+                              "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
+                              "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
+                    summary = {
+                        "score_10": round(score_10, 3) if score_10 is not None else None,
+                        "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
+                        "components": components,
+                        "profile_used": profile_used,
+                        "safety": safety,
+                        # include provided start/end if present
+                        "start": pdata.get("start"),
+                        "end": pdata.get("end"),
+                        "indices": list(indices),
+                    }
+                    period_forecasts[date_key][pname] = summary
+        else:
+            # Fallback: compute using internal hourly->period aggregator (same behavior as before)
+            default_periods = [
+                {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
+                {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
+                {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
+                {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
+            ]
+
+            period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload, units=units)
+
+            for date_key, pmap in period_agg.items():
+                period_forecasts[date_key] = {}
+                for pname, pdata in pmap.items():
+                    indices = pdata.get("indices") or []
+                    per_ts_entries = []
+                    for idx in indices:
+                        if idx < len(hourly_like):
+                            fe = hourly_like[idx].get("_forecast_entry")
+                            if fe:
+                                per_ts_entries.append(fe)
+                    score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
+                    score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
+                    components = None
+                    if per_ts_entries:
+                        keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
+                        out_comp = {}
+                        for k in keys:
+                            vals = []
+                            for e in per_ts_entries:
+                                c = e.get("components") or {}
+                                if k in c and c[k].get("score_10") is not None:
+                                    vals.append(float(c[k]["score_10"]))
+                            if vals:
+                                avg = float(sum(vals) / len(vals))
+                                out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
+                        components = out_comp or None
+                    profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
+                    safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
+                              "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
+                              "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
+                    summary = dict(pdata)
+                    summary.update({
+                        "score_10": round(score_10, 3) if score_10 is not None else None,
+                        "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
+                        "components": components,
+                        "profile_used": profile_used,
+                        "safety": safety,
+                    })
+                    period_forecasts[date_key][pname] = summary
 
         final_out = {
             "timestamps": timestamps,
