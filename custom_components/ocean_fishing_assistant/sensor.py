@@ -156,8 +156,8 @@ class OFASensor(CoordinatorEntity):
         Return the per-timestamp forecast that corresponds to the current hour (floored).
         Strategy:
          - Floor current UTC time to hour, look for exact timestamp match.
-         - If none, use the nearest past forecast (<= floored hour).
-         - If still none, use next future forecast (>= floored hour).
+         - If none, prefer the next future forecast (>= floored hour).
+         - If still none, use the nearest past forecast (<= floored hour).
          - Final fallback: forecasts[0].
         """
         data = self.coordinator.data or {}
@@ -205,10 +205,11 @@ class OFASensor(CoordinatorEntity):
 
         if exact_match is not None:
             return exact_match
-        if last_past is not None:
-            return last_past
+        # Prioritize upcoming (future) forecast over previous when no exact match.
         if first_future is not None:
             return first_future
+        if last_past is not None:
+            return last_past
 
         # final fallback
         try:
