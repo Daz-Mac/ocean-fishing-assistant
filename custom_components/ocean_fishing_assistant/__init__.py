@@ -100,6 +100,11 @@ async def async_setup_entry(hass, entry):
     # Validate selected species (if set) exists in the packaged profiles
     selected_species = entry.data.get(CONF_SPECIES_ID)
     selected_region = entry.data.get(CONF_SPECIES_REGION)
+
+    # Resolve species into either:
+    #  - a concrete species profile dict (preferred), or
+    #  - a synthetic string ("general_mixed" or "general_mixed_<region>") which the integration will treat specially.
+    resolved_species = None
     if selected_species:
         try:
             # Synthetic selection pattern: "general_mixed_<region>"
@@ -114,7 +119,8 @@ async def async_setup_entry(hass, entry):
                     raise ValueError(
                         f"Selected synthetic region '{region}' is not an ocean region (strict)"
                     )
-                # ok: synthetic general_mixed_<region> is valid
+                # Keep the synthetic string (formatter/scoring can handle it as a string marker)
+                resolved_species = selected_species
             elif selected_species == "general_mixed":
                 # require explicit region to be present and valid
                 if not selected_region:
@@ -130,8 +136,10 @@ async def async_setup_entry(hass, entry):
                     raise ValueError(
                         f"Selected species_region '{selected_region}' is not an ocean region (strict)"
                     )
+                # keep the 'general_mixed' marker
+                resolved_species = "general_mixed"
             else:
-                # Validate a specific species id exists and is ocean habitat
+                # Load concrete species profile dict and pass that into coordinator/formatter so scoring receives a dict
                 sp = loader.get_species(selected_species)
                 if not sp:
                     raise ValueError(
@@ -141,6 +149,7 @@ async def async_setup_entry(hass, entry):
                     raise ValueError(
                         f"Selected species '{selected_species}' is not an ocean species (strict)"
                     )
+                resolved_species = sp
         except Exception as exc:
             _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
             return False
@@ -159,7 +168,7 @@ async def async_setup_entry(hass, entry):
         update_interval=entry.data.get("update_interval", DEFAULT_UPDATE_INTERVAL),
         store_enabled=entry.data.get("persist_last_fetch", False),
         ttl=entry.data.get("persist_ttl", 3600),
-        species=entry.data.get(CONF_SPECIES_ID),
+        species=resolved_species,
         units=units,
         safety_limits=safety_limits,
     )
