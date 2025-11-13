@@ -298,15 +298,19 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if units not in ("metric", "imperial"):
                 return self.async_show_form(
                     step_id="ocean_units",
-                    data_schema=vol.Schema({vol.Required("units", default="metric"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
-                            ],
-                            mode="dropdown",
-                        )
-                    )}),
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required("units", default="metric"): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                        {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                                    ],
+                                    mode="dropdown",
+                                )
+                            )
+                        }
+                    ),
                     errors={"base": "invalid_units"},
                 )
             self.ocean_config["units"] = units
@@ -359,7 +363,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": None,
-                    "safety_max_swell_period": user_input.get("max_swell_period"),
+                    "safety_min_swell_period": user_input.get("min_swell_period"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -386,7 +390,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "max_wave_height": user_input["max_wave_height"],
                         "min_temperature": user_input["min_temperature"],
                         "max_temperature": user_input["max_temperature"],
-                        "max_swell_period": user_input.get("max_swell_period"),
+                        "min_swell_period": user_input.get("min_swell_period"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -432,7 +436,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    vol.Required("max_swell_period", default=10): selector.NumberSelector(
+                    vol.Required("min_swell_period", default=10): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
@@ -474,6 +478,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
+
         thresholds = self._config_entry.data.get(CONF_THRESHOLDS, {})
         # show units-driven labels based on stored units in config_entry.data
         units = self._config_entry.data.get("units", "metric")
@@ -512,7 +517,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    vol.Required("max_swell_period", default=thresholds.get("max_swell_period", 10)): selector.NumberSelector(
+                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 10)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                     # Toggle to control whether the sensor exposes raw_payload and verbose raw outputs
