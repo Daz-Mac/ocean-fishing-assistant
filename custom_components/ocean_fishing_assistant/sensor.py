@@ -130,7 +130,7 @@ class OFASensor(CoordinatorEntity):
         """
         Strict CoordinatorEntity wrapper.
 
-        expose_raw: when True, include 'raw_payload' in attributes so developers can inspect
+        expose_raw: when True, include 'raw_payload' and per_timestamp_forecasts in attributes so developers can inspect
                     full upstream payload. Default False (hide raw output).
         """
         if not name:
@@ -336,7 +336,8 @@ class OFASensor(CoordinatorEntity):
     def extra_state_attributes(self) -> Dict[str, Any]:
         """
         Strict attributes with display conversions applied for final outputs (wind units converted
-        per user selection). Raw payload is preserved under 'raw_payload' only if expose_raw is True.
+        per user selection). Per-hour scoring (per_timestamp_forecasts) is included only when expose_raw=True.
+        Raw payload is preserved under 'raw_payload' only if expose_raw is True.
         Also exposes:
          - period_forecasts: full mapping from DataFormatter (always included)
          - remainder_of_today_periods: periods for the local "today" that still include future hours
@@ -349,7 +350,10 @@ class OFASensor(CoordinatorEntity):
         attrs: Dict[str, Any] = {}
         forecasts = self.coordinator.data.get("per_timestamp_forecasts")
         if forecasts is not None:
-            attrs["per_timestamp_forecasts"] = forecasts
+            if self._expose_raw:
+                attrs["per_timestamp_forecasts"] = forecasts
+            else:
+                _ATTR_LOGGER.debug("per_timestamp_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
 
         # Add period_forecasts (raw) so callers can inspect everything the formatter produced
         period_forecasts = self.coordinator.data.get("period_forecasts")
