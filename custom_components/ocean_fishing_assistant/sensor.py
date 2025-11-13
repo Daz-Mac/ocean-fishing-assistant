@@ -1,12 +1,13 @@
 # Strict sensor entity - surfaces errors loudly so callers see misconfiguration
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import math
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_NAME
 from . import unit_helpers
@@ -262,6 +263,10 @@ class OFASensor(CoordinatorEntity):
         """
         Strict attributes with display conversions applied for final outputs (wind units converted
         per user selection). Raw payload is preserved under 'raw_payload'.
+        Also exposes:
+         - period_forecasts: full mapping from DataFormatter
+         - remainder_of_today_periods: periods for the local "today" that still include future hours
+         - next_5_day_periods: periods grouped by local calendar date for the next 5 days (excluding today)
         """
         if not self.coordinator.data:
             raise RuntimeError("Coordinator data missing when building attributes (strict)")
@@ -271,6 +276,101 @@ class OFASensor(CoordinatorEntity):
         if forecasts is not None:
             attrs["per_timestamp_forecasts"] = forecasts
 
+        # Add period_forecasts (raw) so callers can inspect everything the formatter produced
+        period_forecasts = self.coordinator.data.get("period_forecasts")
+        if period_forecasts is not None:
+            attrs["period_forecasts"] = period_forecasts
+
+        # Compute localized trimmed views using coordinator timestamps and period indices.
+        remainder_of_today: Dict[str, Any] = {}
+        next_5_days: Dict[str, Any] = {}
+        try:
+            timestamps = self.coordinator.data.get("timestamps") or []
+            # Use Home Assistant local "now"
+            now_local = dt_util.now()
+            if now_local.tzinfo is None:
+                # ensure aware
+                now_local = now_local.replace(tzinfo=dt_util.get_time_zone())
+
+            # prepare set of next 5 local dates (excluding today)
+            today_local = now_local.date()
+            next_local_dates = {(today_local + timedelta(days=d)) for d in range(1, 6)}
+
+            # Guard shapes
+            if isinstance(period_forecasts, dict) and isinstance(timestamps, (list, tuple)):
+                # iterate all period entries; classify by localized datetime computed per-index
+                for date_key, pmap in period_forecasts.items():
+                    if not isinstance(pmap, dict):
+                        continue
+                    for pname, pdata in pmap.items():
+                        if not isinstance(pdata, dict):
+                            continue
+                        indices = pdata.get("indices") or []
+                        if not isinstance(indices, (list, tuple)):
+                            continue
+                        included_in_today = False
+                        included_in_next_days = False
+                        # Check each index until we know whether it belongs to today or next days
+                        for idx in indices:
+                            try:
+                                if not isinstance(idx, int):
+                                    continue
+                                if idx < 0 or idx >= len(timestamps):
+                                    continue
+                                ts_raw = timestamps[idx]
+                                dt_utc = _parse_dt(ts_raw)
+                                if dt_utc is None:
+                                    continue
+                                # convert to HA local timezone for calendar logic / comparisons
+                                dt_local = dt_util.as_local(dt_utc)
+                                # remainder of today: same local date as today and timestamp >= now_local
+                                if dt_local.date() == today_local and dt_local >= now_local:
+                                    included_in_today = True
+                                # next 5 days: local date in next_local_dates
+                                if dt_local.date() in next_local_dates:
+                                    included_in_next_days = True
+                                # short-circuit if both true
+                                if included_in_today and included_in_next_days:
+                                    break
+                            except Exception:
+                                continue
+
+                        # Add to remainder_of_today if it has any future local-hour in today's date
+                        if included_in_today:
+                            remainder_of_today[pname] = pdata
+
+                        # Add to next_5_days grouped by the local date(s) that apply.
+                        # A single period could span multiple local dates; include it under all applicable local date keys.
+                        if included_in_next_days:
+                            # Determine which local dates this period touches
+                            touched_local_dates = set()
+                            for idx in indices:
+                                try:
+                                    if not isinstance(idx, int):
+                                        continue
+                                    if idx < 0 or idx >= len(timestamps):
+                                        continue
+                                    ts_raw = timestamps[idx]
+                                    dt_utc = _parse_dt(ts_raw)
+                                    if dt_utc is None:
+                                        continue
+                                    dt_local = dt_util.as_local(dt_utc)
+                                    if dt_local.date() in next_local_dates:
+                                        touched_local_dates.add(dt_local.date())
+                                except Exception:
+                                    continue
+                            for d in sorted(touched_local_dates):
+                                key = d.isoformat()
+                                next_5_days.setdefault(key, {})[pname] = pdata
+        except Exception:
+            # Defensive: do not fail the sensor attribute creation; leave trimmed views empty on any error.
+            remainder_of_today = {}
+            next_5_days = {}
+
+        attrs["remainder_of_today_periods"] = remainder_of_today
+        attrs["next_5_day_periods"] = next_5_days
+
+        # --- continue with existing attribute construction (current, raw_payload, etc.) ---
         current = self._get_current_forecast()
         if current is not None:
             attrs["current_forecast"] = current
