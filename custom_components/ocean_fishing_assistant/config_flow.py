@@ -462,7 +462,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Ocean Fishing Assistant."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        # Avoid using the deprecated attribute name `config_entry` on the flow instance.
+        # Store the entry under a private attribute instead.
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
@@ -472,20 +474,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-
-        thresholds = self.config_entry.data.get(CONF_THRESHOLDS, {})
+        thresholds = self._config_entry.data.get(CONF_THRESHOLDS, {})
         # show units-driven labels based on stored units in config_entry.data
-        units = self.config_entry.data.get("units", "metric")
+        units = self._config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
 
         # default for expose_raw: prefer entry.options (if present), else fall back to stored data (backwards compat)
         expose_raw_default = False
         try:
-            expose_raw_default = bool(self.config_entry.options.get("expose_raw"))
+            expose_raw_default = bool(self._config_entry.options.get("expose_raw"))
         except Exception:
             try:
-                expose_raw_default = bool(self.config_entry.data.get("expose_raw", False))
+                expose_raw_default = bool(self._config_entry.data.get("expose_raw", False))
             except Exception:
                 expose_raw_default = False
 
@@ -493,7 +494,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TIME_PERIODS, default=self.config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
