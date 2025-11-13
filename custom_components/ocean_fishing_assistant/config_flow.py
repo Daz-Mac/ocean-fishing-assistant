@@ -266,11 +266,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
                 )
 
-            # valid input -> save and continue
             self.ocean_config.update(user_input)
+            # Ask units next so that thresholds form can render correct unit labels.
             return await self.async_step_ocean_units()
 
-        # Show the form for first visit (user_input is None)
         return self.async_show_form(
             step_id="ocean_time_periods",
             data_schema=vol.Schema(
@@ -360,9 +359,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": None,
-                    # Note: convert_safety_display_to_metric expects the display key 'safety_max_swell_period'.
-                    # We now source the value from the renamed UI/storage field 'min_swell_period_s'.
-                    "safety_max_swell_period": user_input.get("min_swell_period_s"),
+                    "safety_max_swell_period": user_input.get("max_swell_period"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -389,14 +386,16 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "max_wave_height": user_input["max_wave_height"],
                         "min_temperature": user_input["min_temperature"],
                         "max_temperature": user_input["max_temperature"],
-                        # renamed UI/storage key for swell period to min_swell_period_s
-                        "min_swell_period_s": user_input.get("min_swell_period_s"),
+                        "max_swell_period": user_input.get("max_swell_period"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
                     "wind_unit": wind_unit,
                     "safety_limits": safety_limits,
                 }
+
+                # Persist expose_raw if provided during initial setup (default False)
+                final_config["expose_raw"] = bool(user_input.get("expose_raw", False))
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
@@ -433,8 +432,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    # renamed field name for UI/storage: min_swell_period_s
-                    vol.Required("min_swell_period_s", default=10): selector.NumberSelector(
+                    vol.Required("max_swell_period", default=10): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
@@ -442,6 +440,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
+                    ),
+                    # Allow user to opt-in to exposing raw payload during initial setup
+                    vol.Required("expose_raw", default=False): selector.BooleanSelector(
+                        selector.BooleanSelectorConfig()
                     ),
                 }
             ),
@@ -470,11 +472,22 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
+
         thresholds = self.config_entry.data.get(CONF_THRESHOLDS, {})
         # show units-driven labels based on stored units in config_entry.data
         units = self.config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
+
+        # default for expose_raw: prefer entry.options (if present), else fall back to stored data (backwards compat)
+        expose_raw_default = False
+        try:
+            expose_raw_default = bool(self.config_entry.options.get("expose_raw"))
+        except Exception:
+            try:
+                expose_raw_default = bool(self.config_entry.data.get("expose_raw", False))
+            except Exception:
+                expose_raw_default = False
 
         return self.async_show_form(
             step_id="ocean_options",
@@ -496,11 +509,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    # options uses the renamed storage key min_swell_period_s
-                    vol.Required("min_swell_period_s", default=thresholds.get("min_swell_period_s", 10)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=20, step=1, unit_of_measurement="s")
+                    vol.Required("max_swell_period", default=thresholds.get("max_swell_period", 10)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
+                    ),
+                    # Toggle to control whether the sensor exposes raw_payload and verbose raw outputs
+                    vol.Required("expose_raw", default=expose_raw_default): selector.BooleanSelector(
+                        selector.BooleanSelectorConfig()
                     ),
                 }
             ),

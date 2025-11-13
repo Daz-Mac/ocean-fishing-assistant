@@ -126,9 +126,12 @@ def _find_height_for_timestamp(target_iso: str, tide_ts: List[Any], tide_heights
 
 
 class OFASensor(CoordinatorEntity):
-    def __init__(self, coordinator, name: str):
+    def __init__(self, coordinator, name: str, expose_raw: bool = False):
         """
         Strict CoordinatorEntity wrapper.
+
+        expose_raw: when True, include 'raw_payload' in attributes so developers can inspect
+                    full upstream payload. Default False (hide raw output).
         """
         if not name:
             raise RuntimeError("Sensor name must be provided (strict)")
@@ -140,6 +143,7 @@ class OFASensor(CoordinatorEntity):
             name = f"{prefix}_{name}"
 
         self._attr_name = name
+        self._expose_raw = bool(expose_raw)
 
         try:
             safe_name = name.replace(" ", "_")
@@ -204,15 +208,23 @@ class OFASensor(CoordinatorEntity):
                 continue
 
         if exact_match is not None:
+            _ATTR_LOGGER.debug("Selected exact-match forecast for %s", floored.isoformat())
             return exact_match
         # Prioritize upcoming (future) forecast over previous when no exact match.
         if first_future is not None:
+            _ATTR_LOGGER.debug(
+                "No exact-match forecast for %s; selecting next future forecast timestamp", floored.isoformat()
+            )
             return first_future
         if last_past is not None:
+            _ATTR_LOGGER.debug(
+                "No future forecast for %s; selecting nearest past forecast timestamp", floored.isoformat()
+            )
             return last_past
 
         # final fallback
         try:
+            _ATTR_LOGGER.debug("Falling back to first forecast entry (index 0)")
             return forecasts[0]
         except Exception:
             return None
@@ -324,11 +336,12 @@ class OFASensor(CoordinatorEntity):
     def extra_state_attributes(self) -> Dict[str, Any]:
         """
         Strict attributes with display conversions applied for final outputs (wind units converted
-        per user selection). Raw payload is preserved under 'raw_payload'.
+        per user selection). Raw payload is preserved under 'raw_payload' only if expose_raw is True.
         Also exposes:
-         - period_forecasts: full mapping from DataFormatter
+         - period_forecasts: full mapping from DataFormatter (always included)
          - remainder_of_today_periods: periods for the local "today" that still include future hours
          - next_5_day_periods: periods grouped by local calendar date for the next 5 days (excluding today)
+         - raw_output_enabled: boolean indicating whether raw payload was exposed
         """
         if not self.coordinator.data:
             raise RuntimeError("Coordinator data missing when building attributes (strict)")
@@ -438,7 +451,15 @@ class OFASensor(CoordinatorEntity):
             attrs["current_forecast"] = current
 
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
-        attrs["raw_payload"] = raw
+
+        # Expose raw payload only if explicitly enabled via configuration (expose_raw)
+        if self._expose_raw:
+            attrs["raw_payload"] = raw
+        else:
+            _ATTR_LOGGER.debug("raw_payload attribute suppressed (expose_raw=False) for sensor %s", self._attr_name)
+
+        # Always indicate whether raw output is enabled so callers can confirm config state
+        attrs["raw_output_enabled"] = bool(self._expose_raw)
 
         # Profile and safety detail pointers (raw canonical values)
         attrs["profile_used"] = (current.get("profile_used") if current else None)
@@ -695,7 +716,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             "Missing required name in config entry data; the Ocean Fishing Assistant integration requires the user to set a name during configuration (strict)."
         )
 
+    # Read expose_raw from entry.options first (preferred), then fall back to entry.data for backward compatibility.
+    try:
+        expose_raw = bool(entry.options.get("expose_raw")) if isinstance(entry.options, dict) else False
+    except Exception:
+        expose_raw = False
+    if not expose_raw:
+        try:
+            expose_raw = bool(entry.data.get("expose_raw")) if isinstance(entry.data, dict) else False
+        except Exception:
+            expose_raw = False
+
     prefix = "ocean_fishing_assistant"
     final_name = sensor_name if sensor_name.startswith(prefix) else f"{prefix}_{sensor_name}"
 
-    async_add_entities([OFASensor(coordinator, name=final_name)], update_before_add=True)
+    async_add_entities([OFASensor(coordinator, name=final_name, expose_raw=expose_raw)], update_before_add=True)
