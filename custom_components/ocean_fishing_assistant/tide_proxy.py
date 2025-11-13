@@ -413,11 +413,17 @@ class TideProxy:
 
                 # For sunrise/sunset mode, use almanac.sunrise_sunset
                 if mode == "dawn_dusk":
-                    f = sf_almanac.sunrise_sunset(sf_eph, topos)
-                    times, events = sf_almanac.find_discrete(t0, t1, f)
+                    # Expand search window to +/- 12 hours to catch events that fall outside strict UTC date
+                    # (helps when local sunrise/sunset fall on adjacent UTC dates).
+                    expand = timedelta(hours=12)
+                    t0_exp = sf_ts.utc((day_start - expand).year, (day_start - expand).month, (day_start - expand).day, (day_start - expand).hour, (day_start - expand).minute, (day_start - expand).second)
+                    t1_exp = sf_ts.utc((day_end + expand).year, (day_end + expand).month, (day_end + expand).day, (day_end + expand).hour, (day_end + expand).minute, (day_end + expand).second)
 
-                    sunrise_dt: Optional[datetime] = None
-                    sunset_dt: Optional[datetime] = None
+                    f = sf_almanac.sunrise_sunset(sf_eph, topos)
+                    times, events = sf_almanac.find_discrete(t0_exp, t1_exp, f)
+
+                    sunrise_candidates: List[datetime] = []
+                    sunset_candidates: List[datetime] = []
 
                     # If find_discrete returns nothing (polar day/night or other issues), raise strict error
                     if not times:
@@ -431,7 +437,6 @@ class TideProxy:
                             # fallback to tt epoch if needed
                             evt_dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
                         # create a small offset time (30s after event) to sample sun altitude
-                        # Use skyfield timescale to create the sample time (allows fraction seconds)
                         sample_seconds = evt_dt.second + 30.0
                         sample_t = sf_ts.utc(evt_dt.year, evt_dt.month, evt_dt.day, evt_dt.hour, evt_dt.minute, sample_seconds)
                         astrom = (earth + topos).at(sample_t).observe(sun).apparent()
@@ -439,19 +444,24 @@ class TideProxy:
                         alt_deg = float(getattr(alt, "degrees", alt.degrees))
                         if alt_deg > 0:
                             # sun is above horizon after event => sunrise
-                            if sunrise_dt is None:
-                                sunrise_dt = evt_dt
+                            sunrise_candidates.append(evt_dt)
                         else:
                             # sun remains below horizon after event => sunset
-                            if sunset_dt is None:
-                                sunset_dt = evt_dt
-                        # If both found, break early
-                        if sunrise_dt and sunset_dt:
-                            break
+                            sunset_candidates.append(evt_dt)
 
-                    if sunrise_dt is None or sunset_dt is None:
-                        # In some rare cases events might be found but classification fails; raise strictly
-                        raise RuntimeError(f"Unable to determine sunrise or sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+                    # Choose the sunrise/sunset event that best corresponds to this calendar date.
+                    # Use targets near morning (06:00) and evening (18:00) to choose the most appropriate events.
+                    morning_target = day_start + timedelta(hours=6)
+                    evening_target = day_start + timedelta(hours=18)
+
+                    if not sunrise_candidates:
+                        raise RuntimeError(f"Unable to determine sunrise for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+                    if not sunset_candidates:
+                        raise RuntimeError(f"Unable to determine sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+
+                    # pick the candidate closest to the target times
+                    sunrise_dt = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
+                    sunset_dt = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
 
                     # Build dawn/dusk windows (±dawn_window_hours)
                     dawn_start = sunrise_dt - timedelta(hours=dawn_window_hours)
@@ -463,7 +473,7 @@ class TideProxy:
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})
 
-                    # iterate hourly timestamps and include indices that fall within the windows
+                    # iterate hourly timestamps and include indices that fall within the windows (absolute datetime compare)
                     dawn_indices: List[int] = []
                     dusk_indices: List[int] = []
                     for idx, dt in index_dt_pairs:
