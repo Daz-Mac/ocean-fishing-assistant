@@ -2,6 +2,7 @@
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 import math
+import logging
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -11,6 +12,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_NAME
 from . import unit_helpers
+
+_ATTR_LOGGER = logging.getLogger(__name__)
 
 ATTRIBUTION = "Data provided by Open-Meteo"
 
@@ -149,11 +152,69 @@ class OFASensor(CoordinatorEntity):
         return bool(self.coordinator.last_update_success and self.coordinator.data is not None)
 
     def _get_current_forecast(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the per-timestamp forecast that corresponds to the current hour (floored).
+        Strategy:
+         - Floor current UTC time to hour, look for exact timestamp match.
+         - If none, use the nearest past forecast (<= floored hour).
+         - If still none, use next future forecast (>= floored hour).
+         - Final fallback: forecasts[0].
+        """
         data = self.coordinator.data or {}
         forecasts = data.get("per_timestamp_forecasts") or []
-        if isinstance(forecasts, (list, tuple)) and len(forecasts) > 0:
+        if not isinstance(forecasts, (list, tuple)) or len(forecasts) == 0:
+            return None
+
+        now_utc = dt_util.utcnow()
+        if now_utc.tzinfo is None:
+            # make aware UTC if needed
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        floored = now_utc.replace(minute=0, second=0, microsecond=0)
+
+        exact_match = None
+        last_past = None
+        first_future = None
+        best_past_delta = None
+        best_future_delta = None
+
+        for entry in forecasts:
+            try:
+                ts_raw = entry.get("timestamp") if isinstance(entry, dict) else None
+                if ts_raw is None:
+                    # try alternate keys
+                    ts_raw = entry.get("time") if isinstance(entry, dict) else None
+                dt = _parse_dt(ts_raw)
+                if dt is None:
+                    continue
+                # normalize to hour-precision comparison (we compare exact datetimes)
+                if dt == floored:
+                    exact_match = entry
+                    break
+                if dt < floored:
+                    delta = (floored - dt).total_seconds()
+                    if best_past_delta is None or delta < best_past_delta:
+                        best_past_delta = delta
+                        last_past = entry
+                else:
+                    delta = (dt - floored).total_seconds()
+                    if best_future_delta is None or delta < best_future_delta:
+                        best_future_delta = delta
+                        first_future = entry
+            except Exception:
+                continue
+
+        if exact_match is not None:
+            return exact_match
+        if last_past is not None:
+            return last_past
+        if first_future is not None:
+            return first_future
+
+        # final fallback
+        try:
             return forecasts[0]
-        return None
+        except Exception:
+            return None
 
     @property
     def state(self) -> Optional[int]:
@@ -446,7 +507,7 @@ class OFASensor(CoordinatorEntity):
                     pass
             return None
 
-        # Provide top-level attributes with conversions/rounding applied for display
+        # Provide top-level attributes with conversions/rounding applied for final outputs
         # Temperature (keep °C; rounding to 1 dp)
         temp = _pick_raw("temperature", "temp", "temperature_c")
         try:
