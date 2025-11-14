@@ -202,7 +202,14 @@ async def async_setup_entry(hass, entry):
     _LOGGER.debug("Stored coordinator in hass.data[%s][%s]", DOMAIN, entry.entry_id)
 
     # forward entry to sensors
-    hass.async_create_task(hass.config_entries.async_forward_entry_setups(entry, ["sensor"]))
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+        _LOGGER.debug("Forwarded entry setups for entry %s to platforms", entry.entry_id)
+    except Exception:
+        _LOGGER.exception(
+            "Failed to forward entry setups for entry %s to sensor platform", entry.entry_id
+        )
+        return False
 
     _LOGGER.debug("async_setup_entry completed for entry %s", entry.entry_id)
     return True
