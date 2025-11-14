@@ -422,44 +422,52 @@ class TideProxy:
                     f = sf_almanac.sunrise_sunset(sf_eph, topos)
                     times, events = sf_almanac.find_discrete(t0_exp, t1_exp, f)
 
-                    sunrise_candidates: List[datetime] = []
-                    sunset_candidates: List[datetime] = []
-
                     # If find_discrete returns nothing (polar day/night or other issues), raise strict error
                     if not times:
                         raise RuntimeError(f"No sunrise/sunset events found for date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}")
 
-                    # Classify events by checking whether sun is above horizon shortly after the event
-                    for t in times:
+                    # Use the events array directly to classify sunrise/sunset:
+                    # - events[i] is truthy when the Sun is above horizon after times[i] => sunrise candidate
+                    # - events[i] is falsy when the Sun is below horizon after times[i] => sunset candidate
+                    sunrise_candidates: List[datetime] = []
+                    sunset_candidates: List[datetime] = []
+                    evt_dt_list: List[datetime] = []
+
+                    for t, ev in zip(times, events):
                         try:
                             evt_dt = t.utc_datetime().replace(tzinfo=timezone.utc)
                         except Exception:
-                            # fallback to tt epoch if needed
                             evt_dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
-                        # create a small offset time (30s after event) to sample sun altitude
-                        sample_seconds = evt_dt.second + 30.0
-                        sample_t = sf_ts.utc(evt_dt.year, evt_dt.month, evt_dt.day, evt_dt.hour, evt_dt.minute, sample_seconds)
-                        astrom = (earth + topos).at(sample_t).observe(sun).apparent()
-                        alt, az, dist = astrom.altaz()
-                        alt_deg = float(getattr(alt, "degrees", alt.degrees))
-                        if alt_deg > 0:
-                            # sun is above horizon after event => sunrise
+                        evt_dt_list.append(evt_dt)
+                        if bool(ev):
                             sunrise_candidates.append(evt_dt)
                         else:
-                            # sun remains below horizon after event => sunset
                             sunset_candidates.append(evt_dt)
 
-                    # Choose the sunrise/sunset event that best corresponds to this calendar date.
-                    # Use targets near morning (06:00) and evening (18:00) to choose the most appropriate events.
+                    _LOGGER.debug(
+                        "Skyfield sunrise/sunset discrete events for date=%s lat=%s lon=%s -> times=%s events=%s",
+                        d.isoformat(),
+                        self.latitude,
+                        self.longitude,
+                        [e.isoformat().replace("+00:00", "Z") for e in evt_dt_list],
+                        list(map(int, list(events))),
+                    )
+
+                    # Strict: if we failed to classify either sunrise or sunset, raise (no fallback)
+                    if not sunrise_candidates or not sunset_candidates:
+                        _LOGGER.error(
+                            "Failed to classify sunrise/sunset by event flags for date %s at lat=%s,lon=%s; sunrise_candidates=%s sunset_candidates=%s",
+                            d.isoformat(),
+                            self.latitude,
+                            self.longitude,
+                            [s.isoformat().replace("+00:00", "Z") for s in sunrise_candidates],
+                            [s.isoformat().replace("+00:00", "Z") for s in sunset_candidates],
+                        )
+                        raise RuntimeError(f"Unable to determine sunrise or sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+
+                    # choose the most relevant sunrise/sunset for the local date:
                     morning_target = day_start + timedelta(hours=6)
                     evening_target = day_start + timedelta(hours=18)
-
-                    if not sunrise_candidates:
-                        raise RuntimeError(f"Unable to determine sunrise for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
-                    if not sunset_candidates:
-                        raise RuntimeError(f"Unable to determine sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
-
-                    # pick the candidate closest to the target times
                     sunrise_dt = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
                     sunset_dt = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
 
@@ -469,7 +477,6 @@ class TideProxy:
                     dusk_start = sunset_dt - timedelta(hours=dawn_window_hours)
                     dusk_end = sunset_dt + timedelta(hours=dawn_window_hours)
 
-                    # The period is attributed to the date of the event itself (sunrise_dt.date() or sunset_dt.date())
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})
 
