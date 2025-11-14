@@ -451,8 +451,31 @@ class OFASensor(CoordinatorEntity):
 
         # --- continue with existing attribute construction (current, raw_payload, etc.) ---
         current = self._get_current_forecast()
-        if current is not None:
-            attrs["current_forecast"] = current
+
+        # Sanitize current forecast when raw output is disabled:
+        if current is not None and not self._expose_raw:
+            try:
+                # Shallow copy top-level fields; remove forecast_raw and redact low-level 'raw' if present
+                sanitized = dict(current)
+                if "forecast_raw" in sanitized:
+                    sanitized.pop("forecast_raw", None)
+                # Also defensively redact nested score_calc.raw if present on calculation object
+                try:
+                    sc = sanitized.get("score_calc") or (sanitized.get("forecast_raw") or {}).get("score_calc")
+                    if isinstance(sc, dict) and "raw" in sc:
+                        sc = dict(sc)
+                        sc.pop("raw", None)
+                        # If there was a place to put it back, ensure we don't re-expose the original forecast_raw
+                        sanitized["score_calc"] = sc
+                except Exception:
+                    pass
+                attrs["current_forecast"] = sanitized
+                _ATTR_LOGGER.debug("current_forecast sanitized (forecast_raw redacted) for sensor %s", self._attr_name)
+            except Exception:
+                attrs["current_forecast"] = current
+        else:
+            if current is not None:
+                attrs["current_forecast"] = current
 
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
 
