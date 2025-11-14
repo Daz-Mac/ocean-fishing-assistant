@@ -339,7 +339,7 @@ class OFASensor(CoordinatorEntity):
         per user selection). Per-hour scoring (per_timestamp_forecasts) is included only when expose_raw=True.
         Raw payload is preserved under 'raw_payload' only if expose_raw is True.
         Also exposes:
-         - period_forecasts: full mapping from DataFormatter (always included)
+         - period_forecasts: full mapping from DataFormatter (included only when expose_raw is True)
          - remainder_of_today_periods: periods for the local "today" that still include future hours
          - next_5_day_periods: periods grouped by local calendar date for the next 5 days (excluding today)
          - raw_output_enabled: boolean indicating whether raw payload was exposed
@@ -358,7 +358,10 @@ class OFASensor(CoordinatorEntity):
         # Add period_forecasts (raw) so callers can inspect everything the formatter produced
         period_forecasts = self.coordinator.data.get("period_forecasts")
         if period_forecasts is not None:
-            attrs["period_forecasts"] = period_forecasts
+            if self._expose_raw:
+                attrs["period_forecasts"] = period_forecasts
+            else:
+                _ATTR_LOGGER.debug("period_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
 
         # Compute localized trimmed views using coordinator timestamps and period indices.
         remainder_of_today: Dict[str, Any] = {}
