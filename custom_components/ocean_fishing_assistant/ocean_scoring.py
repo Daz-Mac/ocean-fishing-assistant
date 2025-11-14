@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 
 _LOGGER = logging.getLogger(__name__)
 
+# Local import for unit conversions for display strings
+from . import unit_helpers
+
 FACTOR_WEIGHTS = {
     "tide": 0.25,
     "wind": 0.15,
@@ -106,10 +109,36 @@ def _coerce_datetime(v: Any) -> Optional[datetime]:
     return None
 
 
-def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) -> str:
+def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], units: str = "metric") -> str:
+    """
+    Convert internal safety reason codes (e.g. 'gust>11.11') into user-friendly
+    strings using the provided display units ('metric'|'imperial'|'other').
+    Internal comparisons remain in canonical units (m/s for wind/gust).
+    """
     if not code:
         return ""
     code = str(code)
+
+    def _format_wind_val(val_m_s: float) -> str:
+        try:
+            val = float(val_m_s)
+        except Exception:
+            return f"{val_m_s} m/s"
+        try:
+            if units == "metric":
+                conv = unit_helpers.m_s_to_kmh(val)
+                unit_label = "km/h"
+            elif units == "imperial":
+                conv = unit_helpers.m_s_to_mph(val)
+                unit_label = "mph"
+            else:
+                conv = val
+                unit_label = "m/s"
+            # Use one decimal place for human-friendly readability
+            return f"{round(conv, 1)} {unit_label}"
+        except Exception:
+            return f"{val} m/s"
+
     if ">" in code:
         k, v = code.split(">", 1)
         k = k.strip()
@@ -118,14 +147,14 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
         except Exception:
             val = v
         if k in ("wind", "wind_m_s"):
-            return f"Wind exceeds safe limit ({val} m/s)"
+            return f"Wind exceeds safe limit ({_format_wind_val(val)})"
         if k in ("wave", "wave_height"):
             return f"Wave height exceeds safe limit ({val} m)"
         # For swell we treat configured value as a minimum; ">" codes are unlikely but handle gracefully
         if k in ("swell", "swell_period"):
             return f"Swell period below safe minimum ({val} s)"
         if k in ("gust", "wind_gust"):
-            return f"Gust exceeds safe limit ({val} m/s)"
+            return f"Gust exceeds safe limit ({_format_wind_val(val)})"
         if k in ("vis", "visibility"):
             return f"Visibility below safe minimum ({val} km)"
         return f"{k} > {val}"
@@ -145,7 +174,7 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
         if safety_limits:
             mw = safety_limits.get("max_wind_m_s")
             if mw is not None:
-                return f"Wind approaching configured maximum ({mw} m/s)"
+                return f"Wind approaching configured maximum ({_format_wind_val(mw)})"
         return "Wind near configured maximum"
     if code == "wave_near_limit":
         if safety_limits:
@@ -169,7 +198,7 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]]) ->
         if safety_limits:
             mg = safety_limits.get("max_gust_m_s")
             if mg is not None:
-                return f"Gust approaching configured maximum ({mg} m/s)"
+                return f"Gust approaching configured maximum ({_format_wind_val(mg)})"
         return "Gust near configured maximum"
     return code
 
@@ -179,10 +208,14 @@ def compute_score(
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
     use_index: int = 0,
     safety_limits: Optional[Dict[str, Any]] = None,
+    units: str = "metric",
 ) -> Dict[str, Any]:
     """
     Strict per-index scoring. Expects canonical keys present in `data`.
     Raises MissingDataError on missing required inputs.
+
+    The `units` parameter controls human-readable formatting in safety reason strings
+    (display units) but NOT the internal comparisons (which remain in canonical units).
     """
     if not data or "timestamps" not in data:
         raise MissingDataError("Missing timestamps in data")
@@ -467,7 +500,7 @@ def compute_score(
     # reason strings
     try:
         reason_codes = safety.get("reasons", []) or []
-        safety["reason_strings"] = [_format_safety_reason(rc, safety_limits) for rc in reason_codes]
+        safety["reason_strings"] = [_format_safety_reason(rc, safety_limits, units) for rc in reason_codes]
     except Exception:
         safety["reason_strings"] = []
 
@@ -497,10 +530,13 @@ def compute_forecast(
     payload: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
     safety_limits: Optional[Dict[str, Any]] = None,
+    units: str = "metric",
 ) -> List[Dict[str, Any]]:
     """
     Strict per-timestamp forecast list. Each entry will either contain a fully
     computed score or an explicit entry describing missing required fields.
+
+    `units` controls human-facing formatting of safety reason strings (metric vs imperial).
     """
     out: List[Dict[str, Any]] = []
     if not payload or "timestamps" not in payload:
@@ -508,7 +544,7 @@ def compute_forecast(
     timestamps = payload.get("timestamps") or []
     for idx, ts in enumerate(timestamps):
         try:
-            res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits)
+            res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units)
             forecast_raw = {
                 "formatted_weather": {
                     "temperature": payload.get("temperature_c")[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),

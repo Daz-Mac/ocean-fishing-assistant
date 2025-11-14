@@ -281,7 +281,9 @@ class DataFormatter:
             raise ValueError(f"Insufficient canonical keys to compute strict forecasts (missing {missing_keys})")
 
         # compute per-timestamp forecasts (compute errors propagate)
-        per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits)
+        per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(
+            canonical, species_profile=species_profile, safety_limits=safety_limits, units=units
+        )
 
         # STRICT POSTCHECK: fail if any per-timestamp forecast is incomplete (score_100 is None)
         for i, entry in enumerate(per_ts_forecasts):
