@@ -68,10 +68,34 @@ class DataFormatter:
         hourly = raw_payload["hourly"]
         if "time" not in hourly or not isinstance(hourly["time"], (list, tuple)):
             raise ValueError("'hourly' must include 'time' array (strict)")
-
-        timestamps = list(hourly["time"])
-        if not timestamps:
+        
+        # Coerce and normalize timestamps to timezone-aware UTC ISO strings (ending with "Z")
+        raw_timestamps = list(hourly["time"])
+        if not raw_timestamps:
             raise ValueError("'time' array is empty (strict)")
+
+        timestamps: List[str] = []
+        for t in raw_timestamps:
+            # try parsing with HA utility (handles ISO, offsets)
+            parsed = dt_util.parse_datetime(str(t)) if t is not None else None
+            if parsed is None:
+                # fallback to numeric epoch (s or ms)
+                try:
+                    v = float(t)
+                    if v > 1e12:
+                        v = v / 1000.0
+                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                except Exception as exc:
+                    raise ValueError(f"Unable to parse timestamp '{t}': {exc}") from exc
+            # ensure aware UTC
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+            # canonical ISOZ
+            timestamps.append(parsed.isoformat().replace("+00:00", "Z"))
+
+        # Use normalized timestamps from here forward
 
         # prepare hourly_units (required for wind conversion)
         hourly_units = raw_payload.get("hourly_units") or hourly.get("units")

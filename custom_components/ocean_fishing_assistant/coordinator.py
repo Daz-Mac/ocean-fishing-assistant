@@ -12,6 +12,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN, CONF_TIME_PERIODS
 from .tide_proxy import TideProxy
+from . import unit_helpers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,7 +52,24 @@ class OFACoordinator(DataUpdateCoordinator):
         self.lon = lon
         self.species = species
         self.units = units or "metric"
-        self.safety_limits = safety_limits or {}
+        # Normalize safety limits into canonical metric keys (e.g. max_wind_m_s, max_gust_m_s)
+        # Accept either canonical keys (max_wind_m_s...) or legacy/display keys (safety_* from UI).
+        raw_limits = safety_limits or {}
+        try:
+            # If the provided dict looks like UI/display keys (prefixed with "safety_"), convert -> canonical metric
+            if any(str(k).startswith("safety_") for k in raw_limits.keys()):
+                canonical = unit_helpers.convert_safety_display_to_metric(raw_limits, entry_units=self.units)
+            else:
+                canonical = dict(raw_limits)  # assume already canonical
+            # Validate & normalize numeric ranges (raises on invalid if strict True)
+            normalized, warnings = unit_helpers.validate_and_normalize_safety_limits(canonical, strict=True)
+            self.safety_limits = normalized or {}
+            if warnings:
+                _LOGGER.debug("Safety limits normalized with warnings: %s", warnings)
+        except Exception as exc:
+            _LOGGER.exception("Failed to normalize/validate safety_limits: %s", exc)
+            # Fail fast in strict mode — do not allow coordinator to start with ambiguous thresholds
+            raise
         self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
         self._ttl = int(ttl)
         self._tide_proxy = TideProxy(hass, self.lat, self.lon)
