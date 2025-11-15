@@ -111,7 +111,8 @@ _DISPLAY_TO_CANONICAL = {
     "safety_max_wind": "max_wind_m_s",
     "safety_max_wave_height": "max_wave_height_m",
     "safety_min_visibility": "min_visibility_km",
-    "safety_max_swell_period": "min_swell_period_s",  # stored key renamed to min_swell_period_s
+    # STRICT: UI key expected for swell period is safety_min_swell_period
+    "safety_min_swell_period": "min_swell_period_s",
     "safety_max_gust": "max_gust_m_s",
 }
 
@@ -119,7 +120,7 @@ _DISPLAY_TO_CANONICAL = {
 def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = "metric") -> Dict[str, Any]:
     """Convert safety values provided in UI/display units into canonical metric keys/values.
 
-    - safety: keys as used in the config flow (safety_max_wind, safety_max_gust, safety_max_wave_height, ...)
+    - safety: keys as used in the config flow (safety_max_wind, safety_max_gust, safety_max_wave_height, safety_min_swell_period, ...)
     - entry_units: the units the UI was showing ("metric" or "imperial").
 
     Returns a dict with canonical metric keys (e.g. max_wind_m_s, max_gust_m_s) and numeric metric values (floats) or None.
@@ -166,8 +167,8 @@ def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = 
             miles = _to_float(raw_vis)
             out["min_visibility_km"] = miles_to_km(miles) if miles is not None else None
 
-    # Swell period: UI shows seconds in both systems; store as min_swell_period_s canonical key
-    raw_swell = safety.get("safety_max_swell_period")
+    # Swell period: STRICT mapping — only accept 'safety_min_swell_period'
+    raw_swell = safety.get("safety_min_swell_period")
     out["min_swell_period_s"] = _to_float(raw_swell) if raw_swell is not None else None
 
     return out
@@ -179,7 +180,7 @@ _SAFETY_SCHEMA = {
     "max_wind_m_s": ("m/s", 0.0, 60.0, DEFAULT_SAFETY_LIMITS.get("max_wind_m_s", 15.0), False),
     "max_gust_m_s": ("m/s", 0.0, 80.0, None, True),
     "min_visibility_km": ("km", 0.0, 200.0, None, True),
-    "min_swell_period_s": ("s", 0.0, 120.0, None, True),  # renamed key
+    "min_swell_period_s": ("s", 0.0, 120.0, None, True),
 }
 
 
