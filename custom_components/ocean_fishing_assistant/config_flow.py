@@ -361,6 +361,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": user_input.get("min_visibility"),
                     "safety_min_swell_period": user_input.get("min_swell_period"),
+                    # NEW: precipitation chance display key (percent)
+                    "safety_max_precip_chance": user_input.get("max_precip_chance"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -386,9 +388,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "max_gust_speed": user_input.get("max_gust_speed"),
                         "max_wave_height": user_input["max_wave_height"],
                         "min_visibility": user_input.get("min_visibility"),
-                        "min_temperature": user_input["min_temperature"],
-                        "max_temperature": user_input["max_temperature"],
+                        "min_temperature": user_input.get("min_temperature"),
+                        "max_temperature": user_input.get("max_temperature"),
                         "min_swell_period": user_input.get("min_swell_period"),
+                        # NEW: include precip chance in stored thresholds for options/UI
+                        "max_precip_chance": user_input.get("max_precip_chance"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -431,6 +435,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                    ),
+                    # NEW: maximum precipitation chance (percentage)
+                    vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 60)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
                     vol.Required("min_swell_period", default=10): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
@@ -500,6 +508,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                    ),
+                    # NEW: options flow exposure for precipitation chance
+                    vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 60)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
                     vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 10)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")

@@ -7,6 +7,7 @@ Canonical units used by the integration:
 - temperature: Celsius (°C)
 - pressure: hectopascals (hPa)
 - time periods: seconds (s)
+- precipitation probability: percent (0..100) -> stored as _pct
 """
 from typing import Any, Optional, Dict, Tuple, List
 import logging
@@ -111,16 +112,16 @@ _DISPLAY_TO_CANONICAL = {
     "safety_max_wind": "max_wind_m_s",
     "safety_max_wave_height": "max_wave_height_m",
     "safety_min_visibility": "min_visibility_km",
-    # STRICT: UI key expected for swell period is safety_min_swell_period
     "safety_min_swell_period": "min_swell_period_s",
     "safety_max_gust": "max_gust_m_s",
+    "safety_max_precip_chance": "max_precip_chance_pct",
 }
 
 
 def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = "metric") -> Dict[str, Any]:
     """Convert safety values provided in UI/display units into canonical metric keys/values.
 
-    - safety: keys as used in the config flow (safety_max_wind, safety_max_gust, safety_max_wave_height, safety_min_swell_period, ...)
+    - safety: keys as used in the config flow (safety_max_wind, safety_max_gust, safety_max_wave_height, safety_min_swell_period, safety_max_precip_chance, ...)
     - entry_units: the units the UI was showing ("metric" or "imperial").
 
     Returns a dict with canonical metric keys (e.g. max_wind_m_s, max_gust_m_s) and numeric metric values (floats) or None.
@@ -171,6 +172,10 @@ def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = 
     raw_swell = safety.get("safety_min_swell_period")
     out["min_swell_period_s"] = _to_float(raw_swell) if raw_swell is not None else None
 
+    # Precipitation chance: UI value is percent 0..100 -> store canonical pct
+    raw_precip = safety.get("safety_max_precip_chance")
+    out["max_precip_chance_pct"] = _to_float(raw_precip) if raw_precip is not None else None
+
     return out
 
 
@@ -178,9 +183,10 @@ def convert_safety_display_to_metric(safety: Dict[str, Any], entry_units: str = 
 _SAFETY_SCHEMA = {
     "max_wave_height_m": ("m", 0.0, 30.0, DEFAULT_SAFETY_LIMITS.get("max_wave_height_m", 2.5), False),
     "max_wind_m_s": ("m/s", 0.0, 60.0, DEFAULT_SAFETY_LIMITS.get("max_wind_m_s", 15.0), False),
-    "max_gust_m_s": ("m/s", 0.0, 80.0, None, True),
-    "min_visibility_km": ("km", 0.0, 200.0, None, True),
-    "min_swell_period_s": ("s", 0.0, 120.0, None, True),
+    "max_gust_m_s": ("m/s", 0.0, 80.0, DEFAULT_SAFETY_LIMITS.get("max_gust_m_s", None), True),
+    "min_visibility_km": ("km", 0.0, 200.0, DEFAULT_SAFETY_LIMITS.get("min_visibility_km", None), True),
+    "min_swell_period_s": ("s", 0.0, 120.0, DEFAULT_SAFETY_LIMITS.get("min_swell_period_s", None), True),
+    "max_precip_chance_pct": ("%", 0.0, 100.0, DEFAULT_SAFETY_LIMITS.get("max_precip_chance_pct", None), True),
 }
 
 

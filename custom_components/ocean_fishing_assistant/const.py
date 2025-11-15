@@ -26,6 +26,12 @@ DEFAULT_FORECAST_MODE = "hourly"
 DEFAULT_SAFETY_LIMITS = {
     "max_wave_height_m": 2.5,
     "max_wind_m_s": 15.0,
+    # other defaults intentionally omitted (they are optional / user-set): gust, visibility, swell, precip
+    "max_gust_m_s": None,
+    "min_visibility_km": None,
+    "min_swell_period_s": None,
+    # Precipitation chance default: None (disabled unless user sets)
+    "max_precip_chance_pct": None,
 }
 
 FETCH_CACHE_TTL = 600  # seconds for shared in-memory Open-Meteo fetch cache
@@ -44,9 +50,6 @@ CONF_ELEVATION = "elevation"
 CONF_AUTO_APPLY_THRESHOLDS = "auto_apply_thresholds"
 CONF_TIDE_MODE = "tide_mode"
 CONF_MARINE_ENABLED = "marine_enabled"
-# Extra option keys shape used elsewhere
-CONF_THRESHOLDS = "thresholds"
-# Additional runtime/option keys (sensor_name, units, etc.) are used by other modules and validated there.
 
 # Tide mode constants
 TIDE_MODE_PROXY = "proxy"
@@ -68,26 +71,35 @@ HABITAT_PRESETS = {
         "max_wind_speed": 25,  # km/h (used in UI sliders)
         "max_gust_speed": 40,  # km/h
         "max_wave_height": 2.0,  # m
+        "min_visibility": 5,  # km
+        "min_swell_period": 10,  # s
+        "max_precip_chance": 80,  # % default used to seed UI slider
     },
     HABITAT_OPEN_BEACH: {
         "name": "Open Sandy Beach",
         "max_wind_speed": 20,
         "max_gust_speed": 35,
         "max_wave_height": 1.5,
+        "min_visibility": 6,
+        "min_swell_period": 8,
+        "max_precip_chance": 80,
     },
     HABITAT_HARBOUR: {
         "name": "Harbour / Pier",
         "max_wind_speed": 30,
         "max_gust_speed": 50,
         "max_wave_height": 0.8,
+        "min_visibility": 4,
+        "min_swell_period": 6,
+        "max_precip_chance": 85,
     },
     HABITAT_REEF: {
         "name": "Offshore Reef",
         "max_wind_speed": 20,
         "max_gust_speed": 40,
         "max_wave_height": 3.0,
+        "min_visibility": 8,
+        "min_swell_period": 12,
+        "max_precip_chance": 70,
     },
 }
-
-# Default UI units (the integration will validate/migrate entry.options to canonical units)
-# (Left implicit elsewhere; the flow/options will supply explicit unit selection where required)
