@@ -360,7 +360,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": user_input.get("min_visibility"),
-                    "safety_max_swell_period": user_input.get("max_swell_period"),
+                    "safety_min_swell_period": user_input.get("min_swell_period"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -388,7 +388,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "min_visibility": user_input.get("min_visibility"),
                         "min_temperature": user_input["min_temperature"],
                         "max_temperature": user_input["max_temperature"],
-                        "max_swell_period": user_input.get("max_swell_period"),
+                        "min_swell_period": user_input.get("min_swell_period"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -501,7 +501,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    vol.Required("max_swell_period", default=thresholds.get("max_swell_period", 10)): selector.NumberSelector(
+                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 10)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
                     vol.Required("min_visibility", default=thresholds.get("min_visibility", 5)): selector.NumberSelector(
