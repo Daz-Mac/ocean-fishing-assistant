@@ -247,6 +247,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             valid = {TIME_PERIODS_FULL_DAY, TIME_PERIODS_DAWN_DUSK}
             if tp is None or tp not in valid:
                 errors["base"] = "invalid_time_periods"
+            if errors:
                 return self.async_show_form(
                     step_id="ocean_time_periods",
                     data_schema=vol.Schema(
@@ -298,19 +299,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if units not in ("metric", "imperial"):
                 return self.async_show_form(
                     step_id="ocean_units",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required("units", default="metric"): selector.SelectSelector(
-                                selector.SelectSelectorConfig(
-                                    options=[
-                                        {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                        {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
-                                    ],
-                                    mode="dropdown",
-                                )
-                            )
-                        }
-                    ),
+                    data_schema=vol.Schema({vol.Required("units", default="metric"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                            ],
+                            mode="dropdown",
+                        )
+                    )}),
                     errors={"base": "invalid_units"},
                 )
             self.ocean_config["units"] = units
@@ -362,8 +359,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "safety_max_wind": user_input["max_wind_speed"],
                     "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
-                    "safety_min_visibility": None,
-                    "safety_min_swell_period": user_input.get("min_swell_period"),
+                    "safety_min_visibility": user_input.get("min_visibility"),
+                    "safety_max_swell_period": user_input.get("max_swell_period"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
@@ -388,18 +385,16 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "max_wind_speed": user_input["max_wind_speed"],
                         "max_gust_speed": user_input.get("max_gust_speed"),
                         "max_wave_height": user_input["max_wave_height"],
+                        "min_visibility": user_input.get("min_visibility"),
                         "min_temperature": user_input["min_temperature"],
                         "max_temperature": user_input["max_temperature"],
-                        "min_swell_period": user_input.get("min_swell_period"),
+                        "max_swell_period": user_input.get("max_swell_period"),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
                     "wind_unit": wind_unit,
                     "safety_limits": safety_limits,
                 }
-
-                # Persist expose_raw if provided during initial setup (default False)
-                final_config["expose_raw"] = bool(user_input.get("expose_raw", False))
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
@@ -422,6 +417,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         temp_unit_label = "°C" if units == "metric" else "°F"
+        vis_unit_label = "km" if units == "metric" else "miles"
 
         return self.async_show_form(
             step_id="ocean_thresholds",
@@ -439,15 +435,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("min_swell_period", default=10): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
+                    vol.Required("min_visibility", default=5): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label)
+                    ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-30, max=50, step=1, unit_of_measurement=temp_unit_label)
                     ),
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
-                    ),
-                    # Allow user to opt-in to exposing raw payload during initial setup
-                    vol.Required("expose_raw", default=False): selector.BooleanSelector(
-                        selector.BooleanSelectorConfig()
                     ),
                 }
             ),
@@ -466,9 +461,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Ocean Fishing Assistant."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        # Avoid using the deprecated attribute name `config_entry` on the flow instance.
-        # Store the entry under a private attribute instead.
-        self._config_entry = config_entry
+        self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
@@ -479,27 +472,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        thresholds = self._config_entry.data.get(CONF_THRESHOLDS, {})
+        thresholds = self.config_entry.data.get(CONF_THRESHOLDS, {})
         # show units-driven labels based on stored units in config_entry.data
-        units = self._config_entry.data.get("units", "metric")
+        units = self.config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
-
-        # default for expose_raw: prefer entry.options (if present), else fall back to stored data (backwards compat)
-        expose_raw_default = False
-        try:
-            expose_raw_default = bool(self._config_entry.options.get("expose_raw"))
-        except Exception:
-            try:
-                expose_raw_default = bool(self._config_entry.data.get("expose_raw", False))
-            except Exception:
-                expose_raw_default = False
+        vis_unit_label = "km" if units == "metric" else "miles"
 
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                    vol.Required(CONF_TIME_PERIODS, default=self.config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
@@ -517,12 +501,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 10)): selector.NumberSelector(
+                    vol.Required("max_swell_period", default=thresholds.get("max_swell_period", 10)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
-                    # Toggle to control whether the sensor exposes raw_payload and verbose raw outputs
-                    vol.Required("expose_raw", default=expose_raw_default): selector.BooleanSelector(
-                        selector.BooleanSelectorConfig()
+                    vol.Required("min_visibility", default=thresholds.get("min_visibility", 5)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                     ),
                 }
             ),
