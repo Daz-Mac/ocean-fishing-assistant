@@ -435,7 +435,17 @@ class OFASensor(CoordinatorEntity):
 
                         # Add to remainder_of_today if it has any future local-hour in today's date
                         if included_in_today:
-                            remainder_of_today[pname] = pdata
+                            # Sanitize per user's Option A: hide indices and score_10 unless expose_raw=True
+                            try:
+                                if self._expose_raw:
+                                    remainder_of_today[pname] = pdata
+                                else:
+                                    sanitized_p = dict(pdata)
+                                    sanitized_p.pop("indices", None)
+                                    sanitized_p.pop("score_10", None)
+                                    remainder_of_today[pname] = sanitized_p
+                            except Exception:
+                                remainder_of_today[pname] = pdata
 
                         # Add to next_5_days grouped by the local date(s) that apply.
                         # A single period could span multiple local dates; include it under all applicable local date keys.
@@ -459,7 +469,16 @@ class OFASensor(CoordinatorEntity):
                                     continue
                             for d in sorted(touched_local_dates):
                                 key = d.isoformat()
-                                next_5_days.setdefault(key, {})[pname] = pdata
+                                try:
+                                    if self._expose_raw:
+                                        next_5_days.setdefault(key, {})[pname] = pdata
+                                    else:
+                                        sanitized_p = dict(pdata)
+                                        sanitized_p.pop("indices", None)
+                                        sanitized_p.pop("score_10", None)
+                                        next_5_days.setdefault(key, {})[pname] = sanitized_p
+                                except Exception:
+                                    next_5_days.setdefault(key, {})[pname] = pdata
         except Exception:
             # Defensive: do not fail the sensor attribute creation; leave trimmed views empty on any error.
             remainder_of_today = {}
