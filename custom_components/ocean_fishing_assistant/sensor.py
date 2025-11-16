@@ -125,6 +125,21 @@ def _find_height_for_timestamp(target_iso: str, tide_ts: List[Any], tide_heights
     return None
 
 
+def _sanitize_components_remove_score10(comps: Any) -> Any:
+    """Return components dict with per-component 'score_10' removed (non-dicts preserved)."""
+    if not isinstance(comps, dict):
+        return comps
+    new_comps: Dict[str, Any] = {}
+    for cname, cval in comps.items():
+        if isinstance(cval, dict):
+            cc = dict(cval)
+            cc.pop("score_10", None)
+            new_comps[cname] = cc
+        else:
+            new_comps[cname] = cval
+    return new_comps
+
+
 class OFASensor(CoordinatorEntity):
     def __init__(self, coordinator, name: str, expose_raw: bool = False):
         """
@@ -362,14 +377,23 @@ class OFASensor(CoordinatorEntity):
                 sanitized = dict(current)
                 if "forecast_raw" in sanitized:
                     sanitized.pop("forecast_raw", None)
+                # Remove any top-level score_10
+                sanitized.pop("score_10", None)
                 # Also defensively redact nested score_calc.raw if present on calculation object
                 try:
                     sc = sanitized.get("score_calc") or (sanitized.get("forecast_raw") or {}).get("score_calc")
                     if isinstance(sc, dict) and "raw" in sc:
                         sc = dict(sc)
                         sc.pop("raw", None)
-                        # If there was a place to put it back, ensure we don't re-expose the original forecast_raw
+                        sc.pop("score_10", None)
                         sanitized["score_calc"] = sc
+                except Exception:
+                    pass
+                # Remove per-component score_10 if components present
+                try:
+                    comps = sanitized.get("components")
+                    if comps is not None:
+                        sanitized["components"] = _sanitize_components_remove_score10(comps)
                 except Exception:
                     pass
                 attrs["current_forecast"] = sanitized
@@ -443,6 +467,13 @@ class OFASensor(CoordinatorEntity):
                                     sanitized_p = dict(pdata)
                                     sanitized_p.pop("indices", None)
                                     sanitized_p.pop("score_10", None)
+                                    # Remove per-component score_10 in components if present
+                                    try:
+                                        comps = sanitized_p.get("components")
+                                        if comps is not None:
+                                            sanitized_p["components"] = _sanitize_components_remove_score10(comps)
+                                    except Exception:
+                                        pass
                                     remainder_of_today[pname] = sanitized_p
                             except Exception:
                                 remainder_of_today[pname] = pdata
@@ -476,6 +507,12 @@ class OFASensor(CoordinatorEntity):
                                         sanitized_p = dict(pdata)
                                         sanitized_p.pop("indices", None)
                                         sanitized_p.pop("score_10", None)
+                                        try:
+                                            comps = sanitized_p.get("components")
+                                            if comps is not None:
+                                                sanitized_p["components"] = _sanitize_components_remove_score10(comps)
+                                        except Exception:
+                                            pass
                                         next_5_days.setdefault(key, {})[pname] = sanitized_p
                                 except Exception:
                                     next_5_days.setdefault(key, {})[pname] = pdata
@@ -498,7 +535,8 @@ class OFASensor(CoordinatorEntity):
             if self._expose_raw:
                 attrs["period_forecasts"] = period_forecasts
             else:
-                # Provide a sanitized copy of period_forecasts with indices and score_10 removed from each period entry.
+                # Provide a sanitized copy of period_forecasts with indices and score_10 removed from each period entry,
+                # and remove per-component 'score_10' fields from components when present.
                 try:
                     sanitized_pf: Dict[str, Any] = {}
                     if isinstance(period_forecasts, dict):
@@ -513,6 +551,13 @@ class OFASensor(CoordinatorEntity):
                                 sp = dict(pdata)
                                 sp.pop("indices", None)
                                 sp.pop("score_10", None)
+                                # Clean components: remove per-component score_10 if present
+                                comps = sp.get("components")
+                                if comps is not None:
+                                    try:
+                                        sp["components"] = _sanitize_components_remove_score10(comps)
+                                    except Exception:
+                                        sp.pop("components", None)
                                 sanitized_pf.setdefault(date_key, {})[pname] = sp
                     if sanitized_pf:
                         attrs["period_forecasts"] = sanitized_pf
