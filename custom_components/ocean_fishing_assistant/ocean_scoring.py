@@ -319,7 +319,168 @@ def compute_score(
     # compute component scores
     comp: Dict[str, Any] = {}
 
-    # ... component scoring unchanged (tide, wind, waves, time, pressure, season, moon, temperature) ...
+    # TIDE component
+    try:
+        pref_tide = profile.get("preferred_tide_m", DEFAULT_PROFILE["preferred_tide_m"])
+        # allow scalar or list [min, max]
+        if isinstance(pref_tide, (list, tuple)) and len(pref_tide) >= 2:
+            pref_min, pref_max = float(pref_tide[0]), float(pref_tide[1])
+        else:
+            # treat scalar as exact preferred height with tolerance
+            val = float(pref_tide) if pref_tide is not None else 0.0
+            pref_min, pref_max = val, val
+        tide_tol = 1.0  # 1m tolerance by default
+        tide_score = _linear_within_score_10(float(tide), pref_min, pref_max, tide_tol)
+        tide_score = _clamp_0_10(tide_score)
+        comp["tide"] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute tide component", exc_info=True)
+
+    # WIND component
+    try:
+        pref_wind = profile.get("preferred_wind_m_s", DEFAULT_PROFILE["preferred_wind_m_s"])
+        if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
+            pw_min, pw_max = float(pref_wind[0]), float(pref_wind[1])
+        else:
+            pw = float(pref_wind) if pref_wind is not None else 0.0
+            pw_min, pw_max = pw, pw
+        wind_tol = max(1.0, 0.2 * max(1.0, pw_max))  # tolerance relative to preference
+        wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
+        wind_score = _clamp_0_10(wind_score)
+        comp["wind"] = {"score_10": round(wind_score, 3), "score_100": int(round(wind_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute wind component", exc_info=True)
+
+    # WAVES component
+    try:
+        max_wave_pref = profile.get("max_wave_height_m", DEFAULT_PROFILE["max_wave_height_m"])
+        max_wave = float(max_wave_pref) if max_wave_pref is not None else DEFAULT_PROFILE["max_wave_height_m"]
+        # If wave > max_wave -> 0, if wave is 0 -> 10, interpolate linearly
+        if wave is None:
+            wave_score = 0.0
+        else:
+            if wave <= 0.0:
+                wave_score = 10.0
+            elif wave >= max_wave:
+                wave_score = 0.0
+            else:
+                # invert scale: smaller waves => higher score
+                wave_score = 10.0 * (1.0 - (wave / max_wave))
+        wave_score = _clamp_0_10(wave_score)
+        comp["waves"] = {"score_10": round(wave_score, 3), "score_100": int(round(wave_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute waves component", exc_info=True)
+
+    # TIME component (preferred times)
+    try:
+        preferred_times = profile.get("preferred_times", []) or []
+        if not preferred_times:
+            time_score = 10.0
+        else:
+            # preferred_times is a list of hour integers (0..23)
+            try:
+                t_dt = _coerce_datetime(timestamps[use_index])
+                hour = t_dt.hour if t_dt else None
+            except Exception:
+                hour = None
+            if hour is None:
+                time_score = 5.0
+            else:
+                # find minimal hour distance (circular)
+                def hour_distance(a: int, b: int) -> int:
+                    d = abs(a - b) % 24
+                    return min(d, 24 - d)
+
+                min_dist = min(hour_distance(hour, int(pt)) for pt in preferred_times)
+                # within 0..3 hours => 10, >6 hours => 0, linear between 3 and 6
+                if min_dist <= 3:
+                    time_score = 10.0
+                elif min_dist >= 6:
+                    time_score = 0.0
+                else:
+                    time_score = 10.0 * (1.0 - ((min_dist - 3.0) / 3.0))
+        time_score = _clamp_0_10(time_score)
+        comp["time"] = {"score_10": round(time_score, 3), "score_100": int(round(time_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute time component", exc_info=True)
+
+    # PRESSURE component (trend)
+    try:
+        # Prefer positive/steady pressure (rising pressure is good)
+        if pressure_delta is None:
+            pressure_score = 5.0
+        else:
+            # pressure_delta in hPa between current and next hour
+            # delta >= +2 -> excellent (10), delta <= -2 -> poor (0), linear between
+            if pressure_delta >= 2.0:
+                pressure_score = 10.0
+            elif pressure_delta <= -2.0:
+                pressure_score = 0.0
+            else:
+                pressure_score = 10.0 * ((pressure_delta + 2.0) / 4.0)
+        pressure_score = _clamp_0_10(pressure_score)
+        comp["pressure"] = {"score_10": round(pressure_score, 3), "score_100": int(round(pressure_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute pressure component", exc_info=True)
+
+    # SEASON component (month preference)
+    try:
+        preferred_months = profile.get("preferred_months", []) or []
+        if not preferred_months:
+            season_score = 10.0
+        else:
+            try:
+                t_dt = _coerce_datetime(timestamps[use_index])
+                month = t_dt.month if t_dt else None
+            except Exception:
+                month = None
+            if month is None:
+                season_score = 5.0
+            else:
+                season_score = 10.0 if int(month) in [int(m) for m in preferred_months] else 3.0
+        season_score = _clamp_0_10(season_score)
+        comp["season"] = {"score_10": round(season_score, 3), "score_100": int(round(season_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute season component", exc_info=True)
+
+    # MOON component
+    try:
+        moon_pref = profile.get("moon_preference", []) or profile.get("moon_preference", []) or []
+        if not moon_pref:
+            moon_score = 10.0
+        else:
+            # moon_phase_val is typically 0..1 representing cycle fraction; preferences might be provided
+            # as float values or names; we use a simple match: if close to any pref within 0.05 -> 10 else 3
+            matched = False
+            for mpref in moon_pref:
+                try:
+                    mpf = float(mpref)
+                    if moon_phase_val is not None and abs(moon_phase_val - mpf) <= 0.05:
+                        matched = True
+                        break
+                except Exception:
+                    # if pref is string (e.g., 'Full'), ignore here
+                    pass
+            moon_score = 10.0 if matched else 4.0
+        moon_score = _clamp_0_10(moon_score)
+        comp["moon"] = {"score_10": round(moon_score, 3), "score_100": int(round(moon_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute moon component", exc_info=True)
+
+    # TEMPERATURE component
+    try:
+        pref_temp = profile.get("preferred_temp_c", DEFAULT_PROFILE["preferred_temp_c"])
+        if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
+            pt_min, pt_max = float(pref_temp[0]), float(pref_temp[1])
+        else:
+            pt = float(pref_temp) if pref_temp is not None else 10.0
+            pt_min, pt_max = pt, pt
+        temp_tol = 5.0  # degrees tolerance
+        temp_score = _linear_within_score_10(float(temp), pt_min, pt_max, temp_tol)
+        temp_score = _clamp_0_10(temp_score)
+        comp["temperature"] = {"score_10": round(temp_score, 3), "score_100": int(round(temp_score * 10))}
+    except Exception:
+        _LOGGER.debug("Failed to compute temperature component", exc_info=True)
 
     # Weighted aggregation
     overall_10 = 0.0
