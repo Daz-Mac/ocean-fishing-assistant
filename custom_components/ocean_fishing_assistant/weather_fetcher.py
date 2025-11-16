@@ -32,6 +32,7 @@ OM_PARAMS_HOURLY = ",".join(
         "cloudcover",
         "precipitation_probability",
         "pressure_msl",
+        "visibility",  # <-- added strict visibility parameter
     ]
 )
 
@@ -176,6 +177,7 @@ class WeatherFetcher:
         This method will raise on any missing/invalid critical field (temperature, wind, gust, cloud, pop, pressure).
 
         NOTE: Always constructs the current snapshot from hourly arrays (nearest-hour).
+        It will also attempt to fetch marine hourly arrays and merge in current wave/swell values (strict).
         """
         now = dt_util.now()
         cache_entry = self.hass.data.setdefault("ocean_fishing_assistant_fetch_cache", {}).get(self._cache_key)
@@ -186,12 +188,17 @@ class WeatherFetcher:
                 return cache_entry["data"]
 
         # strict fetch: raise if HTTP or payload errors
+        # We fetch both the main hourly payload and marine endpoint to build a complete strict snapshot.
         payload = await self.fetch_open_meteo_current_direct()
+        marine_payload = await self.fetch_marine_direct(days=2)
+
         if not isinstance(payload, dict):
             raise RuntimeError("Open-Meteo current fetch returned non-dict payload (strict)")
+        if not isinstance(marine_payload, dict) or "hourly" not in marine_payload:
+            raise RuntimeError("Open-Meteo marine fetch returned invalid payload (strict)")
 
-        # Always derive current snapshot from hourly arrays (strict)
-        mapped = self._extract_current_from_rest_result(payload)
+        # Always derive current snapshot from hourly arrays (strict), merging marine values where available
+        mapped = self._extract_current_from_rest_result(payload, marine_payload=marine_payload)
 
         # Must have critical fields
         required = ("temperature", "wind_speed", "wind_gust", "cloud_cover", "precipitation_probability", "pressure")
@@ -225,8 +232,10 @@ class WeatherFetcher:
             _LOGGER.exception("Open-Meteo current REST fetch failed for %s,%s", self.latitude, self.longitude)
             raise RuntimeError("Open-Meteo current REST fetch failed") from exc
 
-    def _extract_current_from_rest_result(self, rest_result: Any) -> Dict[str, Any]:
-        """Extract a nearest-hour snapshot from hourly arrays; strict convert and require fields."""
+    def _extract_current_from_rest_result(self, rest_result: Any, marine_payload: Optional[Any] = None) -> Dict[str, Any]:
+        """Extract a nearest-hour snapshot from hourly arrays; strict convert and require fields.
+        If marine_payload provided, merge corresponding marine values at the same nearest-hour index.
+        """
         if not isinstance(rest_result, dict):
             raise ValueError("REST result not a dict (strict)")
 
@@ -255,7 +264,7 @@ class WeatherFetcher:
             except Exception:
                 continue
 
-        # Build candidate dict for that index
+        # Build candidate dict for that index from main hourly payload
         candidate: Dict[str, Any] = {}
         for k, arr in hourly.items():
             if k == "time":
@@ -264,6 +273,18 @@ class WeatherFetcher:
                 candidate[k] = arr[idx]
             else:
                 candidate[k] = None
+
+        # Merge marine values at same index if marine payload provided and aligned
+        if marine_payload and isinstance(marine_payload, dict) and isinstance(marine_payload.get("hourly"), dict):
+            m_hourly = marine_payload["hourly"]
+            # if marine timestamps exists and matches length, prefer picking by same index; otherwise conservatively pick if present
+            for mk in ("wave_height", "wave_period", "swell_wave_height", "swell_wave_period"):
+                m_arr = m_hourly.get(mk)
+                if isinstance(m_arr, list) and len(m_arr) > idx:
+                    candidate[mk] = m_arr[idx]
+                else:
+                    # leave candidate[mk] as-is (do not fallback); if absent, it's fine — not required strictly
+                    pass
 
         units_container = rest_result.get("hourly_units") or {}
         wind_unit_hint = None
@@ -279,6 +300,7 @@ class WeatherFetcher:
 
         Required output keys: temperature (float), wind_speed (float), wind_gust (float), cloud_cover (int),
         precipitation_probability (int), pressure (float), wind_unit.
+        Additional optional keys: visibility_km, wave_height, wave_period, swell_wave_height, swell_wave_period.
         """
         if not isinstance(v, dict):
             raise ValueError("Current snapshot must be a dict (strict)")
@@ -296,6 +318,15 @@ class WeatherFetcher:
         cloud_raw = pick("cloud_cover", "cloudcover", "clouds", "clouds_percent", "cloud_coverage")
         precip_raw = pick("precipitation_probability", "pop", "precipitation", "precip")
         pressure_raw = pick("pressure", "air_pressure", "pressure_msl", "pressure_mean_sea_level", "msl_pressure")
+
+        # Visibility (optional but strictly converted if present). Unit hint may be available under 'visibility' in hourly_units.
+        visibility_raw = pick("visibility", "visibility_m", "visibility_km")
+
+        # Marine current candidates (optional)
+        wave_height_raw = pick("wave_height", "wave_height_m")
+        wave_period_raw = pick("wave_period", "wave_period_s")
+        swell_height_raw = pick("swell_wave_height", "swell_height_m")
+        swell_period_raw = pick("swell_wave_period", "swell_period_s")
 
         # Require temperature and wind (strict)
         temp_f = _to_float_strict(temp_raw, "temperature")
@@ -339,6 +370,42 @@ class WeatherFetcher:
             "precipitation_probability": int(precip_i),
             "pressure": float(pressure_f),
         }
+
+        # Strictly convert visibility into km if present. If unit cannot be determined, assume meters (strict convert).
+        if visibility_raw is not None:
+            try:
+                vis_val = float(visibility_raw)
+                # If caller supplied a 'visibility' with unit hint in the candidate dict it's not available here;
+                # we make a strict assumption: Open-Meteo visibility is meters. Convert to km.
+                # (DataFormatter enforces visibility units for hourly arrays; here we are strict but practical.)
+                vis_km = vis_val / 1000.0
+                out["visibility_km"] = float(vis_km)
+            except Exception:
+                # do not fallback silently; raise to indicate mapping failure if present but invalid
+                raise ValueError(f"Invalid visibility value in current snapshot: {visibility_raw!r}")
+
+        # Map marine current values into snapshot if present (do not require them strictly)
+        if wave_height_raw is not None:
+            try:
+                out["wave_height"] = float(wave_height_raw)
+            except Exception:
+                raise ValueError(f"Invalid wave_height in current snapshot: {wave_height_raw!r}")
+        if wave_period_raw is not None:
+            try:
+                out["wave_period"] = float(wave_period_raw)
+            except Exception:
+                raise ValueError(f"Invalid wave_period in current snapshot: {wave_period_raw!r}")
+        if swell_height_raw is not None:
+            try:
+                out["swell_wave_height"] = float(swell_height_raw)
+            except Exception:
+                raise ValueError(f"Invalid swell_wave_height in current snapshot: {swell_height_raw!r}")
+        if swell_period_raw is not None:
+            try:
+                out["swell_wave_period"] = float(swell_period_raw)
+            except Exception:
+                raise ValueError(f"Invalid swell_wave_period in current snapshot: {swell_period_raw!r}")
+
         return out
 
     # -----------------------

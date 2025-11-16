@@ -36,6 +36,7 @@ class DataFormatter:
         "pressure_msl": "pressure_hpa",
         "cloudcover": "cloud_cover",
         "precipitation_probability": "precipitation_probability",
+        "visibility": "visibility_km",  # <-- new strict canonical mapping (convert to km)
         # marine keys
         "wave_height": "wave_height_m",
         "wave_direction": "wave_direction",
@@ -135,6 +136,31 @@ class DataFormatter:
                             converted.append(None)
                             continue
                         converted.append(self._convert_wind_array_value(v, unit_hint))
+                    canonical[canon_key] = converted
+                elif om_key == "visibility":
+                    # strict: require explicit unit hint for visibility
+                    unit_hint = hourly_units.get(om_key) or hourly_units.get("visibility")
+                    if not unit_hint:
+                        raise ValueError("Missing unit hint for 'visibility' hourly key (strict)")
+                    converted: List[Optional[float]] = []
+                    uh = str(unit_hint).strip().lower()
+                    # Accept meters or kilometers explicitly; otherwise fail strictly
+                    for v in arr:
+                        if v is None:
+                            converted.append(None)
+                            continue
+                        try:
+                            fv = float(v)
+                        except Exception:
+                            raise ValueError(f"Non-numeric visibility value: {v!r} (strict)")
+                        if "km" in uh:
+                            converted.append(float(fv))
+                        elif "m" in uh:
+                            # convert meters -> km
+                            converted.append(float(fv) / 1000.0)
+                        else:
+                            # Unknown unit hint — fail strictly
+                            raise ValueError(f"Unknown visibility unit hint '{unit_hint}' (strict)")
                     canonical[canon_key] = converted
                 else:
                     canonical[canon_key] = list(arr)  # shallow copy
