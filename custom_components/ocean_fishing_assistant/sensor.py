@@ -354,7 +354,7 @@ class OFASensor(CoordinatorEntity):
         per user selection). Per-hour scoring (per_timestamp_forecasts) is included only when expose_raw=True.
         Raw payload is preserved under 'raw_payload' only if expose_raw is True.
         Also exposes:
-         - period_forecasts: full mapping from DataFormatter (included only when expose_raw is True)
+         - period_forecasts: full mapping from DataFormatter (sanitized to remove per-period/profile redundancies)
          - remainder_of_today_periods: periods for the local "today" that still include future hours
          - next_5_day_periods: periods grouped by local calendar date for the next 5 days (excluding today)
          - raw_output_enabled: boolean indicating whether raw payload was exposed
@@ -370,38 +370,45 @@ class OFASensor(CoordinatorEntity):
         # --- CURRENT forecast first (user-friendly) ---
         current = self._get_current_forecast()
 
-        # Sanitize current forecast when raw output is disabled:
-        if current is not None and not self._expose_raw:
+        # Always remove nested profile_used; keep only top-level profile_used below.
+        if current is not None:
             try:
-                # Shallow copy top-level fields; remove forecast_raw and redact low-level 'raw' if present
-                sanitized = dict(current)
-                if "forecast_raw" in sanitized:
-                    sanitized.pop("forecast_raw", None)
-                # Remove any top-level score_10
-                sanitized.pop("score_10", None)
-                # Also defensively redact nested score_calc.raw if present on calculation object
-                try:
-                    sc = sanitized.get("score_calc") or (sanitized.get("forecast_raw") or {}).get("score_calc")
-                    if isinstance(sc, dict) and "raw" in sc:
-                        sc = dict(sc)
-                        sc.pop("raw", None)
-                        sc.pop("score_10", None)
-                        sanitized["score_calc"] = sc
-                except Exception:
-                    pass
-                # Remove per-component score_10 if components present
-                try:
-                    comps = sanitized.get("components")
-                    if comps is not None:
-                        sanitized["components"] = _sanitize_components_remove_score10(comps)
-                except Exception:
-                    pass
-                attrs["current_forecast"] = sanitized
-                _ATTR_LOGGER.debug("current_forecast sanitized (forecast_raw redacted) for sensor %s", self._attr_name)
+                # Make a shallow copy and remove profile_used and sensitive low-level keys
+                current_copy = dict(current)
+                current_copy.pop("profile_used", None)
+                if not self._expose_raw:
+                    if "forecast_raw" in current_copy:
+                        current_copy.pop("forecast_raw", None)
+                    # Remove any top-level score_10
+                    current_copy.pop("score_10", None)
+                    # Also defensively redact nested score_calc.raw if present on calculation object
+                    try:
+                        sc = current_copy.get("score_calc") or (current_copy.get("forecast_raw") or {}).get("score_calc")
+                        if isinstance(sc, dict) and "raw" in sc:
+                            sc = dict(sc)
+                            sc.pop("raw", None)
+                            sc.pop("score_10", None)
+                            current_copy["score_calc"] = sc
+                    except Exception:
+                        pass
+                    # Remove per-component score_10 if components present
+                    try:
+                        comps = current_copy.get("components")
+                        if comps is not None:
+                            current_copy["components"] = _sanitize_components_remove_score10(comps)
+                    except Exception:
+                        pass
+                else:
+                    # Expose_raw True: still remove per-component score_10 so nested outputs are tidy.
+                    try:
+                        comps = current_copy.get("components")
+                        if comps is not None:
+                            current_copy["components"] = _sanitize_components_remove_score10(comps)
+                    except Exception:
+                        pass
+                attrs["current_forecast"] = current_copy
+                _ATTR_LOGGER.debug("current_forecast prepared for sensor %s", self._attr_name)
             except Exception:
-                attrs["current_forecast"] = current
-        else:
-            if current is not None:
                 attrs["current_forecast"] = current
 
         # --- remainder_of_today and next_5_day grouped forecasts next ---
@@ -459,14 +466,24 @@ class OFASensor(CoordinatorEntity):
 
                         # Add to remainder_of_today if it has any future local-hour in today's date
                         if included_in_today:
-                            # Sanitize per user's Option A: hide indices and score_10 unless expose_raw=True
+                            # Always remove nested profile_used; also hide indices/score_10 when expose_raw=False
                             try:
                                 if self._expose_raw:
-                                    remainder_of_today[pname] = pdata
+                                    pcopy = dict(pdata)
+                                    pcopy.pop("profile_used", None)
+                                    # remove per-component score_10 for tidiness
+                                    try:
+                                        comps = pcopy.get("components")
+                                        if comps is not None:
+                                            pcopy["components"] = _sanitize_components_remove_score10(comps)
+                                    except Exception:
+                                        pass
+                                    remainder_of_today[pname] = pcopy
                                 else:
                                     sanitized_p = dict(pdata)
                                     sanitized_p.pop("indices", None)
                                     sanitized_p.pop("score_10", None)
+                                    sanitized_p.pop("profile_used", None)
                                     # Remove per-component score_10 in components if present
                                     try:
                                         comps = sanitized_p.get("components")
@@ -476,7 +493,13 @@ class OFASensor(CoordinatorEntity):
                                         pass
                                     remainder_of_today[pname] = sanitized_p
                             except Exception:
-                                remainder_of_today[pname] = pdata
+                                # last-resort: preserve but attempt to remove profile_used
+                                try:
+                                    fallback = dict(pdata)
+                                    fallback.pop("profile_used", None)
+                                    remainder_of_today[pname] = fallback
+                                except Exception:
+                                    remainder_of_today[pname] = pdata
 
                         # Add to next_5_days grouped by the local date(s) that apply.
                         # A single period could span multiple local dates; include it under all applicable local date keys.
@@ -502,11 +525,20 @@ class OFASensor(CoordinatorEntity):
                                 key = d.isoformat()
                                 try:
                                     if self._expose_raw:
-                                        next_5_days.setdefault(key, {})[pname] = pdata
+                                        pcopy = dict(pdata)
+                                        pcopy.pop("profile_used", None)
+                                        try:
+                                            comps = pcopy.get("components")
+                                            if comps is not None:
+                                                pcopy["components"] = _sanitize_components_remove_score10(comps)
+                                        except Exception:
+                                            pass
+                                        next_5_days.setdefault(key, {})[pname] = pcopy
                                     else:
                                         sanitized_p = dict(pdata)
                                         sanitized_p.pop("indices", None)
                                         sanitized_p.pop("score_10", None)
+                                        sanitized_p.pop("profile_used", None)
                                         try:
                                             comps = sanitized_p.get("components")
                                             if comps is not None:
@@ -515,7 +547,12 @@ class OFASensor(CoordinatorEntity):
                                             pass
                                         next_5_days.setdefault(key, {})[pname] = sanitized_p
                                 except Exception:
-                                    next_5_days.setdefault(key, {})[pname] = pdata
+                                    try:
+                                        fallback = dict(pdata)
+                                        fallback.pop("profile_used", None)
+                                        next_5_days.setdefault(key, {})[pname] = fallback
+                                    except Exception:
+                                        next_5_days.setdefault(key, {})[pname] = pdata
         except Exception:
             # Defensive: do not fail the sensor attribute creation; leave trimmed views empty on any error.
             remainder_of_today = {}
@@ -524,7 +561,7 @@ class OFASensor(CoordinatorEntity):
         attrs["remainder_of_today_periods"] = remainder_of_today
         attrs["next_5_day_periods"] = next_5_days
 
-        # --- Now include per_timestamp_periods / period_forecasts (raw) as configured ---
+        # --- Now include per_timestamp_periods / period_forecasts (sanitized) ---
         if forecasts is not None:
             if self._expose_raw:
                 attrs["per_timestamp_forecasts"] = forecasts
@@ -532,39 +569,36 @@ class OFASensor(CoordinatorEntity):
                 _ATTR_LOGGER.debug("per_timestamp_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
 
         if period_forecasts is not None:
-            if self._expose_raw:
-                attrs["period_forecasts"] = period_forecasts
-            else:
-                # Provide a sanitized copy of period_forecasts with indices and score_10 removed from each period entry,
-                # and remove per-component 'score_10' fields from components when present.
-                try:
-                    sanitized_pf: Dict[str, Any] = {}
-                    if isinstance(period_forecasts, dict):
-                        for date_key, pmap in period_forecasts.items():
-                            if not isinstance(pmap, dict):
+            # Always present a sanitized period_forecasts mapping for the user-facing attributes
+            try:
+                sanitized_pf: Dict[str, Any] = {}
+                if isinstance(period_forecasts, dict):
+                    for date_key, pmap in period_forecasts.items():
+                        if not isinstance(pmap, dict):
+                            continue
+                        for pname, pdata in pmap.items():
+                            if not isinstance(pdata, dict):
+                                # preserve non-dict payloads as-is
+                                sanitized_pf.setdefault(date_key, {})[pname] = pdata
                                 continue
-                            for pname, pdata in pmap.items():
-                                if not isinstance(pdata, dict):
-                                    # preserve non-dict payloads as-is
-                                    sanitized_pf.setdefault(date_key, {})[pname] = pdata
-                                    continue
-                                sp = dict(pdata)
-                                sp.pop("indices", None)
-                                sp.pop("score_10", None)
-                                # Clean components: remove per-component score_10 if present
-                                comps = sp.get("components")
-                                if comps is not None:
-                                    try:
-                                        sp["components"] = _sanitize_components_remove_score10(comps)
-                                    except Exception:
-                                        sp.pop("components", None)
-                                sanitized_pf.setdefault(date_key, {})[pname] = sp
-                    if sanitized_pf:
-                        attrs["period_forecasts"] = sanitized_pf
-                    else:
-                        _ATTR_LOGGER.debug("period_forecasts suppressed after sanitization (no usable entries) for sensor %s", self._attr_name)
-                except Exception:
-                    _ATTR_LOGGER.debug("Failed to sanitize period_forecasts; suppressing for sensor %s", self._attr_name)
+                            sp = dict(pdata)
+                            sp.pop("indices", None)
+                            sp.pop("score_10", None)
+                            sp.pop("profile_used", None)
+                            # Clean components: remove per-component score_10 if present
+                            comps = sp.get("components")
+                            if comps is not None:
+                                try:
+                                    sp["components"] = _sanitize_components_remove_score10(comps)
+                                except Exception:
+                                    sp.pop("components", None)
+                            sanitized_pf.setdefault(date_key, {})[pname] = sp
+                if sanitized_pf:
+                    attrs["period_forecasts"] = sanitized_pf
+                else:
+                    _ATTR_LOGGER.debug("period_forecasts suppressed after sanitization (no usable entries) for sensor %s", self._attr_name)
+            except Exception:
+                _ATTR_LOGGER.debug("Failed to sanitize period_forecasts; suppressing for sensor %s", self._attr_name)
 
         # Raw payload and raw_output_enabled
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
@@ -579,6 +613,7 @@ class OFASensor(CoordinatorEntity):
         attrs["raw_output_enabled"] = bool(self._expose_raw)
 
         # Profile and safety detail pointers (raw canonical values)
+        # Keep a single top-level profile_used only
         attrs["profile_used"] = (current.get("profile_used") if current else None)
 
         entry_units = getattr(self.coordinator, "units", "metric") or "metric"
