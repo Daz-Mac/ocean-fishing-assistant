@@ -500,6 +500,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             mode="dropdown",
                         )
                     ),
+                    # NEW: expose raw output toggle (options stored in entry.options)
+                    vol.Required(
+                        "expose_raw",
+                        default=self.config_entry.options.get("expose_raw", self.config_entry.data.get("expose_raw", False)),
+                    ): selector.BooleanSelector(selector.BooleanSelectorConfig()),
                     vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
