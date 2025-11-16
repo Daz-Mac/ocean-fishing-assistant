@@ -349,25 +349,41 @@ class OFASensor(CoordinatorEntity):
 
         attrs: Dict[str, Any] = {}
         forecasts = self.coordinator.data.get("per_timestamp_forecasts")
-        if forecasts is not None:
-            if self._expose_raw:
-                attrs["per_timestamp_forecasts"] = forecasts
-            else:
-                _ATTR_LOGGER.debug("per_timestamp_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
-
-        # Add period_forecasts (raw) so callers can inspect everything the formatter produced
         period_forecasts = self.coordinator.data.get("period_forecasts")
-        if period_forecasts is not None:
-            if self._expose_raw:
-                attrs["period_forecasts"] = period_forecasts
-            else:
-                _ATTR_LOGGER.debug("period_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
+        timestamps = self.coordinator.data.get("timestamps")
 
-        # Compute localized trimmed views using coordinator timestamps and period indices.
+        # --- CURRENT forecast first (user-friendly) ---
+        current = self._get_current_forecast()
+
+        # Sanitize current forecast when raw output is disabled:
+        if current is not None and not self._expose_raw:
+            try:
+                # Shallow copy top-level fields; remove forecast_raw and redact low-level 'raw' if present
+                sanitized = dict(current)
+                if "forecast_raw" in sanitized:
+                    sanitized.pop("forecast_raw", None)
+                # Also defensively redact nested score_calc.raw if present on calculation object
+                try:
+                    sc = sanitized.get("score_calc") or (sanitized.get("forecast_raw") or {}).get("score_calc")
+                    if isinstance(sc, dict) and "raw" in sc:
+                        sc = dict(sc)
+                        sc.pop("raw", None)
+                        # If there was a place to put it back, ensure we don't re-expose the original forecast_raw
+                        sanitized["score_calc"] = sc
+                except Exception:
+                    pass
+                attrs["current_forecast"] = sanitized
+                _ATTR_LOGGER.debug("current_forecast sanitized (forecast_raw redacted) for sensor %s", self._attr_name)
+            except Exception:
+                attrs["current_forecast"] = current
+        else:
+            if current is not None:
+                attrs["current_forecast"] = current
+
+        # --- remainder_of_today and next_5_day grouped forecasts next ---
         remainder_of_today: Dict[str, Any] = {}
         next_5_days: Dict[str, Any] = {}
         try:
-            timestamps = self.coordinator.data.get("timestamps") or []
             # Use Home Assistant local "now"
             now_local = dt_util.now()
             if now_local.tzinfo is None:
@@ -452,34 +468,20 @@ class OFASensor(CoordinatorEntity):
         attrs["remainder_of_today_periods"] = remainder_of_today
         attrs["next_5_day_periods"] = next_5_days
 
-        # --- continue with existing attribute construction (current, raw_payload, etc.) ---
-        current = self._get_current_forecast()
+        # --- Now include per_timestamp_periods / period_forecasts (raw) as configured ---
+        if forecasts is not None:
+            if self._expose_raw:
+                attrs["per_timestamp_forecasts"] = forecasts
+            else:
+                _ATTR_LOGGER.debug("per_timestamp_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
 
-        # Sanitize current forecast when raw output is disabled:
-        if current is not None and not self._expose_raw:
-            try:
-                # Shallow copy top-level fields; remove forecast_raw and redact low-level 'raw' if present
-                sanitized = dict(current)
-                if "forecast_raw" in sanitized:
-                    sanitized.pop("forecast_raw", None)
-                # Also defensively redact nested score_calc.raw if present on calculation object
-                try:
-                    sc = sanitized.get("score_calc") or (sanitized.get("forecast_raw") or {}).get("score_calc")
-                    if isinstance(sc, dict) and "raw" in sc:
-                        sc = dict(sc)
-                        sc.pop("raw", None)
-                        # If there was a place to put it back, ensure we don't re-expose the original forecast_raw
-                        sanitized["score_calc"] = sc
-                except Exception:
-                    pass
-                attrs["current_forecast"] = sanitized
-                _ATTR_LOGGER.debug("current_forecast sanitized (forecast_raw redacted) for sensor %s", self._attr_name)
-            except Exception:
-                attrs["current_forecast"] = current
-        else:
-            if current is not None:
-                attrs["current_forecast"] = current
+        if period_forecasts is not None:
+            if self._expose_raw:
+                attrs["period_forecasts"] = period_forecasts
+            else:
+                _ATTR_LOGGER.debug("period_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
 
+        # Raw payload and raw_output_enabled
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
 
         # Expose raw payload only if explicitly enabled via configuration (expose_raw)
