@@ -1,8 +1,9 @@
 # Strict sensor entity - surfaces errors loudly so callers see misconfiguration
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple, Set
 from datetime import datetime, timezone, timedelta
 import math
 import logging
+from statistics import mean
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -137,6 +138,283 @@ def _sanitize_components_remove_score10(comps: Any) -> Any:
             new_comps[cname] = cc
         else:
             new_comps[cname] = cval
+    return new_comps
+
+
+def _add_component_values_from_raw(
+    comp_name: str, cc: Dict[str, Any], raw: Dict[str, Any], entry_units: str
+) -> Dict[str, Any]:
+    """
+    Given a component dict cc (already a shallow copy) and score_calc.raw dict,
+    add component-specific numeric value converted to entry_units.
+    """
+    try:
+        if not isinstance(raw, dict):
+            return cc
+        if comp_name == "wind":
+            v = raw.get("wind")
+            if v is not None:
+                if entry_units == "metric":
+                    conv = unit_helpers.m_s_to_kmh(v)
+                elif entry_units == "imperial":
+                    conv = unit_helpers.m_s_to_mph(v)
+                else:
+                    conv = v
+                cc["wind_speed"] = _round_opt(conv, 2)
+        elif comp_name == "time":
+            ts = raw.get("timestamp")
+            dt = _parse_dt(ts)
+            if dt is not None:
+                # show local hour for readability
+                try:
+                    dt_local = dt_util.as_local(dt)
+                    cc["hour"] = dt_local.hour
+                except Exception:
+                    cc["timestamp"] = _iso_z(dt)
+        elif comp_name == "tide":
+            v = raw.get("tide")
+            if v is not None:
+                if entry_units == "imperial":
+                    ft = unit_helpers.m_to_ft(v)
+                    cc["tide_height_ft"] = _round_opt(ft, 2)
+                else:
+                    cc["tide_height_m"] = _round_opt(v, 3)
+        elif comp_name == "waves":
+            v = raw.get("wave")
+            if v is not None:
+                if entry_units == "imperial":
+                    cc["wave_height_ft"] = _round_opt(unit_helpers.m_to_ft(v), 2)
+                else:
+                    cc["wave_height_m"] = _round_opt(v, 3)
+        elif comp_name == "pressure":
+            v = raw.get("pressure_delta")
+            if v is not None:
+                cc["pressure_delta_hpa"] = _round_opt(v, 2)
+        elif comp_name == "season":
+            # season is categorical; nothing numeric to add reliably
+            pass
+        elif comp_name == "moon":
+            v = raw.get("moon_phase")
+            if v is not None:
+                cc["moon_phase"] = _round_opt(v, 6)
+        elif comp_name == "temperature":
+            v = raw.get("temperature")
+            if v is not None:
+                if entry_units == "imperial":
+                    cc["temperature_f"] = _round_opt(unit_helpers.c_to_f(v), 1)
+                else:
+                    cc["temperature_c"] = _round_opt(v, 1)
+        # also include some useful extras
+        if "precipitation_probability" in raw and raw.get("precipitation_probability") is not None:
+            # percent 0..100
+            cc.setdefault("precipitation_probability", int(round(float(raw.get("precipitation_probability")))))
+    except Exception:
+        pass
+    return cc
+
+
+def _compute_period_values_from_indices(
+    comp_name: str,
+    indices: List[int],
+    per_ts_forecasts: Optional[List[Dict[str, Any]]],
+    entry_units: str,
+) -> Optional[Any]:
+    """
+    Compute a representative value for a component across provided per-timestamp forecast indices.
+    Returns a converted numeric value matching entry_units or None.
+    Rules:
+      - wind: mean wind (converted), 2 dp
+      - time: not applicable
+      - tide: mean tide height (m or ft)
+      - waves: mean wave height (m or ft)
+      - pressure: mean pressure_delta_hpa (2 dp)
+      - moon: mean moon_phase (6 dp)
+      - temperature: mean temperature (°C or °F)
+    """
+    if not indices or not isinstance(indices, (list, tuple)) or not per_ts_forecasts:
+        return None
+    vals = []
+    for idx in indices:
+        try:
+            if idx < 0 or idx >= len(per_ts_forecasts):
+                continue
+            fe = per_ts_forecasts[idx] or {}
+            score_calc = (fe.get("forecast_raw") or {}).get("score_calc") or {}
+            raw = score_calc.get("raw") or {}
+            if not raw:
+                continue
+            if comp_name == "wind":
+                if raw.get("wind") is not None:
+                    vals.append(float(raw.get("wind")))
+            elif comp_name == "tide":
+                if raw.get("tide") is not None:
+                    vals.append(float(raw.get("tide")))
+            elif comp_name == "waves":
+                if raw.get("wave") is not None:
+                    vals.append(float(raw.get("wave")))
+            elif comp_name == "pressure":
+                if raw.get("pressure_delta") is not None:
+                    vals.append(float(raw.get("pressure_delta")))
+            elif comp_name == "moon":
+                if raw.get("moon_phase") is not None:
+                    vals.append(float(raw.get("moon_phase")))
+            elif comp_name == "temperature":
+                if raw.get("temperature") is not None:
+                    vals.append(float(raw.get("temperature")))
+            elif comp_name == "time":
+                # not meaningful to average time
+                pass
+        except Exception:
+            continue
+
+    if not vals:
+        return None
+
+    try:
+        avg = float(sum(vals) / len(vals))
+    except Exception:
+        return None
+
+    # convert to display unit
+    if comp_name == "wind":
+        if entry_units == "metric":
+            return _round_opt(unit_helpers.m_s_to_kmh(avg), 2)
+        elif entry_units == "imperial":
+            return _round_opt(unit_helpers.m_s_to_mph(avg), 2)
+        else:
+            return _round_opt(avg, 2)
+    if comp_name in ("tide", "waves"):
+        if entry_units == "imperial":
+            return _round_opt(unit_helpers.m_to_ft(avg), 2)
+        else:
+            return _round_opt(avg, 3)
+    if comp_name == "pressure":
+        return _round_opt(avg, 2)
+    if comp_name == "moon":
+        return _round_opt(avg, 6)
+    if comp_name == "temperature":
+        if entry_units == "imperial":
+            return _round_opt(unit_helpers.c_to_f(avg), 1)
+        else:
+            return _round_opt(avg, 1)
+    return None
+
+
+def _augment_components_with_values(
+    components: Any,
+    score_calc_raw: Optional[Dict[str, Any]],
+    period_entry: Optional[Dict[str, Any]],
+    indices: Optional[List[int]],
+    per_ts_forecasts: Optional[List[Dict[str, Any]]],
+    entry_units: str,
+) -> Any:
+    """
+    Given a components dict, attempt to add per-component numeric values that were used
+    to compute the score. Returns a new components dict (score_10 removed).
+    Prefer per-timestamp score_calc_raw when present; otherwise use period_entry top-level
+    representative values or compute from per_timestamp_forecasts (indices).
+    """
+    if not isinstance(components, dict):
+        return components
+
+    new_comps: Dict[str, Any] = {}
+    for cname, cval in components.items():
+        if not isinstance(cval, dict):
+            new_comps[cname] = cval
+            continue
+        cc = dict(cval)
+        # remove per-component score_10 (we already removed top-level score_10 elsewhere)
+        cc.pop("score_10", None)
+
+        # 1) try per-timestamp raw (best, canonical units)
+        if score_calc_raw and isinstance(score_calc_raw, dict):
+            try:
+                cc = _add_component_values_from_raw(cname, cc, score_calc_raw, entry_units)
+                new_comps[cname] = cc
+                continue
+            except Exception:
+                pass
+
+        # 2) try period_entry top-level keys (already in display units for DataFormatter fallback)
+        if period_entry and isinstance(period_entry, dict):
+            try:
+                if cname == "wind" and "wind_speed" in period_entry:
+                    # already in display units from DataFormatter
+                    cc["wind_speed"] = _round_opt(period_entry.get("wind_speed"), 2)
+                    new_comps[cname] = cc
+                    continue
+                if cname == "temperature" and "temperature" in period_entry:
+                    if entry_units == "imperial":
+                        cc["temperature_f"] = _round_opt(unit_helpers.c_to_f(period_entry.get("temperature")), 1)
+                    else:
+                        cc["temperature_c"] = _round_opt(period_entry.get("temperature"), 1)
+                    new_comps[cname] = cc
+                    continue
+                if cname in ("waves", "tide") and "wave_height_m" in period_entry:
+                    # Some period payloads may include wave_height_m explicitly
+                    if entry_units == "imperial":
+                        cc["wave_height_ft"] = _round_opt(unit_helpers.m_to_ft(period_entry.get("wave_height_m")), 2)
+                    else:
+                        cc["wave_height_m"] = _round_opt(period_entry.get("wave_height_m"), 3)
+                    new_comps[cname] = cc
+                    continue
+                # Fallback mapping for aggregate aggregator output keys:
+                if cname == "waves" and "wind_speed" in period_entry and "wind_unit" in period_entry:
+                    # not ideal; skip
+                    pass
+                # Many DataFormatter fallback aggregated period entries include 'pressure', 'wind_gust', 'wind_speed'
+                if cname == "pressure" and "pressure" in period_entry:
+                    cc["pressure_hpa"] = _round_opt(period_entry.get("pressure"), 2)
+                    new_comps[cname] = cc
+                    continue
+                if cname == "tide" and "tide_height_m" in period_entry:
+                    if entry_units == "imperial":
+                        cc["tide_height_ft"] = _round_opt(unit_helpers.m_to_ft(period_entry.get("tide_height_m")), 2)
+                    else:
+                        cc["tide_height_m"] = _round_opt(period_entry.get("tide_height_m"), 3)
+                    new_comps[cname] = cc
+                    continue
+                if cname == "moon" and "moon_phase" in period_entry:
+                    cc["moon_phase"] = _round_opt(period_entry.get("moon_phase"), 6)
+                    new_comps[cname] = cc
+                    continue
+            except Exception:
+                pass
+
+        # 3) fallback: compute from per_timestamp_forecasts and indices if available
+        try:
+            val = _compute_period_values_from_indices(cname, indices or [], per_ts_forecasts, entry_units)
+            if val is not None:
+                # choose key names consistent with above per-component keys
+                if cname == "wind":
+                    cc["wind_speed"] = val
+                elif cname in ("waves",):
+                    # if val is in ft (imperial) or m (metric): name accordingly
+                    if entry_units == "imperial":
+                        cc["wave_height_ft"] = val
+                    else:
+                        cc["wave_height_m"] = val
+                elif cname == "tide":
+                    if entry_units == "imperial":
+                        cc["tide_height_ft"] = val
+                    else:
+                        cc["tide_height_m"] = val
+                elif cname == "pressure":
+                    cc["pressure_delta_hpa"] = val
+                elif cname == "moon":
+                    cc["moon_phase"] = val
+                elif cname == "temperature":
+                    if entry_units == "imperial":
+                        cc["temperature_f"] = val
+                    else:
+                        cc["temperature_c"] = val
+                else:
+                    # generic numeric fallback
+                    cc["value"] = val
+        except Exception:
+            pass
+
+        new_comps[cname] = cc
     return new_comps
 
 
@@ -395,15 +673,30 @@ class OFASensor(CoordinatorEntity):
                     try:
                         comps = current_copy.get("components")
                         if comps is not None:
-                            current_copy["components"] = _sanitize_components_remove_score10(comps)
+                            # augment with values where possible (prefer score_calc.raw)
+                            score_calc_raw = None
+                            try:
+                                score_calc_raw = (current.get("forecast_raw") or {}).get("score_calc", {}).get("raw")
+                            except Exception:
+                                score_calc_raw = None
+                            current_copy["components"] = _augment_components_with_values(
+                                comps, score_calc_raw, None, None, self.coordinator.data.get("per_timestamp_forecasts"), getattr(self.coordinator, "units", "metric") or "metric"
+                            )
                     except Exception:
                         pass
                 else:
-                    # Expose_raw True: still remove per-component score_10 so nested outputs are tidy.
+                    # Expose_raw True: still remove per-component score_10 so nested outputs are tidy, but add values too
                     try:
                         comps = current_copy.get("components")
                         if comps is not None:
-                            current_copy["components"] = _sanitize_components_remove_score10(comps)
+                            score_calc_raw = None
+                            try:
+                                score_calc_raw = (current.get("forecast_raw") or {}).get("score_calc", {}).get("raw")
+                            except Exception:
+                                score_calc_raw = None
+                            current_copy["components"] = _augment_components_with_values(
+                                comps, score_calc_raw, None, None, self.coordinator.data.get("per_timestamp_forecasts"), getattr(self.coordinator, "units", "metric") or "metric"
+                            )
                     except Exception:
                         pass
                 attrs["current_forecast"] = current_copy
@@ -471,11 +764,20 @@ class OFASensor(CoordinatorEntity):
                                 if self._expose_raw:
                                     pcopy = dict(pdata)
                                     pcopy.pop("profile_used", None)
-                                    # remove per-component score_10 for tidiness
+                                    # augment components with values (prefer per-timestamp when available)
                                     try:
                                         comps = pcopy.get("components")
+                                        score_calc_raw = None
+                                        # no single score_calc_raw for a period; pass None so augment will fallback to period_entry values or indices
                                         if comps is not None:
-                                            pcopy["components"] = _sanitize_components_remove_score10(comps)
+                                            pcopy["components"] = _augment_components_with_values(
+                                                comps,
+                                                score_calc_raw,
+                                                pcopy,
+                                                pcopy.get("indices"),
+                                                self.coordinator.data.get("per_timestamp_forecasts"),
+                                                getattr(self.coordinator, "units", "metric") or "metric",
+                                            )
                                     except Exception:
                                         pass
                                     remainder_of_today[pname] = pcopy
@@ -484,11 +786,18 @@ class OFASensor(CoordinatorEntity):
                                     sanitized_p.pop("indices", None)
                                     sanitized_p.pop("score_10", None)
                                     sanitized_p.pop("profile_used", None)
-                                    # Remove per-component score_10 in components if present
+                                    # Remove per-component score_10 in components if present and add values too
                                     try:
                                         comps = sanitized_p.get("components")
                                         if comps is not None:
-                                            sanitized_p["components"] = _sanitize_components_remove_score10(comps)
+                                            sanitized_p["components"] = _augment_components_with_values(
+                                                comps,
+                                                None,
+                                                sanitized_p,
+                                                pdata.get("indices"),
+                                                self.coordinator.data.get("per_timestamp_forecasts"),
+                                                getattr(self.coordinator, "units", "metric") or "metric",
+                                            )
                                     except Exception:
                                         pass
                                     remainder_of_today[pname] = sanitized_p
@@ -530,7 +839,14 @@ class OFASensor(CoordinatorEntity):
                                         try:
                                             comps = pcopy.get("components")
                                             if comps is not None:
-                                                pcopy["components"] = _sanitize_components_remove_score10(comps)
+                                                pcopy["components"] = _augment_components_with_values(
+                                                    comps,
+                                                    None,
+                                                    pcopy,
+                                                    pdata.get("indices"),
+                                                    self.coordinator.data.get("per_timestamp_forecasts"),
+                                                    getattr(self.coordinator, "units", "metric") or "metric",
+                                                )
                                         except Exception:
                                             pass
                                         next_5_days.setdefault(key, {})[pname] = pcopy
@@ -542,7 +858,14 @@ class OFASensor(CoordinatorEntity):
                                         try:
                                             comps = sanitized_p.get("components")
                                             if comps is not None:
-                                                sanitized_p["components"] = _sanitize_components_remove_score10(comps)
+                                                sanitized_p["components"] = _augment_components_with_values(
+                                                    comps,
+                                                    None,
+                                                    sanitized_p,
+                                                    pdata.get("indices"),
+                                                    self.coordinator.data.get("per_timestamp_forecasts"),
+                                                    getattr(self.coordinator, "units", "metric") or "metric",
+                                                )
                                         except Exception:
                                             pass
                                         next_5_days.setdefault(key, {})[pname] = sanitized_p
@@ -585,11 +908,18 @@ class OFASensor(CoordinatorEntity):
                             sp.pop("indices", None)
                             sp.pop("score_10", None)
                             sp.pop("profile_used", None)
-                            # Clean components: remove per-component score_10 if present
+                            # Clean components: remove per-component score_10 if present and augment with values
                             comps = sp.get("components")
                             if comps is not None:
                                 try:
-                                    sp["components"] = _sanitize_components_remove_score10(comps)
+                                    sp["components"] = _augment_components_with_values(
+                                        comps,
+                                        None,
+                                        sp,
+                                        pdata.get("indices"),
+                                        self.coordinator.data.get("per_timestamp_forecasts"),
+                                        getattr(self.coordinator, "units", "metric") or "metric",
+                                    )
                                 except Exception:
                                     sp.pop("components", None)
                             sanitized_pf.setdefault(date_key, {})[pname] = sp
