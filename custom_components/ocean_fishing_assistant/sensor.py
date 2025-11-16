@@ -498,7 +498,28 @@ class OFASensor(CoordinatorEntity):
             if self._expose_raw:
                 attrs["period_forecasts"] = period_forecasts
             else:
-                _ATTR_LOGGER.debug("period_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
+                # Provide a sanitized copy of period_forecasts with indices and score_10 removed from each period entry.
+                try:
+                    sanitized_pf: Dict[str, Any] = {}
+                    if isinstance(period_forecasts, dict):
+                        for date_key, pmap in period_forecasts.items():
+                            if not isinstance(pmap, dict):
+                                continue
+                            for pname, pdata in pmap.items():
+                                if not isinstance(pdata, dict):
+                                    # preserve non-dict payloads as-is
+                                    sanitized_pf.setdefault(date_key, {})[pname] = pdata
+                                    continue
+                                sp = dict(pdata)
+                                sp.pop("indices", None)
+                                sp.pop("score_10", None)
+                                sanitized_pf.setdefault(date_key, {})[pname] = sp
+                    if sanitized_pf:
+                        attrs["period_forecasts"] = sanitized_pf
+                    else:
+                        _ATTR_LOGGER.debug("period_forecasts suppressed after sanitization (no usable entries) for sensor %s", self._attr_name)
+                except Exception:
+                    _ATTR_LOGGER.debug("Failed to sanitize period_forecasts; suppressing for sensor %s", self._attr_name)
 
         # Raw payload and raw_output_enabled
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
