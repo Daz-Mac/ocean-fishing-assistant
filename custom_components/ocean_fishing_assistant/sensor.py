@@ -523,13 +523,20 @@ class OFASensor(CoordinatorEntity):
                 display_limits[k] = v
         attrs["safety_limits"] = display_limits
 
-        attrs["safety"] = (current.get("safety") if current else None)
-
-        # Expose both reason codes and human-readable strings for safety reasons (if present)
+        # Canonicalize safety object: keep machine-readable codes under "reason_codes" and human strings under "reason_strings"
         if current and isinstance(current.get("safety"), dict):
-            safety_obj = current.get("safety") or {}
-            attrs["safety_reason_codes"] = list(safety_obj.get("reasons", []) or [])
-            attrs["safety_reason_strings"] = list(safety_obj.get("reason_strings", []) or [])
+            safety_obj = dict(current.get("safety") or {})
+            # Normalize legacy "reasons" -> "reason_codes"
+            if "reasons" in safety_obj and "reason_codes" not in safety_obj:
+                safety_obj["reason_codes"] = list(safety_obj.get("reasons") or [])
+                safety_obj.pop("reasons", None)
+            else:
+                safety_obj["reason_codes"] = list(safety_obj.get("reason_codes") or [])
+            # Ensure human-readable strings are available
+            safety_obj["reason_strings"] = list(safety_obj.get("reason_strings") or [])
+            attrs["safety"] = safety_obj
+        else:
+            attrs["safety"] = None
 
         # Extract formatted-weather (preferred) and raw current snapshot (fallback)
         formatted = None
@@ -592,8 +599,10 @@ class OFASensor(CoordinatorEntity):
                         break
             gust_disp_val, gust_unit_label = self._to_display_wind(raw_gust_val, raw_gust_hint, entry_units)
             attrs["current_wind_gust"] = gust_disp_val
+            attrs["current_wind_gust_unit"] = gust_unit_label
         except Exception:
             attrs["current_wind_gust"] = None
+            attrs["current_wind_gust_unit"] = None
 
         # Pressure (hPa) round 1 decimal
         try:
