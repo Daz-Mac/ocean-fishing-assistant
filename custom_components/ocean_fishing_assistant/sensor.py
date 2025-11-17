@@ -1048,55 +1048,59 @@ class OFASensor(CoordinatorEntity):
                 _ATTR_LOGGER.debug("per_timestamp_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
 
         if period_forecasts is not None:
-            # Always present a sanitized period_forecasts mapping for the user-facing attributes
-            try:
-                sanitized_pf: Dict[str, Any] = {}
-                if isinstance(period_forecasts, dict):
-                    for date_key, pmap in period_forecasts.items():
-                        if not isinstance(pmap, dict):
-                            continue
-                        for pname, pdata in pmap.items():
-                            if not isinstance(pdata, dict):
-                                # preserve non-dict payloads as-is
-                                sanitized_pf.setdefault(date_key, {})[pname] = pdata
+            # Only expose full period_forecasts when expose_raw=True.
+            if not self._expose_raw:
+                _ATTR_LOGGER.debug("period_forecasts suppressed (expose_raw=False) for sensor %s", self._attr_name)
+            else:
+                # Keep previous sanitization logic when raw exposure is requested.
+                try:
+                    sanitized_pf: Dict[str, Any] = {}
+                    if isinstance(period_forecasts, dict):
+                        for date_key, pmap in period_forecasts.items():
+                            if not isinstance(pmap, dict):
                                 continue
-                            sp = dict(pdata)
-                            sp.pop("indices", None)
-                            sp.pop("score_10", None)
-                            sp.pop("profile_used", None)
-                            # Clean components: remove per-component score_10 if present and augment with values
-                            comps = sp.get("components")
-                            if comps is not None:
+                            for pname, pdata in pmap.items():
+                                if not isinstance(pdata, dict):
+                                    # preserve non-dict payloads as-is
+                                    sanitized_pf.setdefault(date_key, {})[pname] = pdata
+                                    continue
+                                sp = dict(pdata)
+                                sp.pop("indices", None)
+                                sp.pop("score_10", None)
+                                sp.pop("profile_used", None)
+                                # Clean components: remove per-component score_10 if present and augment with values
+                                comps = sp.get("components")
+                                if comps is not None:
+                                    try:
+                                        sp["components"] = _augment_components_with_values(
+                                            comps,
+                                            None,
+                                            sp,
+                                            pdata.get("indices"),
+                                            self.coordinator.data.get("per_timestamp_forecasts"),
+                                            getattr(self.coordinator, "units", "metric") or "metric",
+                                        )
+                                    except Exception:
+                                        sp.pop("components", None)
+                                # Attach grouped safety values for the sanitized period entry
                                 try:
-                                    sp["components"] = _augment_components_with_values(
-                                        comps,
+                                    safety_vals = _gather_safety_values_from_sources(
                                         None,
                                         sp,
-                                        pdata.get("indices"),
-                                        self.coordinator.data.get("per_timestamp_forecasts"),
+                                        None,
                                         getattr(self.coordinator, "units", "metric") or "metric",
                                     )
+                                    if safety_vals:
+                                        sp["safety_values"] = safety_vals
                                 except Exception:
-                                    sp.pop("components", None)
-                            # Attach grouped safety values for the sanitized period entry
-                            try:
-                                safety_vals = _gather_safety_values_from_sources(
-                                    None,
-                                    sp,
-                                    None,
-                                    getattr(self.coordinator, "units", "metric") or "metric",
-                                )
-                                if safety_vals:
-                                    sp["safety_values"] = safety_vals
-                            except Exception:
-                                pass
-                            sanitized_pf.setdefault(date_key, {})[pname] = sp
-                if sanitized_pf:
-                    attrs["period_forecasts"] = sanitized_pf
-                else:
-                    _ATTR_LOGGER.debug("period_forecasts suppressed after sanitization (no usable entries) for sensor %s", self._attr_name)
-            except Exception:
-                _ATTR_LOGGER.debug("Failed to sanitize period_forecasts; suppressing for sensor %s", self._attr_name)
+                                    pass
+                                sanitized_pf.setdefault(date_key, {})[pname] = sp
+                    if sanitized_pf:
+                        attrs["period_forecasts"] = sanitized_pf
+                    else:
+                        _ATTR_LOGGER.debug("period_forecasts suppressed after sanitization (no usable entries) for sensor %s", self._attr_name)
+                except Exception:
+                    _ATTR_LOGGER.debug("Failed to sanitize period_forecasts; suppressing for sensor %s", self._attr_name)
 
         # Raw payload and raw_output_enabled
         raw = self.coordinator.data.get("raw_payload") or self.coordinator.data
