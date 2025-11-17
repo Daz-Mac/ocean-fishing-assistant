@@ -208,33 +208,50 @@ class TideProxy:
             _LOGGER.exception("Skyfield altitude calculation failed; returning None altitudes for timestamps")
             moon_altitudes = [None] * len(dt_objs)
 
-        # Derive moon phase as a 0..1 synodic fraction using ecliptic longitudes
-        # (0 = new moon, 0.5 = full moon, values wrap to 1.0)
-        moon_phase: Optional[float] = None
-        # Use proper Skyfield API to compute ecliptic longitudes (do not use 'earth + sun' which is invalid)
+        # Derive moon phase for each timestamp as a 0..1 synodic fraction using ecliptic longitudes
+        moon_phases: List[Optional[float]] = []
         try:
-            sample_dt = dt_objs[0] if dt_objs else now
-            t0 = sf_ts.utc(sample_dt.year, sample_dt.month, sample_dt.day, sample_dt.hour, sample_dt.minute, sample_dt.second)
-            earth = sf_eph["earth"]
             sun_obj = sf_eph["sun"]
             moon_obj = sf_eph["moon"]
-            # Compute apparent positions as seen from Earth, then convert to ecliptic coordinates
-            e_at_t0 = earth.at(t0)
-            sun_apparent = e_at_t0.observe(sun_obj).apparent()
-            moon_apparent = e_at_t0.observe(moon_obj).apparent()
-            sun_ecl = sun_apparent.ecliptic_latlon()
-            moon_ecl = moon_apparent.ecliptic_latlon()
-            lon_sun = float(sun_ecl[1].degrees)
-            lon_moon = float(moon_ecl[1].degrees)
-            diff = (lon_moon - lon_sun) % 360.0
-            # Normalize to 0..1 across the synodic cycle (0=new, 0.5=full)
-            moon_phase = diff / 360.0
+            earth = sf_eph["earth"]
+            for t in times_list:
+                # compute apparent positions and convert to ecliptic longitudes
+                sun_apparent = earth.at(t).observe(sun_obj).apparent()
+                moon_apparent = earth.at(t).observe(moon_obj).apparent()
+                sun_ecl = sun_apparent.ecliptic_latlon()
+                moon_ecl = moon_apparent.ecliptic_latlon()
+                lon_sun = float(sun_ecl[1].degrees)
+                lon_moon = float(moon_ecl[1].degrees)
+                diff = (lon_moon - lon_sun) % 360.0
+                moon_phases.append(diff / 360.0)
         except Exception:
             _LOGGER.exception("Skyfield phase calculation failed")
             # Strict behavior: surface Skyfield phase errors (do not silently continue)
             raise
 
-        tide_strength = _compute_tide_strength(moon_phase)
+        # Choose representative scalar phase for tide strength/anchor computations.
+        # Prefer phase at moon_transit_dt if available, otherwise use first timestamp's phase.
+        moon_phase_scalar: Optional[float] = None
+        try:
+            if moon_transit_dt is not None:
+                # compute phase at the transit time separately (anchor)
+                t_anchor = sf_ts.utc(moon_transit_dt.year, moon_transit_dt.month, moon_transit_dt.day, moon_transit_dt.hour, moon_transit_dt.minute, moon_transit_dt.second)
+                earth = sf_eph["earth"]
+                sun_app = earth.at(t_anchor).observe(sun_obj).apparent()
+                moon_app = earth.at(t_anchor).observe(moon_obj).apparent()
+                sun_ecl = sun_app.ecliptic_latlon()
+                moon_ecl = moon_app.ecliptic_latlon()
+                lon_sun = float(sun_ecl[1].degrees)
+                lon_moon = float(moon_ecl[1].degrees)
+                moon_phase_scalar = ( (lon_moon - lon_sun) % 360.0 ) / 360.0
+            else:
+                # fallback to first timestamp's computed phase
+                moon_phase_scalar = moon_phases[0] if moon_phases else None
+        except Exception:
+            _LOGGER.exception("Failed to compute anchor moon phase")
+            raise
+
+        tide_strength = _compute_tide_strength(moon_phase_scalar)
 
         # Anchor: use precise moon_transit_dt if found, otherwise first timestamp or now
         anchor_dt = moon_transit_dt or (dt_objs[0] if dt_objs else now)
@@ -280,14 +297,16 @@ class TideProxy:
 
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
+            # per-timestamp tide heights (aligned)
             "tide_height_m": tide_heights,
-            "tide_phase": moon_phase,
+            # per-timestamp tide_phase (aligned) — normalized 0..1 (new..full..new)
+            "tide_phase": moon_phases,
             "tide_strength": float(round(tide_strength, 3)),
             "next_high": next_high_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if next_high_dt else "",
             "next_low": next_low_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if next_low_dt else "",
             "next_high_height_m": next_high_height,
             "next_low_height_m": next_low_height,
-            "confidence": "astronomical" if moon_phase is not None else "astronomical_low_confidence",
+            "confidence": "astronomical" if moon_phase_scalar is not None else "astronomical_low_confidence",
             "source": "astronomical_skyfield",
         }
 
