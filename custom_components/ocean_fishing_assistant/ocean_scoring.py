@@ -373,11 +373,75 @@ def compute_score(
 
     # TIME component (preferred times)
     try:
-        preferred_times = profile.get("preferred_times", []) or []
-        if not preferred_times:
+        preferred_times_raw = profile.get("preferred_times", []) or []
+
+        def _normalize_preferred_times(pref_times: List[Any]) -> List[int]:
+            """
+            Normalize preferred_times entries into a deduplicated list of hour integers (0..23).
+            Accepts:
+              - integers (0..23)
+              - numeric strings like "5"
+              - dict ranges like {"start_hour":5,"end_hour":9} or {"start":5,"end":9}
+              - dict single like {"hour": 6}
+            Expands inclusive ranges and handles wrap-around (e.g., start=22,end=2).
+            """
+            out_hours: List[int] = []
+            for it in pref_times:
+                # dict range or single
+                if isinstance(it, dict):
+                    # support multiple possible keys
+                    sh = None
+                    eh = None
+                    # common keys
+                    if "start_hour" in it or "end_hour" in it:
+                        sh = it.get("start_hour")
+                        eh = it.get("end_hour")
+                    elif "start" in it or "end" in it:
+                        sh = it.get("start")
+                        eh = it.get("end")
+                    elif "hour" in it:
+                        sh = it.get("hour")
+                        eh = None
+                    else:
+                        # attempt to extract any numeric field
+                        for k, v in it.items():
+                            if isinstance(v, (int, float, str)):
+                                sh = v
+                                break
+                    try:
+                        if sh is None:
+                            continue
+                        sh_i = int(sh)
+                    except Exception:
+                        continue
+                    if eh is None:
+                        out_hours.append(sh_i % 24)
+                    else:
+                        try:
+                            eh_i = int(eh)
+                        except Exception:
+                            out_hours.append(sh_i % 24)
+                            continue
+                        # expand inclusive range with wrap-around
+                        h = sh_i % 24
+                        out_hours.append(h)
+                        while h != (eh_i % 24):
+                            h = (h + 1) % 24
+                            out_hours.append(h)
+                else:
+                    # scalar
+                    try:
+                        out_hours.append(int(float(it)) % 24)
+                    except Exception:
+                        continue
+            # dedupe and sort for stable behavior
+            return sorted(set([h % 24 for h in out_hours]))
+
+        normalized_hours = _normalize_preferred_times(preferred_times_raw)
+
+        if not normalized_hours:
             time_score = 10.0
         else:
-            # preferred_times is a list of hour integers (0..23)
             try:
                 t_dt = _coerce_datetime(timestamps[use_index])
                 hour = t_dt.hour if t_dt else None
@@ -391,7 +455,7 @@ def compute_score(
                     d = abs(a - b) % 24
                     return min(d, 24 - d)
 
-                min_dist = min(hour_distance(hour, int(pt)) for pt in preferred_times)
+                min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
                 # within 0..3 hours => 10, >6 hours => 0, linear between 3 and 6
                 if min_dist <= 3:
                     time_score = 10.0
