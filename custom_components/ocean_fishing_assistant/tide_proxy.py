@@ -1,4 +1,3 @@
-# (full contents — replace your existing file)
 from __future__ import annotations
 import logging
 import math
@@ -232,7 +231,7 @@ class TideProxy:
             moon_phase = diff / 360.0
         except Exception:
             _LOGGER.exception("Skyfield phase calculation failed")
-            # Per strict policy: surface Skyfield phase errors (do not silently continue)
+            # Strict behavior: surface Skyfield phase errors (do not silently continue)
             raise
 
         tide_strength = _compute_tide_strength(moon_phase)
