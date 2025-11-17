@@ -212,23 +212,28 @@ class TideProxy:
         # Derive moon phase as a 0..1 synodic fraction using ecliptic longitudes
         # (0 = new moon, 0.5 = full moon, values wrap to 1.0)
         moon_phase: Optional[float] = None
+        # Use proper Skyfield API to compute ecliptic longitudes (do not use 'earth + sun' which is invalid)
         try:
             sample_dt = dt_objs[0] if dt_objs else now
             t0 = sf_ts.utc(sample_dt.year, sample_dt.month, sample_dt.day, sample_dt.hour, sample_dt.minute, sample_dt.second)
             earth = sf_eph["earth"]
-            sun = sf_eph["sun"]
-            moon = sf_eph["moon"]
-            # Compute ecliptic longitudes for sun and moon and take their difference
-            sun_ecl = (earth + sun).at(t0).ecliptic_latlon()
-            moon_ecl = (earth + moon).at(t0).ecliptic_latlon()
+            sun_obj = sf_eph["sun"]
+            moon_obj = sf_eph["moon"]
+            # Compute apparent positions as seen from Earth, then convert to ecliptic coordinates
+            e_at_t0 = earth.at(t0)
+            sun_apparent = e_at_t0.observe(sun_obj).apparent()
+            moon_apparent = e_at_t0.observe(moon_obj).apparent()
+            sun_ecl = sun_apparent.ecliptic_latlon()
+            moon_ecl = moon_apparent.ecliptic_latlon()
             lon_sun = float(sun_ecl[1].degrees)
             lon_moon = float(moon_ecl[1].degrees)
             diff = (lon_moon - lon_sun) % 360.0
             # Normalize to 0..1 across the synodic cycle (0=new, 0.5=full)
             moon_phase = diff / 360.0
         except Exception:
-            _LOGGER.debug("Skyfield phase calculation failed; proceeding with moon_phase=None", exc_info=True)
-            moon_phase = None
+            _LOGGER.exception("Skyfield phase calculation failed")
+            # Per strict policy: surface Skyfield phase errors (do not silently continue)
+            raise
 
         tide_strength = _compute_tide_strength(moon_phase)
 
