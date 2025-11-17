@@ -87,13 +87,14 @@ def _augment_components_with_values_simple(components: Optional[Dict[str, Any]],
     Simplified augmentation:
       - Remove per-component 'score_10'
       - Inject the canonical numeric value used by scoring when available:
-         wind -> wind_speed (converted to display when appropriate is done elsewhere)
+         wind -> wind_speed_m_s
          tide -> tide_height_m
          waves -> wave_height_m
          pressure -> pressure_delta_hpa
          moon -> moon_phase
          temperature -> temperature_c
-    Expects `score_calc_raw` to be the canonical scoring raw dict (ocean_scoring.compute_score -> 'raw').
+    Expects `score_calc_raw` to be the canonical scoring raw dict (ocean_scoring.compute_score -> 'raw'),
+    or an aggregated dict prepared by the caller for period summaries.
     """
     if components is None:
         return None
@@ -112,7 +113,7 @@ def _augment_components_with_values_simple(components: Optional[Dict[str, Any]],
             raw = score_calc_raw or {}
             if cname == "wind":
                 if raw.get("wind") is not None:
-                    # store canonical m/s value here; presentation layer may convert
+                    # store canonical m/s value here; presentation layer may convert elsewhere
                     cc["wind_speed_m_s"] = _round_opt(raw.get("wind"), 3)
             elif cname == "tide":
                 if raw.get("tide") is not None:
@@ -277,6 +278,10 @@ class OFASensor(CoordinatorEntity):
         current_copy = dict(current)
         if not self._expose_raw:
             current_copy.pop("forecast_raw", None)
+            # hide index and score_10 when raw is disabled
+            current_copy.pop("index", None)
+            current_copy.pop("score_10", None)
+
         # augment components: remove per-component score_10 and inject numeric values from score_calc_raw when present
         comps = current_copy.get("components")
         current_copy["components"] = _augment_components_with_values_simple(comps, score_calc_raw, entry_units)
@@ -291,6 +296,7 @@ class OFASensor(CoordinatorEntity):
         # --- Grouped period views (remainder_of_today_periods, next_5_day_periods) ---
         period_forecasts = data.get("period_forecasts", {}) or {}
         timestamps = data.get("timestamps", []) or []
+        per_ts_forecasts = data.get("per_timestamp_forecasts", []) or []
 
         # compute local now and today
         now_local = dt_util.now()
@@ -329,10 +335,56 @@ class OFASensor(CoordinatorEntity):
                 # sanitized period summary (remove heavy arrays)
                 sanitized = dict(pdata)
                 sanitized.pop("indices", None)
-                # augment components similarly (period-level components are already aggregated score_10 values)
+                # hide top-level score_10 when raw not exposed
+                if not self._expose_raw:
+                    sanitized.pop("score_10", None)
+
+                # Prepare aggregated raw values for this period by averaging canonical raw values
+                # collected from per_timestamp_forecasts[indices]. This enables injecting numeric
+                # component values similar to current_forecast.
+                raw_agg: Dict[str, float] = {}
+                counts: Dict[str, int] = {}
+                try:
+                    for idx in indices:
+                        if not isinstance(idx, int):
+                            continue
+                        if idx < 0 or idx >= len(per_ts_forecasts):
+                            continue
+                        fe = per_ts_forecasts[idx] or {}
+                        score_calc = (fe.get("forecast_raw") or {}).get("score_calc") or {}
+                        raw = score_calc.get("raw") if isinstance(score_calc, dict) else None
+                        if not raw:
+                            continue
+                        # keys of interest: wind (m/s), tide (m), wave (m), pressure_delta (hPa),
+                        # moon_phase, temperature
+                        for k, keyname in (("wind", "wind"), ("tide", "tide"), ("wave", "wave"),
+                                           ("pressure_delta", "pressure_delta"), ("moon_phase", "moon_phase"),
+                                           ("temperature", "temperature")):
+                            if raw.get(keyname) is None:
+                                continue
+                            try:
+                                v = float(raw.get(keyname))
+                            except Exception:
+                                continue
+                            if k not in raw_agg:
+                                raw_agg[k] = v
+                                counts[k] = 1
+                            else:
+                                raw_agg[k] += v
+                                counts[k] += 1
+                    # finalize averages
+                    for k in list(raw_agg.keys()):
+                        c = counts.get(k, 1) or 1
+                        raw_agg[k] = raw_agg[k] / c
+                except Exception:
+                    # on any failure, leave raw_agg empty so augmentation just won't inject values
+                    raw_agg = {}
+
+                # augment components similarly (period-level components are aggregated; provide aggregated raw)
                 comps = sanitized.get("components")
-                # For period entries we do not have a single score_calc_raw; only attach values if present on period entry already
-                sanitized["components"] = _augment_components_with_values_simple(comps, None, entry_units)
+                # map raw_agg keys to the names _augment expects (it just reads raw.get("wind"), raw.get("tide"), ...)
+                sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units)
+
                 # add safety_values from period-level keys if present (pressure, wind_gust, precipitation_probability)
                 period_safety = {}
                 if sanitized.get("wind_gust") is not None:
@@ -341,7 +393,10 @@ class OFASensor(CoordinatorEntity):
                     if sanitized.get("wind_unit"):
                         period_safety["wind_gust_unit"] = sanitized.get("wind_unit")
                 if sanitized.get("precipitation_probability") is not None:
-                    period_safety["precipitation_probability"] = int(round(float(sanitized.get("precipitation_probability"))))
+                    try:
+                        period_safety["precipitation_probability"] = int(round(float(sanitized.get("precipitation_probability"))))
+                    except Exception:
+                        pass
                 if period_safety:
                     sanitized["safety_values"] = period_safety
 
