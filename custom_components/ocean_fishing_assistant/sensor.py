@@ -17,7 +17,7 @@ Canonical assumptions (from DataFormatter / ocean_scoring):
     - "timestamp" (ISOZ), "index" (int), "score_100" (int or None), "components" (dict or None),
       "forecast_raw": { "formatted_weather": {...}, "score_calc": {...} }
 """
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone, timedelta
 import logging
 
@@ -29,6 +29,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_NAME
 from . import unit_helpers
+from . import tide_proxy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def _round_opt(v: Optional[float], ndigits: int = 3) -> Optional[float]:
     return round(float(v), ndigits)
 
 
-def _m_s_to_display(w_m_s: Optional[float], entry_units: str) -> (Optional[float], Optional[str]):
+def _m_s_to_display(w_m_s: Optional[float], entry_units: str) -> Tuple[Optional[float], Optional[str]]:
     """Convert canonical m/s wind value to display units (km/h for metric, mph for imperial)."""
     if w_m_s is None:
         return None, None
@@ -82,16 +83,63 @@ def _m_s_to_display(w_m_s: Optional[float], entry_units: str) -> (Optional[float
         return None, None
 
 
-def _augment_components_with_values_simple(components: Optional[Dict[str, Any]], score_calc_raw: Optional[Dict[str, Any]], entry_units: str) -> Optional[Dict[str, Any]]:
+def _moon_phase_name(phase: Optional[float]) -> Optional[str]:
+    """
+    Map normalized moon phase numeric (0..1) to friendly name.
+    Delegates numeric coercion to tide_proxy._coerce_phase when available.
+    """
+    if phase is None:
+        return None
+
+    # Prefer using tide_proxy._coerce_phase for normalization (avoids duplication).
+    try:
+        p = tide_proxy._coerce_phase(phase)
+    except Exception:
+        # Defensive fallback: attempt a minimal local coercion
+        try:
+            p = float(phase) % 1.0
+        except Exception:
+            return None
+
+    try:
+        p = float(p) % 1.0
+    except Exception:
+        return None
+
+    eps = 1e-6
+    if p <= eps or abs(p - 1.0) <= eps:
+        return "New Moon"
+    if abs(p - 0.25) <= eps:
+        return "First Quarter"
+    if abs(p - 0.5) <= eps:
+        return "Full Moon"
+    if abs(p - 0.75) <= eps:
+        return "Last Quarter"
+    if 0.0 < p < 0.25:
+        return "Waxing Crescent"
+    if 0.25 < p < 0.5:
+        return "Waxing Gibbous"
+    if 0.5 < p < 0.75:
+        return "Waning Gibbous"
+    if 0.75 < p < 1.0:
+        return "Waning Crescent"
+    return None
+
+
+def _augment_components_with_values_simple(
+    components: Optional[Dict[str, Any]],
+    score_calc_raw: Optional[Dict[str, Any]],
+    entry_units: str,
+) -> Optional[Dict[str, Any]]:
     """
     Simplified augmentation:
       - Remove per-component 'score_10'
       - Inject the canonical numeric value used by scoring when available:
-         wind -> wind_speed_m_s
+         wind -> wind_speed (display units) + wind_unit
          tide -> tide_height_m
          waves -> wave_height_m
          pressure -> pressure_delta_hpa
-         moon -> moon_phase
+         moon -> moon_phase (numeric) and moon_phase_name
          temperature -> temperature_c
     Expects `score_calc_raw` to be the canonical scoring raw dict (ocean_scoring.compute_score -> 'raw'),
     or an aggregated dict prepared by the caller for period summaries.
@@ -113,8 +161,11 @@ def _augment_components_with_values_simple(components: Optional[Dict[str, Any]],
             raw = score_calc_raw or {}
             if cname == "wind":
                 if raw.get("wind") is not None:
-                    # store canonical m/s value here; presentation layer may convert elsewhere
-                    cc["wind_speed_m_s"] = _round_opt(raw.get("wind"), 3)
+                    # convert m/s to display unit and provide unit label
+                    val, unit = _m_s_to_display(raw.get("wind"), entry_units)
+                    cc["wind_speed"] = val
+                    if unit:
+                        cc["wind_unit"] = unit
             elif cname == "tide":
                 if raw.get("tide") is not None:
                     cc["tide_height_m"] = _round_opt(raw.get("tide"), 3)
@@ -126,7 +177,16 @@ def _augment_components_with_values_simple(components: Optional[Dict[str, Any]],
                     cc["pressure_delta_hpa"] = _round_opt(raw.get("pressure_delta"), 2)
             elif cname == "moon":
                 if raw.get("moon_phase") is not None:
-                    cc["moon_phase"] = _round_opt(raw.get("moon_phase"), 6)
+                    mp = raw.get("moon_phase")
+                    # normalize via tide_proxy to be consistent
+                    try:
+                        mpn = tide_proxy._coerce_phase(mp)
+                    except Exception:
+                        mpn = mp
+                    cc["moon_phase"] = _round_opt(mpn, 6)
+                    mname = _moon_phase_name(mpn)
+                    if mname:
+                        cc["moon_phase_name"] = mname
             elif cname == "temperature":
                 if raw.get("temperature") is not None:
                     cc["temperature_c"] = _round_opt(raw.get("temperature"), 1)
@@ -338,6 +398,8 @@ class OFASensor(CoordinatorEntity):
                 # hide top-level score_10 when raw not exposed
                 if not self._expose_raw:
                     sanitized.pop("score_10", None)
+                # Remove nested profile_used (we keep top-level profile_used only)
+                sanitized.pop("profile_used", None)
 
                 # Prepare aggregated raw values for this period by averaging canonical raw values
                 # collected from per_timestamp_forecasts[indices]. This enables injecting numeric
@@ -443,7 +505,10 @@ class OFASensor(CoordinatorEntity):
                     moon_numeric = mp[0] if mp else None
             else:
                 moon_numeric = mp
+        # Keep numeric moon_phase for compatibility, rounded
         attrs["moon_phase"] = _round_opt(moon_numeric, 6) if moon_numeric is not None else None
+        # Also provide friendly name for user readability
+        attrs["moon_phase_name"] = _moon_phase_name(moon_numeric) if moon_numeric is not None else None
 
         # Top-level current metrics (use formatted_weather produced by scoring)
         formatted = (current.get("forecast_raw") or {}).get("formatted_weather") or {}
