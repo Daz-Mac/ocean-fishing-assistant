@@ -209,7 +209,8 @@ class TideProxy:
             _LOGGER.exception("Skyfield altitude calculation failed; returning None altitudes for timestamps")
             moon_altitudes = [None] * len(dt_objs)
 
-        # Derive moon phase via elongation using Skyfield (tolerate failure and set None)
+        # Derive moon phase as a 0..1 synodic fraction using ecliptic longitudes
+        # (0 = new moon, 0.5 = full moon, values wrap to 1.0)
         moon_phase: Optional[float] = None
         try:
             sample_dt = dt_objs[0] if dt_objs else now
@@ -217,17 +218,14 @@ class TideProxy:
             earth = sf_eph["earth"]
             sun = sf_eph["sun"]
             moon = sf_eph["moon"]
-            e = earth.at(t0)
-            sun_astrom = e.observe(sun).apparent()
-            moon_astrom = e.observe(moon).apparent()
-            s = sun_astrom.position.km
-            m = moon_astrom.position.km
-            dot = s[0] * m[0] + s[1] * m[1] + s[2] * m[2]
-            mag_s = math.sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2])
-            mag_m = math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-            cos_ang = max(-1.0, min(1.0, dot / (mag_s * mag_m)))
-            angle = math.degrees(math.acos(cos_ang))  # 0..180
-            moon_phase = (angle / 180.0) * 0.5
+            # Compute ecliptic longitudes for sun and moon and take their difference
+            sun_ecl = (earth + sun).at(t0).ecliptic_latlon()
+            moon_ecl = (earth + moon).at(t0).ecliptic_latlon()
+            lon_sun = float(sun_ecl[1].degrees)
+            lon_moon = float(moon_ecl[1].degrees)
+            diff = (lon_moon - lon_sun) % 360.0
+            # Normalize to 0..1 across the synodic cycle (0=new, 0.5=full)
+            moon_phase = diff / 360.0
         except Exception:
             _LOGGER.debug("Skyfield phase calculation failed; proceeding with moon_phase=None", exc_info=True)
             moon_phase = None
@@ -242,10 +240,12 @@ class TideProxy:
         amp = base_amp * (0.5 + 0.5 * tide_strength)
 
         period_seconds = _TIDE_HALF_DAY_HOURS * _SECONDS_PER_HOUR
+        # phase shift from longitude (seconds)
+        lon_shift = (self.longitude / 360.0) * period_seconds
+
         tide_heights: List[Optional[float]] = []
         for dt in dt_objs:
             sec = dt.timestamp()
-            lon_shift = (self.longitude / 360.0) * period_seconds
             x = 2.0 * math.pi * ((sec - anchor_epoch + lon_shift) / period_seconds)
             try:
                 value = amp * math.sin(x)
@@ -253,7 +253,26 @@ class TideProxy:
             except Exception:
                 tide_heights.append(None)
 
-        next_high_dt, next_low_dt = _predict_next_high_low(anchor_dt if anchor_dt else now)
+        # Analytic next high/low consistent with the sine model used above.
+        try:
+            now_epoch = now.timestamp()
+            quarter = period_seconds * 0.25
+            base = anchor_epoch - lon_shift + quarter
+            n = math.ceil((now_epoch - base) / period_seconds)
+            next_high_epoch = base + n * period_seconds
+            next_low_epoch = next_high_epoch + (period_seconds / 2.0)
+            next_high_dt = datetime.fromtimestamp(next_high_epoch, tz=timezone.utc)
+            next_low_dt = datetime.fromtimestamp(next_low_epoch, tz=timezone.utc)
+            # compute heights for analytic next high/low using same model
+            xh = 2.0 * math.pi * ((next_high_epoch - anchor_epoch + lon_shift) / period_seconds)
+            xl = 2.0 * math.pi * ((next_low_epoch - anchor_epoch + lon_shift) / period_seconds)
+            next_high_height = round(float(amp * math.sin(xh)), 3)
+            next_low_height = round(float(amp * math.sin(xl)), 3)
+        except Exception:
+            _LOGGER.exception("Error computing analytic next high/low")
+            next_high_dt, next_low_dt = None, None
+            next_high_height, next_low_height = None, None
+
 
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
@@ -262,6 +281,8 @@ class TideProxy:
             "tide_strength": float(round(tide_strength, 3)),
             "next_high": next_high_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if next_high_dt else "",
             "next_low": next_low_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if next_low_dt else "",
+            "next_high_height_m": next_high_height,
+            "next_low_height_m": next_low_height,
             "confidence": "astronomical" if moon_phase is not None else "astronomical_low_confidence",
             "source": "astronomical_skyfield",
         }
