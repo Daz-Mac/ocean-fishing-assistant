@@ -204,10 +204,8 @@ def _add_component_values_from_raw(
                     cc["temperature_f"] = _round_opt(unit_helpers.c_to_f(v), 1)
                 else:
                     cc["temperature_c"] = _round_opt(v, 1)
-        # also include some useful extras
-        if "precipitation_probability" in raw and raw.get("precipitation_probability") is not None:
-            # percent 0..100
-            cc.setdefault("precipitation_probability", int(round(float(raw.get("precipitation_probability")))))
+        # NOTE: Previously we added precipitation_probability into every component here.
+        # That behavior was removed in favor of grouping safety-related values under a dedicated "safety_values" dict.
     except Exception:
         pass
     return cc
@@ -313,6 +311,8 @@ def _augment_components_with_values(
     to compute the score. Returns a new components dict (score_10 removed).
     Prefer per-timestamp score_calc_raw when present; otherwise use period_entry top-level
     representative values or compute from per_timestamp_forecasts (indices).
+    NOTE: Safety-only inputs (gusts, visibility, precip, swell period) are intentionally NOT
+    injected into per-component objects; they are grouped under a dedicated 'safety_values' dict.
     """
     if not isinstance(components, dict):
         return components
@@ -416,6 +416,95 @@ def _augment_components_with_values(
 
         new_comps[cname] = cc
     return new_comps
+
+
+def _gather_safety_values_from_sources(
+    score_calc_raw: Optional[Dict[str, Any]],
+    period_entry: Optional[Dict[str, Any]],
+    raw_current: Optional[Dict[str, Any]],
+    entry_units: str,
+) -> Dict[str, Any]:
+    """
+    Collect safety-related raw values from available sources (prefer score_calc_raw,
+    fallback to period_entry, then raw_current). Convert units for display where appropriate.
+    Returns a dict containing only present values:
+      - wind_gust (display units: km/h or mph, 2 dp)
+      - visibility_km (km, 2 dp)
+      - swell_period_s (s, 1 dp)
+      - precipitation_probability (int percent)
+    """
+    out: Dict[str, Any] = {}
+    try:
+        def _pick(*keys):
+            for k in keys:
+                try:
+                    if score_calc_raw and isinstance(score_calc_raw, dict) and score_calc_raw.get(k) is not None:
+                        return score_calc_raw.get(k)
+                except Exception:
+                    pass
+                try:
+                    if period_entry and isinstance(period_entry, dict) and period_entry.get(k) is not None:
+                        return period_entry.get(k)
+                except Exception:
+                    pass
+                try:
+                    if raw_current and isinstance(raw_current, dict) and raw_current.get(k) is not None:
+                        return raw_current.get(k)
+                except Exception:
+                    pass
+            return None
+
+        # wind_gust: possible canonical keys
+        gust_val = _pick("wind_gust", "wind_max_m_s", "wind_max", "windgusts_10m")
+        if gust_val is not None:
+            try:
+                gv = float(gust_val)
+                # If gust came from score_calc_raw it is in m/s; otherwise could be in other units.
+                # We assume canonical m/s if score_calc_raw provided it; otherwise leave as-is but convert if entry_units suggests.
+                if score_calc_raw and (("wind_gust" in score_calc_raw) or ("wind_max_m_s" in score_calc_raw)):
+                    # canonical m/s -> convert to display units
+                    if entry_units == "metric":
+                        out["wind_gust"] = _round_opt(unit_helpers.m_s_to_kmh(gv), 2)
+                        out["wind_gust_unit"] = "km/h"
+                    elif entry_units == "imperial":
+                        out["wind_gust"] = _round_opt(unit_helpers.m_s_to_mph(gv), 2)
+                        out["wind_gust_unit"] = "mph"
+                    else:
+                        out["wind_gust"] = _round_opt(gv, 2)
+                        out["wind_gust_unit"] = "m/s"
+                else:
+                    # best-effort: if key name suggests kmh/mph then convert to display unit, else assume m/s
+                    out["wind_gust"] = _round_opt(gv, 2)
+                    # unit label not guaranteed here
+            except Exception:
+                pass
+
+        # visibility (prefer canonical visibility_km)
+        vis = _pick("visibility_km", "visibility", "vis")
+        if vis is not None:
+            try:
+                out["visibility_km"] = _round_opt(float(vis), 2)
+            except Exception:
+                pass
+
+        # swell period in seconds
+        sp = _pick("swell_period_s", "swell_period", "swell_period_seconds")
+        if sp is not None:
+            try:
+                out["swell_period_s"] = _round_opt(float(sp), 1)
+            except Exception:
+                pass
+
+        # precipitation_probability / pop
+        pp = _pick("precipitation_probability", "pop", "precip")
+        if pp is not None:
+            try:
+                out["precipitation_probability"] = int(round(float(pp)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
 
 
 class OFASensor(CoordinatorEntity):
@@ -636,6 +725,7 @@ class OFASensor(CoordinatorEntity):
          - remainder_of_today_periods: periods for the local "today" that still include future hours
          - next_5_day_periods: periods grouped by local calendar date for the next 5 days (excluding today)
          - raw_output_enabled: boolean indicating whether raw payload was exposed
+         - safety_values: numeric values used for safety checks grouped separately from components
         """
         if not self.coordinator.data:
             raise RuntimeError("Coordinator data missing when building attributes (strict)")
@@ -669,7 +759,7 @@ class OFASensor(CoordinatorEntity):
                             current_copy["score_calc"] = sc
                     except Exception:
                         pass
-                    # Remove per-component score_10 if components present
+                    # Remove per-component score_10 if components present and augment components with values where possible
                     try:
                         comps = current_copy.get("components")
                         if comps is not None:
@@ -682,6 +772,15 @@ class OFASensor(CoordinatorEntity):
                             current_copy["components"] = _augment_components_with_values(
                                 comps, score_calc_raw, None, None, self.coordinator.data.get("per_timestamp_forecasts"), getattr(self.coordinator, "units", "metric") or "metric"
                             )
+                            # Attach grouped safety values (do not include safety-only fields under components)
+                            safety_vals = _gather_safety_values_from_sources(
+                                score_calc_raw,
+                                None,
+                                (self.coordinator.data.get("raw_payload") or {}).get("current") if isinstance(self.coordinator.data, dict) else None,
+                                getattr(self.coordinator, "units", "metric") or "metric",
+                            )
+                            if safety_vals:
+                                current_copy["safety_values"] = safety_vals
                     except Exception:
                         pass
                 else:
@@ -697,6 +796,15 @@ class OFASensor(CoordinatorEntity):
                             current_copy["components"] = _augment_components_with_values(
                                 comps, score_calc_raw, None, None, self.coordinator.data.get("per_timestamp_forecasts"), getattr(self.coordinator, "units", "metric") or "metric"
                             )
+                            # Attach grouped safety values for visibility when raw exposed
+                            safety_vals = _gather_safety_values_from_sources(
+                                score_calc_raw,
+                                None,
+                                (self.coordinator.data.get("raw_payload") or {}).get("current") if isinstance(self.coordinator.data, dict) else None,
+                                getattr(self.coordinator, "units", "metric") or "metric",
+                            )
+                            if safety_vals:
+                                current_copy["safety_values"] = safety_vals
                     except Exception:
                         pass
                 attrs["current_forecast"] = current_copy
@@ -780,6 +888,18 @@ class OFASensor(CoordinatorEntity):
                                             )
                                     except Exception:
                                         pass
+                                    # Attach grouped safety values for the period (from period_entry or per-timestamp fallbacks)
+                                    try:
+                                        safety_vals = _gather_safety_values_from_sources(
+                                            None,
+                                            pcopy,
+                                            (self.coordinator.data.get("raw_payload") or {}).get("current") if isinstance(self.coordinator.data, dict) else None,
+                                            getattr(self.coordinator, "units", "metric") or "metric",
+                                        )
+                                        if safety_vals:
+                                            pcopy["safety_values"] = safety_vals
+                                    except Exception:
+                                        pass
                                     remainder_of_today[pname] = pcopy
                                 else:
                                     sanitized_p = dict(pdata)
@@ -798,6 +918,18 @@ class OFASensor(CoordinatorEntity):
                                                 self.coordinator.data.get("per_timestamp_forecasts"),
                                                 getattr(self.coordinator, "units", "metric") or "metric",
                                             )
+                                    except Exception:
+                                        pass
+                                    # Attach grouped safety values for the sanitized period
+                                    try:
+                                        safety_vals = _gather_safety_values_from_sources(
+                                            None,
+                                            sanitized_p,
+                                            None,
+                                            getattr(self.coordinator, "units", "metric") or "metric",
+                                        )
+                                        if safety_vals:
+                                            sanitized_p["safety_values"] = safety_vals
                                     except Exception:
                                         pass
                                     remainder_of_today[pname] = sanitized_p
@@ -849,6 +981,18 @@ class OFASensor(CoordinatorEntity):
                                                 )
                                         except Exception:
                                             pass
+                                        # Attach grouped safety values for the period
+                                        try:
+                                            safety_vals = _gather_safety_values_from_sources(
+                                                None,
+                                                pcopy,
+                                                None,
+                                                getattr(self.coordinator, "units", "metric") or "metric",
+                                            )
+                                            if safety_vals:
+                                                pcopy["safety_values"] = safety_vals
+                                        except Exception:
+                                            pass
                                         next_5_days.setdefault(key, {})[pname] = pcopy
                                     else:
                                         sanitized_p = dict(pdata)
@@ -866,6 +1010,18 @@ class OFASensor(CoordinatorEntity):
                                                     self.coordinator.data.get("per_timestamp_forecasts"),
                                                     getattr(self.coordinator, "units", "metric") or "metric",
                                                 )
+                                        except Exception:
+                                            pass
+                                        # Attach grouped safety values for the sanitized period
+                                        try:
+                                            safety_vals = _gather_safety_values_from_sources(
+                                                None,
+                                                sanitized_p,
+                                                None,
+                                                getattr(self.coordinator, "units", "metric") or "metric",
+                                            )
+                                            if safety_vals:
+                                                sanitized_p["safety_values"] = safety_vals
                                         except Exception:
                                             pass
                                         next_5_days.setdefault(key, {})[pname] = sanitized_p
@@ -922,6 +1078,18 @@ class OFASensor(CoordinatorEntity):
                                     )
                                 except Exception:
                                     sp.pop("components", None)
+                            # Attach grouped safety values for the sanitized period entry
+                            try:
+                                safety_vals = _gather_safety_values_from_sources(
+                                    None,
+                                    sp,
+                                    None,
+                                    getattr(self.coordinator, "units", "metric") or "metric",
+                                )
+                                if safety_vals:
+                                    sp["safety_values"] = safety_vals
+                            except Exception:
+                                pass
                             sanitized_pf.setdefault(date_key, {})[pname] = sp
                 if sanitized_pf:
                     attrs["period_forecasts"] = sanitized_pf
