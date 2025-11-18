@@ -28,7 +28,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, CONF_NAME
+from .const import DOMAIN, CONF_NAME, CONF_THRESHOLDS
 from . import unit_helpers
 from . import tide_proxy
 
@@ -588,6 +588,13 @@ class OFASensor(CoordinatorEntity):
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     """
     Setup entry. In this simplified/aggressive mode we read expose_raw only from entry.options.
+
+    Behavior:
+      - Do NOT read CONF_THRESHOLDS at runtime.
+      - If entry.options is empty and entry.data[CONF_THRESHOLDS] contains an 'expose_raw'
+        value (set at setup time), copy that into entry.options by calling
+        hass.config_entries.async_update_entry. This is a one-time population step.
+      - After that, the integration reads 'expose_raw' strictly from entry.options.
     """
     _LOGGER.debug("ocean_fishing_assistant async_setup_entry: entry_id=%s entry.options=%s", entry.entry_id, entry.options)
 
@@ -605,9 +612,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     if not sensor_name:
         raise RuntimeError("Missing required name in config entry data (strict)")
 
+    # ONE-TIME population: If options are empty, and setup stored thresholds.expose_raw in entry.data,
+    # copy that value into entry.options so the user's setup choice is honored immediately.
+    try:
+        opts = getattr(entry, "options", None) or {}
+        if not opts:
+            thresholds = entry.data.get(CONF_THRESHOLDS, {}) if getattr(entry, "data", None) else {}
+            if "expose_raw" in thresholds:
+                desired = bool(thresholds.get("expose_raw", False))
+                _LOGGER.debug("Populating entry.options.expose_raw=%s from entry.data[CONF_THRESHOLDS]", desired)
+                # This updates the ConfigEntry stored in hass; it's not a runtime fallback.
+                hass.config_entries.async_update_entry(entry, options={"expose_raw": desired})
+                # refresh local opts variable in case caller expects it
+                opts = getattr(entry, "options", None) or {}
+    except Exception:
+        _LOGGER.exception("Failed to populate entry.options.expose_raw from thresholds; proceeding without population.")
+
     # Keep reading options here to pass into constructor for compatibility; the sensor itself does not
-    # fall back to this value — it reads live options only.
-    expose_raw = bool(entry.options.get("expose_raw", False)) if getattr(entry, "options", None) else False
+    # fall back to this value — it reads live options only via _is_raw_enabled.
+    expose_raw = bool(getattr(entry, "options", None) and entry.options.get("expose_raw", False))
 
     prefix = "ocean_fishing_assistant"
     final_name = sensor_name if sensor_name.startswith(prefix) else f"{prefix}_{sensor_name}"
