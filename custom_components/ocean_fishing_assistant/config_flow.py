@@ -393,7 +393,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "min_swell_period": user_input.get("min_swell_period"),
                         # NEW: include precip chance in stored thresholds for options/UI
                         "max_precip_chance": user_input.get("max_precip_chance"),
-                        # RESTORE: expose_raw stored so initial setup choice is preserved
+                        # Preserve user selection here for visibility; async_setup_entry will populate entry.options
                         "expose_raw": bool(user_input.get("expose_raw", False)),
                     },
                     # Strict runtime keys required by async_setup_entry
