@@ -472,11 +472,11 @@ class OFASensor(CoordinatorEntity):
         attrs["next_5_day_periods"] = next_5_days
 
         # expose per_timestamp_forecasts and period_forecasts only when explicitly requested
-        if self._expose_raw:
+        if self._is_raw_enabled():
             attrs["per_timestamp_forecasts"] = data.get("per_timestamp_forecasts")
             attrs["period_forecasts"] = period_forecasts
             attrs["raw_payload"] = data.get("raw_payload") or data
-        attrs["raw_output_enabled"] = bool(self._expose_raw)
+        attrs["raw_output_enabled"] = bool(self._is_raw_enabled())
 
         # Top-level summary fields (simple, canonical)
         attrs["profile_used"] = current.get("profile_used")
@@ -562,4 +562,4 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     prefix = "ocean_fishing_assistant"
     final_name = sensor_name if sensor_name.startswith(prefix) else f"{prefix}_{sensor_name}"
 
-    async_add_entities([OFASensor(coordinator, name=final_name, expose_raw=expose_raw)], update_before_add=True)
+    async_add_entities([OFASensor(coordinator, name=final_name, expose_raw=expose_raw, entry=entry)], update_before_add=True)
