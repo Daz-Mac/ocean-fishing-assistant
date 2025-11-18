@@ -404,7 +404,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
 
                 _LOGGER.debug("Creating ocean config entry with data keys: %s", list(final_config.keys()))
-                return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
+
+                # Persist expose_raw in entry.options so sensor can read it from entry.options
+                expose_raw_opt = bool(user_input.get("expose_raw", False))
+                return self.async_create_entry(
+                    title=final_config[CONF_NAME], data=final_config, options={"expose_raw": expose_raw_opt}
+                )
             except KeyError as ke:
                 _LOGGER.exception("Missing expected key when building final ocean config: %s", ke)
                 return self._show_ocean_thresholds_form(errors={"base": "unknown"})
@@ -451,6 +456,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
+                    ),
+                    # NEW: expose_raw option - controls whether raw per-timestamp/period payloads are exposed
+                    vol.Required("expose_raw", default=False): selector.BooleanSelector(
+                        selector.BooleanSelectorConfig()
                     ),
                 }
             ),
@@ -500,11 +509,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             mode="dropdown",
                         )
                     ),
-                    # NEW: expose raw output toggle (options stored in entry.options)
-                    vol.Required(
-                        "expose_raw",
-                        default=self.config_entry.options.get("expose_raw", self.config_entry.data.get("expose_raw", False)),
-                    ): selector.BooleanSelector(selector.BooleanSelectorConfig()),
                     vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
@@ -523,6 +527,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Required("min_visibility", default=thresholds.get("min_visibility", 5)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label, mode="slider")
+                    ),
+                    # expose_raw in options so users can toggle raw output after setup
+                    vol.Required("expose_raw", default=self.config_entry.options.get("expose_raw", False)): selector.BooleanSelector(
+                        selector.BooleanSelectorConfig()
                     ),
                 }
             ),
