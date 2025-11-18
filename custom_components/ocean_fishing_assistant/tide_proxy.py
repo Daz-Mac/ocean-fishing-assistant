@@ -189,21 +189,33 @@ class TideProxy:
             _LOGGER.debug("Failed to find next moon transit; continuing with fallback anchor", exc_info=True)
             moon_transit_dt = None
 
+        # Prepare reusable Skyfield locals and Time objects for all timestamps
+        try:
+            times_list = [sf_ts.utc(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) for dt in dt_objs]
+        except Exception:
+            # if we cannot build Time objects, fail loudly (strict)
+            _LOGGER.exception("Failed to construct Skyfield Time objects for timestamps")
+            raise
+
+        try:
+            earth = sf_eph["earth"]
+            sun_obj = sf_eph["sun"]
+            moon_obj = sf_eph["moon"]
+            topos = sf_wgs.latlon(self.latitude, self.longitude)
+        except Exception:
+            _LOGGER.exception("Failed to resolve Skyfield bodies/topos")
+            raise
+
         # Compute moon altitudes for timestamps (used for state heuristics)
         moon_altitudes: List[Optional[float]] = []
         try:
-            moon = sf_eph["moon"]
-            # prepare times as skyfield Time objects
-            times_list = [sf_ts.utc(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) for dt in dt_objs]
-            # Topos (a topos object) for almanac functions; for actual observations we compose with earth so .at() works
-            topos = sf_wgs.latlon(self.latitude, self.longitude)
-            earth = sf_eph["earth"]
             for t in times_list:
                 # Use earth + topos to get a Topos-relative observer with .at(t)
-                astrom = (earth + topos).at(t).observe(moon).apparent()
+                astrom = (earth + topos).at(t).observe(moon_obj).apparent()
                 alt, az, dist = astrom.altaz()
                 # alt is an Angle; access degrees
-                moon_altitudes.append(float(getattr(alt, "degrees", alt.degrees)))
+                deg = float(getattr(alt, "degrees", alt.degrees))
+                moon_altitudes.append(deg)
         except Exception:
             _LOGGER.exception("Skyfield altitude calculation failed; returning None altitudes for timestamps")
             moon_altitudes = [None] * len(dt_objs)
@@ -211,9 +223,6 @@ class TideProxy:
         # Derive moon phase for each timestamp as a 0..1 synodic fraction using ecliptic longitudes
         moon_phases: List[Optional[float]] = []
         try:
-            sun_obj = sf_eph["sun"]
-            moon_obj = sf_eph["moon"]
-            earth = sf_eph["earth"]
             for t in times_list:
                 # compute apparent positions and convert to ecliptic longitudes
                 sun_apparent = earth.at(t).observe(sun_obj).apparent()
@@ -236,7 +245,6 @@ class TideProxy:
             if moon_transit_dt is not None:
                 # compute phase at the transit time separately (anchor)
                 t_anchor = sf_ts.utc(moon_transit_dt.year, moon_transit_dt.month, moon_transit_dt.day, moon_transit_dt.hour, moon_transit_dt.minute, moon_transit_dt.second)
-                earth = sf_eph["earth"]
                 sun_app = earth.at(t_anchor).observe(sun_obj).apparent()
                 moon_app = earth.at(t_anchor).observe(moon_obj).apparent()
                 sun_ecl = sun_app.ecliptic_latlon()
