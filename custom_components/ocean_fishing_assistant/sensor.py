@@ -231,10 +231,23 @@ def _collect_safety_values(score_calc_raw: Optional[Dict[str, Any]], entry_units
     return out
 
 
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Called when the config entry options are updated via the UI."""
+    _LOGGER.debug("ocean_fishing_assistant: options updated for %s -> %s", entry.entry_id, entry.options)
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is None:
+        _LOGGER.debug("ocean_fishing_assistant: coordinator not found for entry %s", entry.entry_id)
+        return
+    try:
+        await coordinator.async_request_refresh()
+    except Exception as exc:
+        _LOGGER.exception("ocean_fishing_assistant: error requesting coordinator refresh: %s", exc)
+
+
 class OFASensor(CoordinatorEntity):
     """
     Simplified CoordinatorEntity for Ocean Fishing Assistant.
-    Reads `expose_raw` from entry.options when available, otherwise uses the constructor value.
+    Reads `expose_raw` exclusively from entry.options when available.
     """
 
     def __init__(
@@ -254,9 +267,7 @@ class OFASensor(CoordinatorEntity):
             name = f"{prefix}_{name}"
 
         self._attr_name = name
-        # cached fallback value (used when no entry is available)
-        self._expose_raw = bool(expose_raw)
-        # store the entry so we can read live options if present
+        # do not keep a constructor fallback for expose_raw; rely on live ConfigEntry options only
         self._entry: Optional[ConfigEntry] = entry
 
         # Unique id best-effort
@@ -268,14 +279,23 @@ class OFASensor(CoordinatorEntity):
 
     def _is_raw_enabled(self) -> bool:
         """
-        Prefer the live ConfigEntry option when available, otherwise fall back to the cached constructor value.
+        Read the ConfigEntry options to determine whether raw output is enabled.
+        No constructor fallback is used — if options are not present, raw is treated as False.
         """
         try:
-            if self._entry and isinstance(self._entry.options, dict):
-                return bool(self._entry.options.get("expose_raw", False))
+            if self._entry is not None:
+                opts = getattr(self._entry, "options", None) or {}
+                try:
+                    return bool(opts.get("expose_raw", False))
+                except Exception:
+                    try:
+                        return bool(getattr(opts, "expose_raw", False))
+                    except Exception:
+                        pass
         except Exception:
             pass
-        return bool(self._expose_raw)
+        # No fallback: treat as False when entry/options are absent or unreadable
+        return False
 
     @property
     def available(self) -> bool:
@@ -569,6 +589,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """
     Setup entry. In this simplified/aggressive mode we read expose_raw only from entry.options.
     """
+    _LOGGER.debug("ocean_fishing_assistant async_setup_entry: entry_id=%s entry.options=%s", entry.entry_id, entry.options)
+
+    # register an options update listener so toggling options updates entities without a restart
+    try:
+        entry.add_update_listener(_async_options_updated)
+    except Exception:
+        _LOGGER.debug("ocean_fishing_assistant: failed to add update listener for entry %s", entry.entry_id)
+
     coordinator = hass.data[DOMAIN].get(entry.entry_id) if hass.data.get(DOMAIN) else None
     if coordinator is None:
         raise RuntimeError("Coordinator not found in hass.data for this config entry (strict)")
@@ -577,7 +605,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     if not sensor_name:
         raise RuntimeError("Missing required name in config entry data (strict)")
 
-    expose_raw = bool(entry.options.get("expose_raw", False)) if isinstance(entry.options, dict) else False
+    # Keep reading options here to pass into constructor for compatibility; the sensor itself does not
+    # fall back to this value — it reads live options only.
+    expose_raw = bool(entry.options.get("expose_raw", False)) if getattr(entry, "options", None) else False
 
     prefix = "ocean_fishing_assistant"
     final_name = sensor_name if sensor_name.startswith(prefix) else f"{prefix}_{sensor_name}"
