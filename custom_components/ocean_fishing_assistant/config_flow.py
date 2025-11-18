@@ -393,6 +393,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "min_swell_period": user_input.get("min_swell_period"),
                         # NEW: include precip chance in stored thresholds for options/UI
                         "max_precip_chance": user_input.get("max_precip_chance"),
+                        # RESTORE: expose_raw stored so initial setup choice is preserved
+                        "expose_raw": bool(user_input.get("expose_raw", False)),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -440,6 +442,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 60)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
+                    # RESTORE: expose_raw option at setup time
+                    vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(),
                     vol.Required("min_swell_period", default=10): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
@@ -514,6 +518,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 60)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
+                    # RESTORE: expose_raw option in Options flow
+                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
                     vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 10)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
                     ),
