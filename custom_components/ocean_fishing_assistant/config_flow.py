@@ -135,7 +135,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         for region in regions:
             region_id = region["id"]
             region_name = region.get("name", region_id)
-            species_options.append({"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"})
+            species_options.append(
+                {"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"}
+            )
 
         # SECTION: Specific species
         species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━"})
@@ -403,12 +405,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
 
-                _LOGGER.debug("Creating ocean config entry with data keys: %s", list(final_config.keys()))
-
-                # Persist expose_raw in entry.options so sensor can read it from entry.options
+                # persist expose_raw into entry.options so sensor can read it from entry.options
                 expose_raw_opt = bool(user_input.get("expose_raw", False))
+
+                _LOGGER.debug("Creating ocean config entry with data keys: %s", list(final_config.keys()))
                 return self.async_create_entry(
-                    title=final_config[CONF_NAME], data=final_config, options={"expose_raw": expose_raw_opt}
+                    title=final_config[CONF_NAME],
+                    data=final_config,
+                    options={"expose_raw": expose_raw_opt},
                 )
             except KeyError as ke:
                 _LOGGER.exception("Missing expected key when building final ocean config: %s", ke)
@@ -420,7 +424,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self._show_ocean_thresholds_form()
 
     def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
-        habitat = HABITAT_PRESETS.get(self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT), HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}))
+        habitat = HABITAT_PRESETS.get(
+            self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT),
+            HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}),
+        )
         units = self.ocean_config.get("units", "metric")
         # map display units for selector labels
         wind_unit_label = "km/h" if units == "metric" else "mph"
@@ -457,7 +464,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
                     ),
-                    # NEW: expose_raw option - controls whether raw per-timestamp/period payloads are exposed
+                    # Allow user to decide whether to expose raw forecasts/period_forecasts via options
                     vol.Required("expose_raw", default=False): selector.BooleanSelector(
                         selector.BooleanSelectorConfig()
                     ),
@@ -486,6 +493,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_ocean_options()
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Options for the integration (exposed in Integrations -> Options)."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
@@ -528,7 +536,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("min_visibility", default=thresholds.get("min_visibility", 5)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                     ),
-                    # expose_raw in options so users can toggle raw output after setup
+                    # expose_raw in options - default from stored options (if any)
                     vol.Required("expose_raw", default=self.config_entry.options.get("expose_raw", False)): selector.BooleanSelector(
                         selector.BooleanSelectorConfig()
                     ),
