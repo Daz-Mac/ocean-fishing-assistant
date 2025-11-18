@@ -1,3 +1,4 @@
+# custom_components/ocean_fishing_assistant/sensor.py
 """
 Simplified OFA sensor (aggressive mode).
 
@@ -17,7 +18,7 @@ Canonical assumptions (from DataFormatter / ocean_scoring):
     - "timestamp" (ISOZ), "index" (int), "score_100" (int or None), "components" (dict or None),
       "forecast_raw": { "formatted_weather": {...}, "score_calc": {...} }
 """
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 import logging
 
@@ -233,10 +234,16 @@ def _collect_safety_values(score_calc_raw: Optional[Dict[str, Any]], entry_units
 class OFASensor(CoordinatorEntity):
     """
     Simplified CoordinatorEntity for Ocean Fishing Assistant.
-    Reads `expose_raw` only from entry.options (no historical fallbacks).
+    Reads `expose_raw` from entry.options when available, otherwise uses the constructor value.
     """
 
-    def __init__(self, coordinator, name: str, expose_raw: bool = False):
+    def __init__(
+        self,
+        coordinator,
+        name: str,
+        expose_raw: bool = False,
+        entry: Optional[ConfigEntry] = None,
+    ):
         if not name:
             raise RuntimeError("Sensor name must be provided (strict simplified mode)")
 
@@ -247,7 +254,10 @@ class OFASensor(CoordinatorEntity):
             name = f"{prefix}_{name}"
 
         self._attr_name = name
+        # cached fallback value (used when no entry is available)
         self._expose_raw = bool(expose_raw)
+        # store the entry so we can read live options if present
+        self._entry: Optional[ConfigEntry] = entry
 
         # Unique id best-effort
         try:
@@ -255,6 +265,17 @@ class OFASensor(CoordinatorEntity):
             self._attr_unique_id = f"{prefix}_{getattr(coordinator, 'entry_id', 'noentry')}_{safe_name}"
         except Exception:
             self._attr_unique_id = None
+
+    def _is_raw_enabled(self) -> bool:
+        """
+        Prefer the live ConfigEntry option when available, otherwise fall back to the cached constructor value.
+        """
+        try:
+            if self._entry and isinstance(self._entry.options, dict):
+                return bool(self._entry.options.get("expose_raw", False))
+        except Exception:
+            pass
+        return bool(self._expose_raw)
 
     @property
     def available(self) -> bool:
@@ -334,9 +355,9 @@ class OFASensor(CoordinatorEntity):
         score_calc = (current.get("forecast_raw") or {}).get("score_calc") or {}
         score_calc_raw = score_calc.get("raw") if isinstance(score_calc, dict) else None
 
-        # Sanitize current forecast: remove heavy raw blocks unless expose_raw True
+        # Sanitize current forecast: remove heavy raw blocks unless raw is enabled
         current_copy = dict(current)
-        if not self._expose_raw:
+        if not self._is_raw_enabled():
             current_copy.pop("forecast_raw", None)
             # hide index and score_10 when raw is disabled
             current_copy.pop("index", None)
@@ -395,8 +416,8 @@ class OFASensor(CoordinatorEntity):
                 # sanitized period summary (remove heavy arrays)
                 sanitized = dict(pdata)
                 sanitized.pop("indices", None)
-                # hide top-level score_10 when raw not exposed
-                if not self._expose_raw:
+                # hide top-level score_10 when raw not enabled
+                if not self._is_raw_enabled():
                     sanitized.pop("score_10", None)
                 # Remove nested profile_used (we keep top-level profile_used only)
                 sanitized.pop("profile_used", None)
@@ -444,7 +465,6 @@ class OFASensor(CoordinatorEntity):
 
                 # augment components similarly (period-level components are aggregated; provide aggregated raw)
                 comps = sanitized.get("components")
-                # map raw_agg keys to the names _augment expects (it just reads raw.get("wind"), raw.get("tide"), ...)
                 sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units)
 
                 # add safety_values from period-level keys if present (pressure, wind_gust, precipitation_probability)
