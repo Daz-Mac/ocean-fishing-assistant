@@ -135,9 +135,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         for region in regions:
             region_id = region["id"]
             region_name = region.get("name", region_id)
-            species_options.append(
-                {"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"}
-            )
+            species_options.append({"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"})
 
         # SECTION: Specific species
         species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━"})
@@ -405,15 +403,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
 
-                # persist expose_raw into entry.options so sensor can read it from entry.options
-                expose_raw_opt = bool(user_input.get("expose_raw", False))
-
                 _LOGGER.debug("Creating ocean config entry with data keys: %s", list(final_config.keys()))
-                return self.async_create_entry(
-                    title=final_config[CONF_NAME],
-                    data=final_config,
-                    options={"expose_raw": expose_raw_opt},
-                )
+                return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
             except KeyError as ke:
                 _LOGGER.exception("Missing expected key when building final ocean config: %s", ke)
                 return self._show_ocean_thresholds_form(errors={"base": "unknown"})
@@ -424,10 +415,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self._show_ocean_thresholds_form()
 
     def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
-        habitat = HABITAT_PRESETS.get(
-            self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT),
-            HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}),
-        )
+        habitat = HABITAT_PRESETS.get(self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT), HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}))
         units = self.ocean_config.get("units", "metric")
         # map display units for selector labels
         wind_unit_label = "km/h" if units == "metric" else "mph"
@@ -464,10 +452,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
                     ),
-                    # Allow user to decide whether to expose raw forecasts/period_forecasts via options
-                    vol.Required("expose_raw", default=False): selector.BooleanSelector(
-                        selector.BooleanSelectorConfig()
-                    ),
                 }
             ),
             errors=errors or {},
@@ -485,7 +469,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Ocean Fishing Assistant."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        # Do NOT assign to `self.config_entry` (deprecated). Use a private attribute instead.
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
@@ -493,13 +478,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_ocean_options()
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Options for the integration (exposed in Integrations -> Options)."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        thresholds = self.config_entry.data.get(CONF_THRESHOLDS, {})
+        thresholds = self._config_entry.data.get(CONF_THRESHOLDS, {})
         # show units-driven labels based on stored units in config_entry.data
-        units = self.config_entry.data.get("units", "metric")
+        units = self._config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
@@ -508,7 +492,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TIME_PERIODS, default=self.config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
@@ -535,10 +519,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Required("min_visibility", default=thresholds.get("min_visibility", 5)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label, mode="slider")
-                    ),
-                    # expose_raw in options - default from stored options (if any)
-                    vol.Required("expose_raw", default=self.config_entry.options.get("expose_raw", False)): selector.BooleanSelector(
-                        selector.BooleanSelectorConfig()
                     ),
                 }
             ),
