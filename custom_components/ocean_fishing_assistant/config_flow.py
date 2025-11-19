@@ -1,4 +1,4 @@
-"""Config flow for Ocean Fishing Assistant (strict, ocean-only)."""
+"""Config flow for Ocean Fishing Assistant"""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Ocean Fishing Assistant (ocean-only)."""
+    """Handle a config flow for Ocean Fishing Assistant."""
 
     VERSION = 1
 
@@ -436,26 +436,27 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
                     # NEW: maximum precipitation chance (percentage)
-                    vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 60)): selector.NumberSelector(
+                    vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 80)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
-                    # RESTORE: expose_raw option at setup time
-                    vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(),
-                    vol.Required("min_swell_period", default=10): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
+                    vol.Required("min_swell_period", default=3): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                     ),
-                    vol.Required("min_visibility", default=5): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label)
+                    vol.Required("min_visibility", default=1): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label)
                     ),
                     vol.Required("min_temperature", default=5): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-30, max=50, step=1, unit_of_measurement=temp_unit_label)
                     ),
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=-10, max=60, step=1, unit_of_measurement=temp_unit_label)
+                        selector.NumberSelectorConfig(min=-10, max=122, step=1, unit_of_measurement=temp_unit_label)
                     ),
+                    # RESTORE: expose_raw option at setup time
+                    vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(
+                    ),                    
                 }
             ),
             errors=errors or {},
@@ -512,20 +513,21 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
                     vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=5.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
                     # NEW: options flow exposure for precipitation chance
-                    vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 60)): selector.NumberSelector(
+                    vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 80)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
+                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 3)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
+                    ),
+                    vol.Required("min_visibility", default=thresholds.get("min_visibility", 1)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
+                    ),
                     # RESTORE: expose_raw option in Options flow
-                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
-                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 10)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="s")
-                    ),
-                    vol.Required("min_visibility", default=thresholds.get("min_visibility", 5)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=200, step=1, unit_of_measurement=vis_unit_label, mode="slider")
-                    ),
+                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(
+                    ),                    
                 }
             ),
         )

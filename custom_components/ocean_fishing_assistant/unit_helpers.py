@@ -184,8 +184,8 @@ _SAFETY_SCHEMA = {
     "max_wave_height_m": ("m", 0.0, 30.0, DEFAULT_SAFETY_LIMITS.get("max_wave_height_m", 2.5), False),
     "max_wind_m_s": ("m/s", 0.0, 60.0, DEFAULT_SAFETY_LIMITS.get("max_wind_m_s", 15.0), False),
     "max_gust_m_s": ("m/s", 0.0, 80.0, DEFAULT_SAFETY_LIMITS.get("max_gust_m_s", None), True),
-    "min_visibility_km": ("km", 0.0, 200.0, DEFAULT_SAFETY_LIMITS.get("min_visibility_km", None), True),
-    "min_swell_period_s": ("s", 0.0, 120.0, DEFAULT_SAFETY_LIMITS.get("min_swell_period_s", None), True),
+    "min_visibility_km": ("km", 0.0, 50.0, DEFAULT_SAFETY_LIMITS.get("min_visibility_km", None), True),
+    "min_swell_period_s": ("s", 0.0, 30.0, DEFAULT_SAFETY_LIMITS.get("min_swell_period_s", None), True),
     "max_precip_chance_pct": ("%", 0.0, 100.0, DEFAULT_SAFETY_LIMITS.get("max_precip_chance_pct", None), True),
 }
 
