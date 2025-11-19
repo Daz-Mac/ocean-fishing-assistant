@@ -203,7 +203,7 @@ class TideProxy:
 
         # Attempt to find moon transit; tolerate failure and continue with fallback anchor
         try:
-            moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now)
+            moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now.astimezone(timezone.utc))
         except Exception:
             _LOGGER.debug("Failed to find next moon transit; continuing with fallback anchor", exc_info=True)
             moon_transit_dt = None
@@ -422,7 +422,9 @@ class TideProxy:
         Returns timezone-aware UTC datetime or None on failure.
         """
         try:
-            # define search window
+            # Ensure start_dt is in UTC so components passed to sf_ts.utc are correct
+            start_dt = start_dt.astimezone(timezone.utc)
+            # define search window (UTC-aware)
             t0 = sf_ts.utc(start_dt.year, start_dt.month, start_dt.day, start_dt.hour, start_dt.minute, start_dt.second)
             end_dt = start_dt + timedelta(days=_ALMANAC_SEARCH_DAYS)
             t1 = sf_ts.utc(end_dt.year, end_dt.month, end_dt.day, end_dt.hour, end_dt.minute, end_dt.second)
