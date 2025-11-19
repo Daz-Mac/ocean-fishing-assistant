@@ -146,7 +146,7 @@ class TideProxy:
         Compute tide data for the given ISO timestamps (expects UTC with trailing Z).
         Uses Skyfield for moon transits, phase and altitude. Returns a normalized dict.
         """
-        now = dt_util.now()
+        now = dt_util.now().astimezone(timezone.utc)
 
         if self._last_calc and self._cache and (now - self._last_calc).total_seconds() < self._ttl:
             cached = self._cache
@@ -203,7 +203,7 @@ class TideProxy:
 
         # Attempt to find moon transit; tolerate failure and continue with fallback anchor
         try:
-            moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now.astimezone(timezone.utc))
+            moon_transit_dt = await self._async_find_next_moon_transit(sf_eph, sf_ts, sf_almanac, sf_wgs, now)
         except Exception:
             _LOGGER.debug("Failed to find next moon transit; continuing with fallback anchor", exc_info=True)
             moon_transit_dt = None
@@ -729,9 +729,12 @@ def _compute_tide_strength(phase: Optional[float]) -> float:
         return 0.5
 
 
-def _predict_next_high_low(anchor_dt: datetime) -> Tuple[Optional[datetime], Optional[datetime]]:
+def _predict_next_high_low(anchor_dt: datetime, now: Optional[datetime] = None) -> Tuple[Optional[datetime], Optional[datetime]]:
     try:
-        now = dt_util.now()
+        if now is None:
+            now = dt_util.now().astimezone(timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
         half_cycle = _TIDE_HALF_DAY_HOURS
         anchor_epoch = anchor_dt.timestamp()
         hours_since_anchor = (now.timestamp() - anchor_epoch) / 3600.0
