@@ -18,6 +18,7 @@ except Exception:
 # dependency surfaces quickly during integration setup.
 from skyfield.api import Loader, wgs84  # type: ignore
 from skyfield import almanac as _almanac  # type: ignore
+from skyfield.framelib import ecliptic_frame  # use modern frames API instead of deprecated helpers
 import skyfield  # for version reporting
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,17 +103,35 @@ class TideProxy:
                     sf_wgs = wgs84
                     sf_almanac = _almanac
                     version = getattr(skyfield, "__version__", "unknown")
-                    return sf_ts, sf_eph, sf_wgs, sf_almanac, version
+                    version_tuple = getattr(skyfield, "VERSION", None)
+                    return sf_ts, sf_eph, sf_wgs, sf_almanac, version, version_tuple
                 except Exception:
                     _LOGGER.exception("Blocking Skyfield load failed")
                     raise
 
             try:
-                sf_ts, sf_eph, sf_wgs, sf_almanac, version = await self.hass.async_add_executor_job(_blocking_load)
+                sf_ts, sf_eph, sf_wgs, sf_almanac, version, version_tuple = await self.hass.async_add_executor_job(
+                    _blocking_load
+                )
                 self._sf_ts = sf_ts
                 self._sf_eph = sf_eph
                 self._sf_wgs = sf_wgs
                 self._sf_almanac = sf_almanac
+
+                # Log and optionally warn about older Skyfield versions that may lack fixes.
+                if version_tuple and isinstance(version_tuple, tuple):
+                    try:
+                        if version_tuple < (1, 48):
+                            _LOGGER.warning(
+                                "Ocean Fishing Assistant: Skyfield %s detected (tuple %s). "
+                                "Consider upgrading to >=1.48 for improved accuracy and fixes.",
+                                version,
+                                version_tuple,
+                            )
+                    except Exception:
+                        # non-fatal if comparison fails for any reason
+                        pass
+
                 _LOGGER.info(
                     "Ocean Fishing Assistant: Skyfield %s loaded — using data directory: %s",
                     version,
@@ -191,7 +210,8 @@ class TideProxy:
 
         # Prepare reusable Skyfield locals and Time objects for all timestamps
         try:
-            times_list = [sf_ts.utc(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second) for dt in dt_objs]
+            # Use from_datetime which is robust across versions and clearer when we already have datetimes
+            times_list = [sf_ts.from_datetime(dt) for dt in dt_objs]
         except Exception:
             # if we cannot build Time objects, fail loudly (strict)
             _LOGGER.exception("Failed to construct Skyfield Time objects for timestamps")
@@ -224,11 +244,11 @@ class TideProxy:
         moon_phases: List[Optional[float]] = []
         try:
             for t in times_list:
-                # compute apparent positions and convert to ecliptic longitudes
+                # compute apparent positions and convert to ecliptic longitudes using modern frame API
                 sun_apparent = earth.at(t).observe(sun_obj).apparent()
                 moon_apparent = earth.at(t).observe(moon_obj).apparent()
-                sun_ecl = sun_apparent.ecliptic_latlon()
-                moon_ecl = moon_apparent.ecliptic_latlon()
+                sun_ecl = sun_apparent.frame_latlon(ecliptic_frame)
+                moon_ecl = moon_apparent.frame_latlon(ecliptic_frame)
                 lon_sun = float(sun_ecl[1].degrees)
                 lon_moon = float(moon_ecl[1].degrees)
                 diff = (lon_moon - lon_sun) % 360.0
@@ -244,14 +264,14 @@ class TideProxy:
         try:
             if moon_transit_dt is not None:
                 # compute phase at the transit time separately (anchor)
-                t_anchor = sf_ts.utc(moon_transit_dt.year, moon_transit_dt.month, moon_transit_dt.day, moon_transit_dt.hour, moon_transit_dt.minute, moon_transit_dt.second)
+                t_anchor = sf_ts.from_datetime(moon_transit_dt)
                 sun_app = earth.at(t_anchor).observe(sun_obj).apparent()
                 moon_app = earth.at(t_anchor).observe(moon_obj).apparent()
-                sun_ecl = sun_app.ecliptic_latlon()
-                moon_ecl = moon_app.ecliptic_latlon()
+                sun_ecl = sun_app.frame_latlon(ecliptic_frame)
+                moon_ecl = moon_app.frame_latlon(ecliptic_frame)
                 lon_sun = float(sun_ecl[1].degrees)
                 lon_moon = float(moon_ecl[1].degrees)
-                moon_phase_scalar = ( (lon_moon - lon_sun) % 360.0 ) / 360.0
+                moon_phase_scalar = (((lon_moon - lon_sun) % 360.0) / 360.0)
             else:
                 # fallback to first timestamp's computed phase
                 moon_phase_scalar = moon_phases[0] if moon_phases else None
