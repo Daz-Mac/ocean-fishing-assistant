@@ -104,6 +104,58 @@ def c_to_f(v: Any) -> Optional[float]:
         return None
     return (f * 9.0 / 5.0) + 32.0
 
+# ---- Convenience display helpers (canonical -> display value + unit) ----
+
+def wind_m_s_to_display(v_m_s: Optional[float], units: str) -> Tuple[Optional[float], Optional[str]]:
+    """Convert canonical wind m/s to display value + unit.
+
+    Returns (value, unit) where value is numeric or None and unit is a string like "km/h" or "mph".
+    """
+    if v_m_s is None:
+        return None, None
+    if units == "metric":
+        return m_s_to_kmh(v_m_s), "km/h"
+    if units == "imperial":
+        return m_s_to_mph(v_m_s), "mph"
+    return v_m_s, "m/s"
+
+
+def length_m_to_display(v_m: Optional[float], units: str) -> Tuple[Optional[float], Optional[str]]:
+    """Convert meters to display length (m or ft)."""
+    if v_m is None:
+        return None, None
+    if units == "imperial":
+        return m_to_ft(v_m), "ft"
+    return v_m, "m"
+
+
+def temp_c_to_display(temp_c: Optional[float], units: str) -> Tuple[Optional[float], Optional[str]]:
+    """Convert Celsius to display temperature and unit."""
+    if temp_c is None:
+        return None, None
+    if units == "imperial":
+        return c_to_f(temp_c), "\u00b0F"
+    return temp_c, "\u00b0C"
+
+
+def pressure_hpa_to_display(hpa: Optional[float], units: str) -> Tuple[Optional[float], Optional[str]]:
+    """Convert hPa to display pressure and unit."""
+    if hpa is None:
+        return None, None
+    if units == "imperial":
+        return (hpa / 33.8638866667), "inHg"
+    return hpa, "hPa"
+
+
+def visibility_km_to_display(km: Optional[float], units: str) -> Tuple[Optional[float], Optional[str]]:
+    """Convert kilometers to display visibility (km or miles)."""
+    if km is None:
+        return None, None
+    if units == "imperial":
+        return (km / 1.609344), "miles"
+    return km, "km"
+
+
 
 # ---- High-level helpers for safety limits conversion ----
 

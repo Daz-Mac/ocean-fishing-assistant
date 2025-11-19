@@ -72,15 +72,14 @@ def _round_opt(v: Optional[float], ndigits: int = 3) -> Optional[float]:
 
 
 def _m_s_to_display(w_m_s: Optional[float], entry_units: str) -> Tuple[Optional[float], Optional[str]]:
-    """Convert canonical m/s wind value to display units (km/h for metric, mph for imperial)."""
+    """Convert canonical m/s wind value to display units using unit_helpers."""
     if w_m_s is None:
         return None, None
     try:
-        if entry_units == "metric":
-            return _round_opt(unit_helpers.m_s_to_kmh(w_m_s), 2), "km/h"
-        if entry_units == "imperial":
-            return _round_opt(unit_helpers.m_s_to_mph(w_m_s), 2), "mph"
-        return _round_opt(w_m_s, 2), "m/s"
+        val, unit = unit_helpers.wind_m_s_to_display(w_m_s, entry_units)
+        if val is None:
+            return None, None
+        return _round_opt(val, 2), unit
     except Exception:
         return None, None
 
@@ -134,15 +133,15 @@ def _augment_components_with_values_simple(
     entry_units: str,
 ) -> Optional[Dict[str, Any]]:
     """
-    Simplified augmentation:
+    Simplified augmentation (display-only output):
       - Remove per-component 'score_10'
-      - Inject the canonical numeric value used by scoring when available:
+      - Inject the numeric display value used by scoring when available:
          wind -> wind_speed (display units) + wind_unit
-         tide -> tide_height_m
-         waves -> wave_height_m
-         pressure -> pressure_delta_hpa
+         tide -> tide_height + tide_unit
+         waves -> wave_height + wave_unit
+         pressure -> pressure_delta + pressure_unit
          moon -> moon_phase (numeric) and moon_phase_name
-         temperature -> temperature_c
+         temperature -> temperature + temperature_unit
     Expects `score_calc_raw` to be the canonical scoring raw dict (ocean_scoring.compute_score -> 'raw'),
     or an aggregated dict prepared by the caller for period summaries.
     """
@@ -151,8 +150,6 @@ def _augment_components_with_values_simple(
     if not isinstance(components, dict):
         return components
 
-    # Defensive: deep-copy the incoming components to avoid in-place mutation that can
-    # flatten or corrupt the structure when callers reuse the original dict.
     comps_copy = copy.deepcopy(components)
 
     out: Dict[str, Any] = {}
@@ -160,32 +157,37 @@ def _augment_components_with_values_simple(
         if not isinstance(cobj, dict):
             out[cname] = cobj
             continue
-        # deep-copy each component object before mutating
         cc = copy.deepcopy(cobj)
         cc.pop("score_10", None)
-        # pull numeric values from score_calc_raw.raw when present (canonical names)
         try:
             raw = score_calc_raw or {}
             if cname == "wind":
                 if raw.get("wind") is not None:
-                    # convert m/s to display unit and provide unit label
-                    val, unit = _m_s_to_display(raw.get("wind"), entry_units)
-                    cc["wind_speed"] = val
+                    val, unit = unit_helpers.wind_m_s_to_display(raw.get("wind"), entry_units)
+                    cc["wind_speed"] = _round_opt(val, 2) if val is not None else None
                     if unit:
                         cc["wind_unit"] = unit
             elif cname == "tide":
                 if raw.get("tide") is not None:
-                    cc["tide_height_m"] = _round_opt(raw.get("tide"), 3)
+                    val, unit = unit_helpers.length_m_to_display(raw.get("tide"), entry_units)
+                    cc["tide_height"] = _round_opt(val, 3) if val is not None else None
+                    if unit:
+                        cc["tide_unit"] = unit
             elif cname == "waves":
                 if raw.get("wave") is not None:
-                    cc["wave_height_m"] = _round_opt(raw.get("wave"), 3)
+                    val, unit = unit_helpers.length_m_to_display(raw.get("wave"), entry_units)
+                    cc["wave_height"] = _round_opt(val, 3) if val is not None else None
+                    if unit:
+                        cc["wave_unit"] = unit
             elif cname == "pressure":
                 if raw.get("pressure_delta") is not None:
-                    cc["pressure_delta_hpa"] = _round_opt(raw.get("pressure_delta"), 2)
+                    val, unit = unit_helpers.pressure_hpa_to_display(raw.get("pressure_delta"), entry_units)
+                    cc["pressure_delta"] = _round_opt(val, 3) if val is not None else None
+                    if unit:
+                        cc["pressure_unit"] = unit
             elif cname == "moon":
                 if raw.get("moon_phase") is not None:
                     mp = raw.get("moon_phase")
-                    # normalize via tide_proxy to be consistent
                     try:
                         mpn = tide_proxy._coerce_phase(mp)
                     except Exception:
@@ -196,35 +198,36 @@ def _augment_components_with_values_simple(
                         cc["moon_phase_name"] = mname
             elif cname == "temperature":
                 if raw.get("temperature") is not None:
-                    cc["temperature_c"] = _round_opt(raw.get("temperature"), 1)
+                    temp_c = raw.get("temperature")
+                    val, unit = unit_helpers.temp_c_to_display(temp_c, entry_units)
+                    cc["temperature"] = _round_opt(val, 1) if val is not None else None
+                    if unit:
+                        cc["temperature_unit"] = unit
         except Exception:
-            # intentionally let missing pieces be absent rather than adding fallbacks
             pass
         out[cname] = cc
     return out
 
 
 def _collect_safety_values(score_calc_raw: Optional[Dict[str, Any]], entry_units: str) -> Dict[str, Any]:
-    """Collect minimal safety-related values from canonical score_calc.raw."""
+    """Collect minimal safety-related values from canonical score_calc.raw (display-only)."""
     out: Dict[str, Any] = {}
     if not score_calc_raw or not isinstance(score_calc_raw, dict):
         return out
     raw = score_calc_raw
     try:
         if raw.get("wind_gust") is not None:
-            # score_calc.raw.wind_gust is canonical m/s
             val = raw.get("wind_gust")
-            if entry_units == "metric":
-                out["wind_gust"] = _round_opt(unit_helpers.m_s_to_kmh(val), 2)
-                out["wind_gust_unit"] = "km/h"
-            elif entry_units == "imperial":
-                out["wind_gust"] = _round_opt(unit_helpers.m_s_to_mph(val), 2)
-                out["wind_gust_unit"] = "mph"
-            else:
-                out["wind_gust"] = _round_opt(val, 2)
-                out["wind_gust_unit"] = "m/s"
+            w_val, w_unit = unit_helpers.wind_m_s_to_display(val, entry_units)
+            if w_val is not None:
+                out["wind_gust"] = _round_opt(w_val, 2)
+                out["wind_gust_unit"] = w_unit
         if raw.get("visibility_km") is not None:
-            out["visibility_km"] = _round_opt(raw.get("visibility_km"), 2)
+            vis_km = raw.get("visibility_km")
+            v_val, v_unit = unit_helpers.visibility_km_to_display(vis_km, entry_units)
+            if v_val is not None:
+                out["visibility"] = _round_opt(v_val, 2)
+                out["visibility_unit"] = v_unit
         if raw.get("swell_period_s") is not None:
             out["swell_period_s"] = _round_opt(raw.get("swell_period_s"), 1)
         if raw.get("precipitation_probability") is not None:
@@ -585,11 +588,15 @@ class OFASensor(CoordinatorEntity):
 
         # Top-level current metrics (use formatted_weather produced by scoring)
         formatted = (current.get("forecast_raw") or {}).get("formatted_weather") or {}
-        # Temperature (°C)
-        if formatted.get("temperature") is not None:
-            attrs["current_temperature"] = _round_opt(formatted.get("temperature"), 1)
+        # Temperature (display according to units)
+        temp_c = formatted.get("temperature")
+        if temp_c is not None:
+            t_val, t_unit = unit_helpers.temp_c_to_display(temp_c, entry_units)
+            attrs["current_temperature"] = _round_opt(t_val, 1) if t_val is not None else None
+            attrs["current_temperature_unit"] = t_unit
         else:
             attrs["current_temperature"] = None
+            attrs["current_temperature_unit"] = None
 
         # Wind (convert canonical m/s to display)
         # ocean_scoring's formatted_weather.wind is canonical m/s
@@ -604,11 +611,25 @@ class OFASensor(CoordinatorEntity):
         attrs["current_wind_gust"] = g_val
         attrs["current_wind_gust_unit"] = g_unit
 
-        # Pressure (hPa)
-        attrs["current_pressure_hpa"] = _round_opt(formatted.get("pressure_hpa"), 1) if formatted.get("pressure_hpa") is not None else None
+        # Pressure (display according to units)
+        p_hpa = formatted.get("pressure_hpa")
+        if p_hpa is not None:
+            p_val, p_unit = unit_helpers.pressure_hpa_to_display(p_hpa, entry_units)
+            attrs["current_pressure"] = _round_opt(p_val, 3) if p_val is not None else None
+            attrs["current_pressure_unit"] = p_unit
+        else:
+            attrs["current_pressure"] = None
+            attrs["current_pressure_unit"] = None
 
-        # Waves / swell (canonical units: meter / seconds)
-        attrs["current_wave_height_m"] = _round_opt(formatted.get("wave_height_m"), 3) if formatted.get("wave_height_m") is not None else None
+        # Waves / swell (display according to units)
+        wave_m = formatted.get("wave_height_m")
+        if wave_m is not None:
+            wave_val, wave_unit = unit_helpers.length_m_to_display(wave_m, entry_units)
+            attrs["current_wave_height"] = _round_opt(wave_val, 3) if wave_val is not None else None
+            attrs["current_wave_unit"] = wave_unit
+        else:
+            attrs["current_wave_height"] = None
+            attrs["current_wave_unit"] = None
         attrs["current_wave_period_s"] = _round_opt(formatted.get("wave_period_s"), 2) if formatted.get("wave_period_s") is not None else None
         attrs["current_swell_period_s"] = _round_opt(formatted.get("swell_period_s"), 1) if formatted.get("swell_period_s") is not None else None
 
