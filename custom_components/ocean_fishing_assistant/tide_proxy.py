@@ -261,6 +261,8 @@ class TideProxy:
 
         tide_strength = _compute_tide_strength(moon_phase_scalar)
 
+        _LOGGER.debug("Moon phase scalar=%s tide_strength=%s", moon_phase_scalar, tide_strength)
+
         # Anchor: use precise moon_transit_dt if found, otherwise first timestamp or now
         anchor_dt = moon_transit_dt or (dt_objs[0] if dt_objs else now)
         anchor_epoch = anchor_dt.timestamp() if anchor_dt else now.timestamp()
@@ -269,13 +271,23 @@ class TideProxy:
         amp = base_amp * (0.5 + 0.5 * tide_strength)
 
         period_seconds = _TIDE_HALF_DAY_HOURS * _SECONDS_PER_HOUR
-        # phase shift from longitude (seconds)
-        lon_shift = (self.longitude / 360.0) * period_seconds
+
+        # If we have a Skyfield-derived moon_transit_dt (topocentric), it already accounts for longitude.
+        # Only apply a longitude adjustment when we are using a fallback anchor (e.g., first timestamp).
+        if moon_transit_dt is None:
+            # approximate longitude phase offset for fallback anchor
+            lon_shift = (self.longitude / 360.0) * period_seconds
+            # convert anchor to an approximate anchor for local longitude by subtracting lon_shift
+            t_anchor = anchor_epoch - lon_shift
+            _LOGGER.debug("No moon_transit found — applying lon_shift=%s seconds to fallback anchor", lon_shift)
+        else:
+            t_anchor = anchor_epoch
+            _LOGGER.debug("Using skyfield moon_transit_dt as anchor (no lon_shift applied) anchor_dt=%s", anchor_dt.isoformat().replace("+00:00", "Z"))
 
         tide_heights: List[Optional[float]] = []
         for dt in dt_objs:
             sec = dt.timestamp()
-            x = 2.0 * math.pi * ((sec - anchor_epoch + lon_shift) / period_seconds)
+            x = 2.0 * math.pi * ((sec - t_anchor) / period_seconds)
             try:
                 value = amp * math.sin(x)
                 tide_heights.append(round(float(value), 3))
@@ -286,22 +298,21 @@ class TideProxy:
         try:
             now_epoch = now.timestamp()
             quarter = period_seconds * 0.25
-            base = anchor_epoch - lon_shift + quarter
-            n = math.ceil((now_epoch - base) / period_seconds)
-            next_high_epoch = base + n * period_seconds
+            # find smallest integer n such that t_anchor + quarter + n*period_seconds > now
+            n = math.ceil((now_epoch - (t_anchor + quarter)) / period_seconds)
+            next_high_epoch = t_anchor + quarter + n * period_seconds
             next_low_epoch = next_high_epoch + (period_seconds / 2.0)
             next_high_dt = datetime.fromtimestamp(next_high_epoch, tz=timezone.utc)
             next_low_dt = datetime.fromtimestamp(next_low_epoch, tz=timezone.utc)
             # compute heights for analytic next high/low using same model
-            xh = 2.0 * math.pi * ((next_high_epoch - anchor_epoch + lon_shift) / period_seconds)
-            xl = 2.0 * math.pi * ((next_low_epoch - anchor_epoch + lon_shift) / period_seconds)
+            xh = 2.0 * math.pi * ((next_high_epoch - t_anchor) / period_seconds)
+            xl = 2.0 * math.pi * ((next_low_epoch - t_anchor) / period_seconds)
             next_high_height = round(float(amp * math.sin(xh)), 3)
             next_low_height = round(float(amp * math.sin(xl)), 3)
         except Exception:
             _LOGGER.exception("Error computing analytic next high/low")
             next_high_dt, next_low_dt = None, None
             next_high_height, next_low_height = None, None
-
 
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
@@ -627,7 +638,8 @@ def _compute_tide_strength(phase: Optional[float]) -> float:
             return 0.5
         p = float(phase)
         p = max(0.0, min(1.0, p))
-        dist_new = abs(p - 0.0)
+        # circular distance to new moon: account for wrap-around at 1.0/0.0
+        dist_new = min(abs(p - 0.0), abs(1.0 - p))
         dist_full = abs(p - 0.5)
         dist = min(dist_new, dist_full)
         val = max(0.0, 1.0 - (dist / 0.25))
