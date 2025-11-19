@@ -314,23 +314,82 @@ class TideProxy:
             except Exception:
                 tide_heights.append(None)
 
-        # Analytic next high/low consistent with the sine model used above.
+        # Analytic next high/low consistent with the sine model used above, then refine by local sampling.
         try:
             now_epoch = now.timestamp()
             quarter = period_seconds * 0.25
             # find smallest integer n such that t_anchor + quarter + n*period_seconds > now
             n = math.ceil((now_epoch - (t_anchor + quarter)) / period_seconds)
-            next_high_epoch = t_anchor + quarter + n * period_seconds
-            next_low_epoch = next_high_epoch + (period_seconds / 2.0)
+            analytic_next_high = t_anchor + quarter + n * period_seconds
+            analytic_next_low = analytic_next_high + (period_seconds / 2.0)
+
+            # Local refinement: sample the sine-model at fine resolution around the analytic guess
+            def _refine_peak(center_epoch, search_hours=3.0, step_seconds=60):
+                start = center_epoch - (search_hours * 3600.0)
+                end = center_epoch + (search_hours * 3600.0)
+                best_epoch = None
+                best_val = None
+                if step_seconds < 1:
+                    step_seconds = 1
+                steps = int(max(1, (end - start) / float(step_seconds)))
+                t = start
+                for i in range(steps + 1):
+                    x = 2.0 * math.pi * ((t - t_anchor) / period_seconds)
+                    try:
+                        val = amp * math.sin(x)
+                    except Exception:
+                        val = None
+                    if val is not None:
+                        if best_val is None or val > best_val:
+                            best_val = val
+                            best_epoch = t
+                    t += step_seconds
+                return best_epoch, best_val
+
+            def _refine_low(center_epoch, search_hours=3.0, step_seconds=60):
+                # find minimum (lowest tide) in the window
+                start = center_epoch - (search_hours * 3600.0)
+                end = center_epoch + (search_hours * 3600.0)
+                best_epoch = None
+                best_val = None
+                if step_seconds < 1:
+                    step_seconds = 1
+                steps = int(max(1, (end - start) / float(step_seconds)))
+                t = start
+                for i in range(steps + 1):
+                    x = 2.0 * math.pi * ((t - t_anchor) / period_seconds)
+                    try:
+                        val = amp * math.sin(x)
+                    except Exception:
+                        val = None
+                    if val is not None:
+                        if best_val is None or val < best_val:
+                            best_val = val
+                            best_epoch = t
+                    t += step_seconds
+                return best_epoch, best_val
+
+            # refine high
+            rh_epoch, rh_val = _refine_peak(analytic_next_high, search_hours=3.0, step_seconds=60)
+            if rh_epoch is None:
+                next_high_epoch = analytic_next_high
+                next_high_height = round(float(amp * math.sin(2.0 * math.pi * ((next_high_epoch - t_anchor) / period_seconds))), 3)
+            else:
+                next_high_epoch = rh_epoch
+                next_high_height = round(float(rh_val), 3)
             next_high_dt = datetime.fromtimestamp(next_high_epoch, tz=timezone.utc)
+
+            # refine low
+            rl_epoch, rl_val = _refine_low(analytic_next_low, search_hours=3.0, step_seconds=60)
+            if rl_epoch is None:
+                next_low_epoch = analytic_next_low
+                next_low_height = round(float(amp * math.sin(2.0 * math.pi * ((next_low_epoch - t_anchor) / period_seconds))), 3)
+            else:
+                next_low_epoch = rl_epoch
+                next_low_height = round(float(rl_val), 3)
             next_low_dt = datetime.fromtimestamp(next_low_epoch, tz=timezone.utc)
-            # compute heights for analytic next high/low using same model
-            xh = 2.0 * math.pi * ((next_high_epoch - t_anchor) / period_seconds)
-            xl = 2.0 * math.pi * ((next_low_epoch - t_anchor) / period_seconds)
-            next_high_height = round(float(amp * math.sin(xh)), 3)
-            next_low_height = round(float(amp * math.sin(xl)), 3)
         except Exception:
-            _LOGGER.exception("Error computing analytic next high/low")
+            _LOGGER.exception("Error computing refined next high/low")
             next_high_dt, next_low_dt = None, None
             next_high_height, next_low_height = None, None
 
