@@ -388,6 +388,8 @@ class OFASensor(CoordinatorEntity):
             # hide index and score_10 when raw is disabled
             current_copy.pop("index", None)
             current_copy.pop("score_10", None)
+            # hide nested profile_used when raw disabled so profile appears only once at top-level
+            current_copy.pop("profile_used", None)
 
         # augment components: remove per-component score_10 and inject numeric values from score_calc_raw when present
         comps = current_copy.get("components")
