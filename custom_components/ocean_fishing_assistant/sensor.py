@@ -335,7 +335,7 @@ class OFASensor(CoordinatorEntity):
         # choose the first future entry (timestamp >= floored)
         for entry in forecasts:
             dt = _parse_dt_isoz(entry.get("timestamp"))
-            if dt and dt >= flored:
+            if dt and dt >= floored:
                 return entry
 
         # fallback to first (strict list should be ordered)
@@ -519,7 +519,24 @@ class OFASensor(CoordinatorEntity):
 
         # expose per_timestamp_forecasts and period_forecasts only when explicitly requested
         if self._is_raw_enabled():
-            attrs["per_timestamp_forecasts"] = data.get("per_timestamp_forecasts")
+            # Sanitize per-timestamp raw list to avoid repeated/duplicated profile_used and safety blocks
+            raw_per_ts = data.get("per_timestamp_forecasts")
+            if isinstance(raw_per_ts, list):
+                sanitized_list = []
+                for entry in raw_per_ts:
+                    try:
+                        e_copy = copy.deepcopy(entry)
+                        # Remove per-entry profile_used and safety to ensure single top-level source.
+                        e_copy.pop("profile_used", None)
+                        e_copy.pop("safety", None)
+                        sanitized_list.append(e_copy)
+                    except Exception:
+                        # If deep-copy fails for any entry, fall back to original
+                        sanitized_list.append(entry)
+                attrs["per_timestamp_forecasts"] = sanitized_list
+            else:
+                attrs["per_timestamp_forecasts"] = raw_per_ts
+
             attrs["period_forecasts"] = period_forecasts
             attrs["raw_payload"] = data.get("raw_payload") or data
         attrs["raw_output_enabled"] = bool(self._is_raw_enabled())
