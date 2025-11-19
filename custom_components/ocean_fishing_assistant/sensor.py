@@ -21,6 +21,7 @@ Canonical assumptions (from DataFormatter / ocean_scoring):
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 import logging
+import copy
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -150,12 +151,17 @@ def _augment_components_with_values_simple(
     if not isinstance(components, dict):
         return components
 
+    # Defensive: deep-copy the incoming components to avoid in-place mutation that can
+    # flatten or corrupt the structure when callers reuse the original dict.
+    comps_copy = copy.deepcopy(components)
+
     out: Dict[str, Any] = {}
-    for cname, cobj in components.items():
+    for cname, cobj in comps_copy.items():
         if not isinstance(cobj, dict):
             out[cname] = cobj
             continue
-        cc = dict(cobj)
+        # deep-copy each component object before mutating
+        cc = copy.deepcopy(cobj)
         cc.pop("score_10", None)
         # pull numeric values from score_calc_raw.raw when present (canonical names)
         try:
@@ -329,7 +335,7 @@ class OFASensor(CoordinatorEntity):
         # choose the first future entry (timestamp >= floored)
         for entry in forecasts:
             dt = _parse_dt_isoz(entry.get("timestamp"))
-            if dt and dt >= floored:
+            if dt and dt >= flored:
                 return entry
 
         # fallback to first (strict list should be ordered)
