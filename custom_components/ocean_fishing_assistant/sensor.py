@@ -467,10 +467,12 @@ class OFASensor(CoordinatorEntity):
                         if not raw:
                             continue
                         # keys of interest: wind (m/s), tide (m), wave (m), pressure_delta (hPa),
-                        # moon_phase, temperature
+                        # moon_phase, temperature, plus safety keys (wind_gust, visibility_km, swell_period_s, precipitation_probability)
                         for k, keyname in (("wind", "wind"), ("tide", "tide"), ("wave", "wave"),
                                            ("pressure_delta", "pressure_delta"), ("moon_phase", "moon_phase"),
-                                           ("temperature", "temperature")):
+                                           ("temperature", "temperature"), ("wind_gust", "wind_gust"),
+                                           ("visibility_km", "visibility_km"), ("swell_period_s", "swell_period_s"),
+                                           ("precipitation_probability", "precipitation_probability")):
                             if raw.get(keyname) is None:
                                 continue
                             try:
@@ -495,18 +497,24 @@ class OFASensor(CoordinatorEntity):
                 comps = sanitized.get("components")
                 sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units)
 
-                # add safety_values from period-level keys if present (pressure, wind_gust, precipitation_probability)
-                period_safety = {}
-                if sanitized.get("wind_gust") is not None:
-                    # DataFormatter produced wind_gust in display units already under period entries
-                    period_safety["wind_gust"] = _round_opt(sanitized.get("wind_gust"), 2)
-                    if sanitized.get("wind_unit"):
-                        period_safety["wind_gust_unit"] = sanitized.get("wind_unit")
-                if sanitized.get("precipitation_probability") is not None:
-                    try:
-                        period_safety["precipitation_probability"] = int(round(float(sanitized.get("precipitation_probability"))))
-                    except Exception:
-                        pass
+                # add safety_values: prefer canonical aggregated raw via _collect_safety_values, then fall back to
+                # display-level fields present in sanitized (so we don't lose data produced by DataFormatter).
+                period_safety = _collect_safety_values(raw_agg or None, entry_units) or {}
+                # if DataFormatter already provided display wind_gust under sanitized (display units),
+                # ensure we don't lose it if canonical raw didn't contain wind_gust
+                try:
+                    if "wind_gust" not in period_safety and sanitized.get("wind_gust") is not None:
+                        period_safety["wind_gust"] = _round_opt(sanitized.get("wind_gust"), 2)
+                        if sanitized.get("wind_unit"):
+                            period_safety["wind_gust_unit"] = sanitized.get("wind_unit")
+                    if "precipitation_probability" not in period_safety and sanitized.get("precipitation_probability") is not None:
+                        try:
+                            period_safety["precipitation_probability"] = int(round(float(sanitized.get("precipitation_probability"))))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 if period_safety:
                     sanitized["safety_values"] = period_safety
 
