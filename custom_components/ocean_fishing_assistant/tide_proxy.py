@@ -20,6 +20,7 @@ from skyfield.api import Loader, wgs84  # type: ignore
 from skyfield import almanac as _almanac  # type: ignore
 from skyfield.framelib import ecliptic_frame  # use modern frames API instead of deprecated helpers
 import skyfield  # for version reporting
+import numpy as np
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -304,15 +305,72 @@ class TideProxy:
             t_anchor = anchor_epoch
             _LOGGER.debug("Using skyfield moon_transit_dt as anchor (no lon_shift applied) anchor_dt=%s", anchor_dt.isoformat().replace("+00:00", "Z"))
 
-        tide_heights: List[Optional[float]] = []
-        for dt in dt_objs:
-            sec = dt.timestamp()
-            x = 2.0 * math.pi * ((sec - t_anchor) / period_seconds)
+        # Build multi-constituent model (vectorized with numpy) anchored at t_anchor
+        constituents = ["M2", "S2", "K1", "O1", "N2"]
+        periods_sec = {k: (_CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR) for k in _CONSTITUENT_PERIOD_HOURS}
+        omegas = {k: 2.0 * math.pi / periods_sec[k] for k in periods_sec}
+
+        # Default coefficients (a_k for cos, b_k for sin) using canonical ratios
+        ratios = _CONSTITUENT_DEFAULT_RATIOS
+        coef_list: List[float] = []
+        for c in constituents:
+            ratio = float(ratios.get(c, 0.0))
+            A = amp * ratio
+            coef_list.extend([A, 0.0])
+        coef_vec = np.array(coef_list, dtype=float)  # [a_M2, b_M2, a_S2, b_S2, ...]
+
+        # Build design matrix X (n_samples x n_coeffs) where columns alternate cos(omega*t), sin(omega*t)
+        t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
+        cols: List[np.ndarray] = []
+        for c in constituents:
+            w = omegas[c]
+            cols.append(np.cos(w * t_rel))
+            cols.append(np.sin(w * t_rel))
+        if cols:
+            X = np.column_stack(cols)
+            y = X.dot(coef_vec)
+        else:
+            X = np.zeros((len(t_rel), 0), dtype=float)
+            y = np.zeros((len(t_rel),), dtype=float)
+
+        # produce tide_heights list from vectorized result
+        tide_heights = [round(float(v), 3) for v in y.tolist()]
+
+        # Provide an optional fitter function that can refine coefficients from observations
+        def _fit_coeffs_from_obs(obs: Sequence[float]) -> Optional[np.ndarray]:
             try:
-                value = amp * math.sin(x)
-                tide_heights.append(round(float(value), 3))
+                obs_arr = np.asarray(obs, dtype=float)
+                if obs_arr.shape[0] != X.shape[0] or X.shape[1] == 0:
+                    return None
+                sol, *_ = np.linalg.lstsq(X, obs_arr, rcond=None)
+                # update coef_vec in-place
+                nonlocal coef_vec
+                coef_vec = sol
+                return sol
             except Exception:
-                tide_heights.append(None)
+                _LOGGER.exception("Least-squares fit failed")
+                return None
+
+        # Scalar evaluators (use numpy internally for compactness)
+        def _tide_val(epoch_sec: float) -> float:
+            rel = epoch_sec - t_anchor
+            v = 0.0
+            for i, c in enumerate(constituents):
+                w = omegas[c]
+                a = float(coef_vec[2 * i])
+                b = float(coef_vec[2 * i + 1])
+                v += a * math.cos(w * rel) + b * math.sin(w * rel)
+            return v
+
+        def _tide_derivative(epoch_sec: float) -> float:
+            rel = epoch_sec - t_anchor
+            s = 0.0
+            for i, c in enumerate(constituents):
+                w = omegas[c]
+                a = float(coef_vec[2 * i])
+                b = float(coef_vec[2 * i + 1])
+                s += (-a * w * math.sin(w * rel) + b * w * math.cos(w * rel))
+            return s
 
         # Analytic next high/low for the pure sine model (exact closed-form solution).
         try:
