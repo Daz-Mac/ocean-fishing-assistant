@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import asyncio
@@ -46,6 +47,12 @@ class TideProxy:
         self._ttl = int(ttl)
         self._last_calc: Optional[datetime] = None
         self._cache: Optional[Dict[str, Any]] = None
+
+        # persisted coefficient conveniences (may be populated by async_load_persisted_coeffs)
+        self._persisted_coeffs: Optional[Dict[str, Any]] = None
+        self._fitted_coeffs: Optional[Any] = None
+        self._t_anchor: Optional[float] = None
+        self._coeff_constituents: Optional[List[str]] = None
 
         # prepare a dedicated data directory under the integration folder so Skyfield files
         # are consolidated and easy to pre-populate or inspect.
@@ -128,6 +135,61 @@ class TideProxy:
                     "Failed to initialize Skyfield Loader/ephemeris. Ensure 'skyfield' is installed and network access is available or pre-populate the data directory."
                 )
                 raise
+
+    async def async_load_persisted_coeffs(self) -> None:
+        """
+        Load persisted tide coefficients (if present) from the integration data folder.
+        This is tolerant: missing file is not an error. Parsed values are stored on the
+        instance as attributes for later use by the tide model.
+        """
+        path = os.path.join(self._data_dir, "tide_coeffs.json")
+        try:
+            def _read_file():
+                with open(path, "r") as fh:
+                    return fh.read()
+
+            content = await self.hass.async_add_executor_job(_read_file)
+            data = json.loads(content)
+
+            # raw payload retained for debugging
+            self._persisted_coeffs = data
+
+            # coefficients under a few possible keys
+            coefs = data.get("coef") or data.get("coefs") or data.get("coefficients")
+            if coefs:
+                try:
+                    # prefer numpy array if available
+                    import numpy as _np  # type: ignore
+
+                    self._fitted_coeffs = _np.array(coefs, dtype=float)
+                except Exception:
+                    # fallback to plain list of floats
+                    try:
+                        self._fitted_coeffs = [float(v) for v in coefs]
+                    except Exception:
+                        self._fitted_coeffs = None
+
+            # anchor epoch (accept numeric epoch or ISO string)
+            t_anchor = data.get("t_anchor") or data.get("t_anchor_epoch")
+            if isinstance(t_anchor, (int, float)):
+                self._t_anchor = float(t_anchor)
+            elif isinstance(t_anchor, str):
+                try:
+                    dt = dt_util.parse_datetime(t_anchor)
+                    if dt is not None:
+                        self._t_anchor = float(dt.timestamp())
+                except Exception:
+                    self._t_anchor = None
+            else:
+                self._t_anchor = None
+
+            self._coeff_constituents = data.get("constituents", []) or data.get("modes", []) or []
+
+            _LOGGER.debug("Loaded persisted tide coefficients from %s", path)
+        except FileNotFoundError:
+            _LOGGER.debug("No persisted tide coefficients found at %s", path)
+        except Exception:
+            _LOGGER.exception("Failed to load persisted tide coefficients from %s", path)
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
         """
