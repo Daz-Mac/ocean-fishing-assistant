@@ -4,6 +4,7 @@ import math
 import os
 import json
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import asyncio
@@ -71,6 +72,9 @@ class TideProxy:
         # persistence for fitted coefficients
         self._fitted_coef_vec: Optional[np.ndarray] = None
 
+        # persistence lock to avoid concurrent disk writers during calibration
+        self._persist_lock = threading.Lock()
+
         # prepare a dedicated data directory under the integration folder so Skyfield files
         # are consolidated and easy to pre-populate or inspect.
         try:
@@ -122,12 +126,13 @@ class TideProxy:
     def _persist_coeffs(self, coef_vec: np.ndarray) -> None:
         try:
             path = os.path.join(self._data_dir, _PERSIST_COEF_FILENAME)
-            # atomic write via temporary file + replace
+            # atomic write via temporary file + replace, guarded by a threading lock
             dir_name = os.path.dirname(path)
-            with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False) as tmp:
-                json.dump({"coef": coef_vec.tolist(), "ts": datetime.now(timezone.utc).isoformat()}, tmp)
-                tmp_name = tmp.name
-            os.replace(tmp_name, path)
+            with self._persist_lock:
+                with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False) as tmp:
+                    json.dump({"coef": coef_vec.tolist(), "ts": datetime.now(timezone.utc).isoformat()}, tmp)
+                    tmp_name = tmp.name
+                os.replace(tmp_name, path)
             _LOGGER.info("Persisted tide coefficients (%d values) to %s", coef_vec.size, path)
         except Exception:
             _LOGGER.exception("Failed to persist tide coefficients to data dir")
@@ -531,6 +536,7 @@ class TideProxy:
             if persist:
                 try:
                     self._fitted_coef_vec = sol.copy()
+                    # persistence is guarded by self._persist_lock inside _persist_coeffs
                     self._persist_coeffs(self._fitted_coef_vec)
                 except Exception:
                     _LOGGER.exception("Failed to persist fitted coefficients")
@@ -597,7 +603,8 @@ class TideProxy:
             if span_seconds < max(0.5 * dominant_period, dominant_period):
                 _LOGGER.warning("Calibration data span is short (%.1f hours); results may be unstable", span_seconds / 3600.0)
 
-            sol = self._fit_coeffs_from_obs(X, obs_arr, persist=persist)
+            # run CPU-bound/IO-bound solver in executor to avoid blocking the event loop
+            sol = await self.hass.async_add_executor_job(self._fit_coeffs_from_obs, X, obs_arr, persist)
             if sol is None:
                 _LOGGER.error("Least-squares solver returned no solution")
                 return None
@@ -605,6 +612,8 @@ class TideProxy:
             # compute residual norm
             residuals = X.dot(sol) - obs_arr
             residual_norm = float(np.linalg.norm(residuals))
+
+            _LOGGER.info("Calibration succeeded: samples=%d residual_norm=%.6f", len(obs_arr), residual_norm)
 
             return {
                 "coef_vec": sol.tolist(),
