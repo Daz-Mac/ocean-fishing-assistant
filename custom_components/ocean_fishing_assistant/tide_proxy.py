@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import asyncio
@@ -56,7 +57,7 @@ class TideProxy:
     """
     Astronomical tide proxy using Skyfield + small multi-constituent model.
     Skyfield data (ephemeris) will be stored in:
-      <config_dir>/custom_components/ocean_fishing_assistant/data
+    <config_dir>/custom_components/ocean_fishing_assistant/data
     """
 
     def __init__(self, hass, latitude: float, longitude: float, ttl: int = _DEFAULT_TTL):
@@ -77,7 +78,6 @@ class TideProxy:
         except Exception:
             # Fallback to joining paths if hass.config.path signature varies
             from homeassistant.const import CONFIG_DIR  # type: ignore
-
             data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
 
         os.makedirs(data_dir, exist_ok=True)
@@ -122,8 +122,12 @@ class TideProxy:
     def _persist_coeffs(self, coef_vec: np.ndarray) -> None:
         try:
             path = os.path.join(self._data_dir, _PERSIST_COEF_FILENAME)
-            with open(path, "w") as fh:
-                json.dump({"coef": coef_vec.tolist(), "ts": datetime.now(timezone.utc).isoformat()}, fh)
+            # atomic write via temporary file + replace
+            dir_name = os.path.dirname(path)
+            with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False) as tmp:
+                json.dump({"coef": coef_vec.tolist(), "ts": datetime.now(timezone.utc).isoformat()}, tmp)
+                tmp_name = tmp.name
+            os.replace(tmp_name, path)
             _LOGGER.info("Persisted tide coefficients (%d values) to %s", coef_vec.size, path)
         except Exception:
             _LOGGER.exception("Failed to persist tide coefficients to data dir")
@@ -185,7 +189,9 @@ class TideProxy:
                     self._data_dir,
                 )
             except Exception:
-                _LOGGER.exception("Failed to initialize Skyfield Loader/ephemeris. Ensure 'skyfield' is installed and network access is available or pre-populate the data directory.")
+                _LOGGER.exception(
+                    "Failed to initialize Skyfield Loader/ephemeris. Ensure 'skyfield' is installed and network access is available or pre-populate the data directory."
+                )
                 raise
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
@@ -374,31 +380,6 @@ class TideProxy:
         # produce tide_heights list from vectorized result
         tide_heights = [round(float(v), 3) for v in y.tolist()]
 
-        # Provide an optional fitter function that can refine coefficients from observations
-        # This nested function updates the local coef_vec and (optionally) persists results.
-        def _fit_coeffs_from_obs(obs: Sequence[float], persist: bool = False) -> Optional[np.ndarray]:
-            nonlocal coef_vec
-            try:
-                obs_arr = np.asarray(obs, dtype=float)
-                if obs_arr.shape[0] != X.shape[0] or X.shape[1] == 0:
-                    _LOGGER.debug("Observation array shape mismatch or no design columns (obs_len=%d X.shape=%s)", obs_arr.shape[0], X.shape)
-                    return None
-                # Solve least-squares
-                sol, *_ = np.linalg.lstsq(X, obs_arr, rcond=None)
-                if sol is None:
-                    return None
-                coef_vec = sol
-                if persist:
-                    try:
-                        self._fitted_coef_vec = coef_vec.copy()
-                        self._persist_coeffs(coef_vec)
-                    except Exception:
-                        _LOGGER.exception("Failed to persist fitted coefficients")
-                return sol
-            except Exception:
-                _LOGGER.exception("Least-squares fit failed")
-                return None
-
         # Scalar evaluators (use coef_vec and omegas for scalar evaluation and derivative)
         def _tide_val(epoch_sec: float) -> float:
             rel = epoch_sec - t_anchor
@@ -516,6 +497,8 @@ class TideProxy:
         }
 
         # Attach small helper metadata for callers who want to calibrate:
+        # NOTE: keep this small to avoid bloating entity attributes. Full persisted coeffs
+        # are stored on disk via _persist_coeffs when calibrating.
         raw_tide["_helpers"] = {
             "constituents": constituents,
             "t_anchor": t_anchor,
@@ -530,6 +513,31 @@ class TideProxy:
         self._cache = normalized
         self._last_calc = now
         return normalized
+
+    def _fit_coeffs_from_obs(self, X: np.ndarray, obs_arr: np.ndarray, persist: bool = False) -> Optional[np.ndarray]:
+        """
+        Solve least-squares for coefficients given design matrix X and observation array obs_arr.
+        If persist=True, persist results to disk and memory.
+        Returns solution vector or None on failure.
+        """
+        try:
+            if obs_arr.shape[0] != X.shape[0] or X.shape[1] == 0:
+                _LOGGER.debug("Observation array shape mismatch or no design columns (obs_len=%d X.shape=%s)", obs_arr.shape[0], X.shape)
+                return None
+            # Solve least-squares
+            sol, *_ = np.linalg.lstsq(X, obs_arr, rcond=None)
+            if sol is None:
+                return None
+            if persist:
+                try:
+                    self._fitted_coef_vec = sol.copy()
+                    self._persist_coeffs(self._fitted_coef_vec)
+                except Exception:
+                    _LOGGER.exception("Failed to persist fitted coefficients")
+            return sol
+        except Exception:
+            _LOGGER.exception("Least-squares fit failed")
+            return None
 
     async def calibrate_from_observations(
         self,
@@ -549,18 +557,14 @@ class TideProxy:
             if len(obs_timestamps) != len(obs_heights):
                 raise ValueError("obs_timestamps and obs_heights must have same length")
 
-            # Recompute design matrix for the provided timestamps using the same model assumptions
-            # We'll call get_tide_for_timestamps to obtain the cached X and t_anchor if possible.
-            # To avoid duplicating heavy skyfield loads, call get_tide_for_timestamps to ensure anchor and X were computed.
-            # We call it once to populate cache (synchronous call through async).
-            tide_info = await self.get_tide_for_timestamps(obs_timestamps)
-            helpers = tide_info.get("_helpers")
+            # Ensure model helpers are computed and Skyfield is loaded
+            await self.get_tide_for_timestamps(obs_timestamps)
+            helpers = self._cache.get("_helpers") if self._cache else None
             if not helpers:
                 _LOGGER.debug("No helpers present to build design matrix; aborting calibration")
                 return None
             constituents = helpers["constituents"]
             t_anchor = float(helpers["t_anchor"])
-            period_seconds = float(helpers["period_seconds"])
             coef_vec_len = int(helpers["coef_vec_len"])
 
             # build X
@@ -593,7 +597,7 @@ class TideProxy:
             if span_seconds < max(0.5 * dominant_period, dominant_period):
                 _LOGGER.warning("Calibration data span is short (%.1f hours); results may be unstable", span_seconds / 3600.0)
 
-            sol, *_ = np.linalg.lstsq(X, obs_arr, rcond=None)
+            sol = self._fit_coeffs_from_obs(X, obs_arr, persist=persist)
             if sol is None:
                 _LOGGER.error("Least-squares solver returned no solution")
                 return None
@@ -601,14 +605,6 @@ class TideProxy:
             # compute residual norm
             residuals = X.dot(sol) - obs_arr
             residual_norm = float(np.linalg.norm(residuals))
-
-            # persist into memory and optionally to disk
-            self._fitted_coef_vec = sol.copy()
-            if persist:
-                try:
-                    self._persist_coeffs(self._fitted_coef_vec)
-                except Exception:
-                    _LOGGER.exception("Failed to persist calibration coefficients")
 
             return {
                 "coef_vec": sol.tolist(),
@@ -815,7 +811,7 @@ class TideProxy:
         return result
 
 
-# -- module level helpers ----------------------------------------------------
+# -- module level helpers ----
 def _coerce_phase(val: Any) -> Optional[float]:
     try:
         if val is None:
