@@ -177,6 +177,12 @@ async def async_setup_entry(hass, entry):
     )
     _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
 
+    # Ensure persisted tide coefficients (if any) are loaded into the TideProxy before the first refresh.
+    try:
+        await coord._tide_proxy.async_load_persisted_coeffs()
+    except Exception:
+        _LOGGER.exception("Failed to load persisted tide coefficients into TideProxy")
+
     # try to load persisted last successful fetch before first refresh (fast recovery)
     if entry.data.get("persist_last_fetch", False):
         _LOGGER.debug(
