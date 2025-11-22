@@ -72,6 +72,8 @@ class TideProxy:
 
         # persisted fitted coefficient vector (numpy 1-D array, 2 * num_constituents)
         self._fitted_coef_vec: Optional[np.ndarray] = None
+        # persisted DC/bias term (vertical datum offset)
+        self._fitted_bias: float = 0.0
 
         # keep last helpers produced (constituents, t_anchor, period_seconds, coef_vec_len)
         self._last_helpers: Optional[Dict[str, Any]] = None
@@ -81,6 +83,7 @@ class TideProxy:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
         except Exception:
             from homeassistant.const import CONFIG_DIR  # type: ignore
+
             data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
 
         os.makedirs(data_dir, exist_ok=True)
@@ -107,7 +110,7 @@ class TideProxy:
         # NOTE: do NOT load persisted coeffs synchronously here (would block event loop).
         # Use async_load_persisted_coeffs() from async setup to trigger a safe load.
 
-    # ------------------ Persistence helpers ------------------
+    # ---- Persistence helpers ----
 
     def _load_persisted_coeffs(self) -> None:
         """
@@ -123,6 +126,11 @@ class TideProxy:
                 if coef:
                     arr = np.asarray(coef, dtype=float)
                     self._fitted_coef_vec = arr
+                    # load bias if present (default 0.0)
+                    try:
+                        self._fitted_bias = float(payload.get("bias", 0.0))
+                    except Exception:
+                        self._fitted_bias = 0.0
                     # also attempt to load saved constituents and t_anchor if present
                     helpers = {}
                     if "constituents" in payload:
@@ -134,7 +142,7 @@ class TideProxy:
                             helpers["t_anchor"] = None
                     if helpers:
                         self._last_helpers = helpers
-                    _LOGGER.info("Loaded persisted tide coefficients (%d values) from %s", arr.size, path)
+                    _LOGGER.info("Loaded persisted tide coefficients (%d harmonic values) from %s", arr.size, path)
         except Exception:
             _LOGGER.debug("Failed to load persisted coefficients", exc_info=True)
 
@@ -149,12 +157,14 @@ class TideProxy:
         except Exception:
             _LOGGER.exception("async_load_persisted_coeffs failed")
 
-    def _persist_coeffs(self, coef_vec: np.ndarray, constituents: Optional[List[str]] = None, t_anchor: Optional[float] = None) -> None:
+    def _persist_coeffs(self, coef_vec: np.ndarray, constituents: Optional[List[str]] = None, t_anchor: Optional[float] = None, bias: Optional[float] = None) -> None:
         try:
             path = os.path.join(self._data_dir, _PERSIST_COEF_FILENAME)
             dir_name = os.path.dirname(path)
             # Build payload to persist; include helpers when available
             payload = {"coef": coef_vec.tolist(), "ts": datetime.now(timezone.utc).isoformat()}
+            # include bias explicitly (if provided use it; otherwise fall back to self._fitted_bias)
+            payload["bias"] = float(bias if bias is not None else getattr(self, "_fitted_bias", 0.0))
             if constituents:
                 payload["constituents"] = constituents
             elif self._last_helpers and "constituents" in self._last_helpers:
@@ -162,8 +172,12 @@ class TideProxy:
             if t_anchor is not None:
                 payload["t_anchor"] = float(t_anchor)
             elif self._last_helpers and "t_anchor" in self._last_helpers:
-                payload["t_anchor"] = float(self._last_helpers["t_anchor"])
+                try:
+                    payload["t_anchor"] = float(self._last_helpers["t_anchor"])
+                except Exception:
+                    pass
             # atomic write
+            os.makedirs(dir_name, exist_ok=True)
             with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, encoding="utf-8") as tmp:
                 json.dump(payload, tmp)
                 tmp_name = tmp.name
@@ -172,7 +186,7 @@ class TideProxy:
         except Exception:
             _LOGGER.exception("Failed to persist tide coefficients to data dir")
 
-    # ------------------ Skyfield lazy load ------------------
+    # ---- Skyfield lazy load ----
 
     async def _ensure_loaded(self) -> None:
         """
@@ -231,7 +245,7 @@ class TideProxy:
                 )
                 raise
 
-    # ------------------ Tide computation (strict persisted coefficients) ------------------
+    # ---- Tide computation (strict persisted coefficients) ----
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
         """
@@ -452,6 +466,10 @@ class TideProxy:
             for i, c in enumerate(constituents):
                 w = omegas[c]
                 pred += A[i] * np.cos(w * t_rel) + B[i] * np.sin(w * t_rel)
+            # add persisted DC bias (if present)
+            bias_val = float(getattr(self, "_fitted_bias", 0.0))
+            if bias_val != 0.0:
+                pred = pred + bias_val
             tide_heights = [round(float(v), 3) for v in pred.tolist()]
         except Exception:
             _LOGGER.exception("Failed to evaluate persisted tide coefficients (will return failure)")
@@ -481,6 +499,8 @@ class TideProxy:
                 a = float(A[i])
                 b = float(B[i])
                 v += a * math.cos(w * rel) + b * math.sin(w * rel)
+            # add bias
+            v += float(getattr(self, "_fitted_bias", 0.0))
             return v
 
         def _tide_derivative(epoch_sec: float) -> float:
@@ -556,6 +576,9 @@ class TideProxy:
             for i, c in enumerate(constituents):
                 w = omegas[c]
                 sval += float(A[i]) * np.cos(w * se) + float(B[i]) * np.sin(w * se)
+            # add bias if present
+            if float(getattr(self, "_fitted_bias", 0.0)) != 0.0:
+                sval = sval + float(getattr(self, "_fitted_bias", 0.0))
             sval_list = sval.tolist()
 
             # find max/min indices
@@ -596,29 +619,61 @@ class TideProxy:
         self._last_calc = now
         return raw_tide
 
-    # ------------------ Calibration ------------------
+    # ---- Calibration ----
 
-    def _fit_coeffs_from_obs(self, X: np.ndarray, obs_arr: np.ndarray, persist: bool = False) -> Optional[np.ndarray]:
+    def _fit_coeffs_from_obs(self, X: np.ndarray, obs_arr: np.ndarray, persist: bool = False, ridge: float = 0.0, exclude_bias_from_penalty: bool = True) -> Optional[np.ndarray]:
         """
-        Solve least-squares; optionally persist fitted coefficients.
+        Solve least-squares with optional L2 (ridge) regularization.
+        X may include a trailing bias column (ones) — solver will return sol vector including bias coefficient.
+        If persist=True the harmonic part (all but trailing bias) will be saved to self._fitted_coef_vec and the bias saved to self._fitted_bias.
         """
         try:
             if obs_arr.shape[0] != X.shape[0] or X.shape[1] == 0:
                 _LOGGER.debug("Observation array shape mismatch or no design columns (obs_len=%d X.shape=%s)", obs_arr.shape[0], X.shape)
                 return None
-            sol, *_ = np.linalg.lstsq(X, obs_arr, rcond=None)
+
+            # Form normal equations
+            XT_X = X.T @ X
+            XT_y = X.T @ obs_arr
+            M = XT_X.shape[0]
+
+            # Apply ridge if requested. Exclude last column (bias) from penalty by default
+            if ridge and ridge > 0.0:
+                P = np.eye(M, dtype=float)
+                if exclude_bias_from_penalty:
+                    P[-1, -1] = 0.0
+                XT_X = XT_X + float(ridge) * P
+
+            try:
+                sol = np.linalg.solve(XT_X, XT_y)
+            except np.linalg.LinAlgError:
+                # fallback to augmented least-squares when ill-conditioned
+                if ridge and ridge > 0.0:
+                    sqrtP = np.sqrt(float(ridge)) * np.sqrt(P)
+                    Xa = np.vstack([X, sqrtP])
+                    ya = np.concatenate([obs_arr, np.zeros(M, dtype=float)])
+                    sol, *_ = np.linalg.lstsq(Xa, ya, rcond=None)
+                else:
+                    sol, *_ = np.linalg.lstsq(X, obs_arr, rcond=None)
+
             if sol is None:
                 return None
+
+            # If requested, persist: split harmonic and bias
             if persist:
                 try:
-                    self._fitted_coef_vec = sol.copy()
+                    # expect trailing bias column
+                    harmonic = sol[:-1].astype(float)
+                    bias_val = float(sol[-1])
+                    self._fitted_coef_vec = harmonic.copy()
+                    self._fitted_bias = bias_val
                     # persist using last helpers when available
                     constituents = None
                     t_anchor = None
                     if self._last_helpers:
                         constituents = self._last_helpers.get("constituents")
                         t_anchor = self._last_helpers.get("t_anchor")
-                    self._persist_coeffs(self._fitted_coef_vec, constituents=constituents, t_anchor=t_anchor)
+                    self._persist_coeffs(self._fitted_coef_vec, constituents=constituents, t_anchor=t_anchor, bias=self._fitted_bias)
                 except Exception:
                     _LOGGER.exception("Failed to persist fitted coefficients")
             return sol
@@ -631,11 +686,12 @@ class TideProxy:
         obs_timestamps: Sequence[str],
         obs_heights: Sequence[float],
         persist: bool = False,
+        ridge: float = 0.0,
     ) -> Optional[Dict[str, Any]]:
         """
         Calibrate multi-constituent coefficients from observed heights.
         Requires at least (2 * num_constituents) samples (recommend >=6).
-        Returns dict with coef_vec, residual_norm, success.
+        Returns dict with coef_vec, bias, residual_norm, success.
         """
         try:
             if len(obs_timestamps) != len(obs_heights):
@@ -671,6 +727,10 @@ class TideProxy:
                 _LOGGER.error("No columns produced for calibration; aborting")
                 return None
 
+            # append bias (DC) column
+            rel = times_epoch - t_anchor
+            cols.append(np.ones_like(rel))
+
             X = np.column_stack(cols)
             obs_arr = np.asarray(obs_heights, dtype=float)
 
@@ -685,16 +745,24 @@ class TideProxy:
             if span_seconds < max(0.5 * dominant_period, dominant_period):
                 _LOGGER.warning("Calibration data span is short (%.1f hours); results may be unstable", span_seconds / 3600.0)
 
-            sol = self._fit_coeffs_from_obs(X, obs_arr, persist=persist)
+            sol = self._fit_coeffs_from_obs(X, obs_arr, persist=persist, ridge=ridge, exclude_bias_from_penalty=True)
             if sol is None:
                 _LOGGER.error("Least-squares solver returned no solution")
                 return None
+
+            # split sol into harmonic and bias for return/persistence
+            harmonic = sol[:-1].astype(float)
+            bias_val = float(sol[-1])
+            # set internal state (persisted above if persist=True)
+            self._fitted_coef_vec = harmonic.copy()
+            self._fitted_bias = bias_val
 
             residuals = X.dot(sol) - obs_arr
             residual_norm = float(np.linalg.norm(residuals))
 
             return {
-                "coef_vec": sol.tolist(),
+                "coef_vec": harmonic.tolist(),
+                "bias": bias_val,
                 "residual_norm": residual_norm,
                 "success": True,
                 "samples": len(obs_arr),
@@ -704,7 +772,7 @@ class TideProxy:
             _LOGGER.exception("Calibration failed: %s", exc)
             return None
 
-    # ------------------ Skyfield helper: next moon transit ------------------
+    # ---- Skyfield helper: next moon transit ----
 
     async def _async_find_next_moon_transit(self, sf_eph, sf_ts, sf_almanac, sf_wgs, start_dt: datetime) -> Optional[datetime]:
         """
@@ -731,7 +799,7 @@ class TideProxy:
             _LOGGER.debug("Moon transit search failed", exc_info=True)
             return None
 
-    # ------------------ compute_period_indices_for_timestamps (required by coordinator) ------------------
+    # ---- compute_period_indices_for_timestamps (required by coordinator) ----
 
     async def compute_period_indices_for_timestamps(
         self,
@@ -878,7 +946,7 @@ class TideProxy:
                 raise
         return result
 
-    # ------------------ Small helpers ------------------
+    # ---- Small helpers ----
 
     def _calculate_tide_state(self, moon_data: Dict[str, Optional[float]], sun_data: Dict[str, Optional[float]], now: datetime) -> str:
         try:
