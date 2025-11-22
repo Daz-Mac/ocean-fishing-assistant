@@ -104,12 +104,16 @@ class TideProxy:
 
         _LOGGER.debug("TideProxy initialized, data_dir=%s (Skyfield resources will load lazily)", self._data_dir)
 
-        # Try to load persisted coefficients if present
-        self._load_persisted_coeffs()
+        # NOTE: do NOT load persisted coeffs synchronously here (would block event loop).
+        # Use async_load_persisted_coeffs() from async setup to trigger a safe load.
 
     # ------------------ Persistence helpers ------------------
 
     def _load_persisted_coeffs(self) -> None:
+        """
+        Blocking (synchronous) load of persisted coefficients. Must be called via
+        async_load_persisted_coeffs() to avoid blocking HA event loop.
+        """
         try:
             path = os.path.join(self._data_dir, _PERSIST_COEF_FILENAME)
             if os.path.exists(path):
@@ -124,12 +128,26 @@ class TideProxy:
                     if "constituents" in payload:
                         helpers["constituents"] = payload.get("constituents")
                     if "t_anchor" in payload:
-                        helpers["t_anchor"] = float(payload.get("t_anchor"))
+                        try:
+                            helpers["t_anchor"] = float(payload.get("t_anchor"))
+                        except Exception:
+                            helpers["t_anchor"] = None
                     if helpers:
                         self._last_helpers = helpers
                     _LOGGER.info("Loaded persisted tide coefficients (%d values) from %s", arr.size, path)
         except Exception:
             _LOGGER.debug("Failed to load persisted coefficients", exc_info=True)
+
+    async def async_load_persisted_coeffs(self) -> None:
+        """
+        Async wrapper to load persisted coefficients without blocking the event loop.
+        Home Assistant (async_setup_entry) calls this — it runs the blocking loader
+        in the executor so open()/json.load() do not block.
+        """
+        try:
+            await self.hass.async_add_executor_job(self._load_persisted_coeffs)
+        except Exception:
+            _LOGGER.exception("async_load_persisted_coeffs failed")
 
     def _persist_coeffs(self, coef_vec: np.ndarray, constituents: Optional[List[str]] = None, t_anchor: Optional[float] = None) -> None:
         try:
@@ -540,8 +558,7 @@ class TideProxy:
                 sval += float(A[i]) * np.cos(w * se) + float(B[i]) * np.sin(w * se)
             sval_list = sval.tolist()
 
-            # find next maximum after now (must pick maximum that occurs after now)
-            # we pick the global max in the search window — which is acceptable for next-high within 48h
+            # find max/min indices
             max_idx = int(float(np.argmax(sval)))
             min_idx = int(float(np.argmin(sval)))
             max_epoch = sample_epochs[max_idx]
@@ -713,6 +730,153 @@ class TideProxy:
         except Exception:
             _LOGGER.debug("Moon transit search failed", exc_info=True)
             return None
+
+    # ------------------ compute_period_indices_for_timestamps (required by coordinator) ------------------
+
+    async def compute_period_indices_for_timestamps(
+        self,
+        timestamps: Sequence[str],
+        mode: str = "full_day",
+        dawn_window_hours: float = 1.0,
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """
+        Compute period -> hourly-index mapping for the provided hourly timestamps.
+        This method uses Skyfield and expects timestamps as ISO strings (UTC).
+        """
+        # Parse into datetimes (same parsing logic used elsewhere)
+        dt_objs: List[datetime] = []
+        for ts in timestamps:
+            parsed = dt_util.parse_datetime(str(ts))
+            if parsed is None:
+                try:
+                    v = float(ts)
+                    if v > 1e12:
+                        v = v / 1000.0
+                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                except Exception as exc:
+                    raise ValueError(f"Unable to parse timestamp '{ts}': {exc}") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+            dt_objs.append(parsed)
+        if not dt_objs:
+            return {}
+
+        index_dt_pairs = list(enumerate(dt_objs))
+        dates_needed = sorted({dt.date() for dt in dt_objs})
+
+        # Ensure Skyfield resources are loaded
+        await self._ensure_loaded()
+        sf_ts = self._sf_ts
+        sf_eph = self._sf_eph
+        sf_wgs = self._sf_wgs
+        sf_almanac = self._sf_almanac
+        earth = sf_eph["earth"]
+        topos = sf_wgs.latlon(self.latitude, self.longitude)
+        sun = sf_eph["sun"]
+
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+        def _iso_z(dt: datetime) -> str:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.isoformat().replace("+00:00", "Z")
+
+        for d in dates_needed:
+            try:
+                day_start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+                day_end = day_start + timedelta(days=1)
+                t0 = sf_ts.utc(day_start.year, day_start.month, day_start.day, 0, 0, 0)
+                t1 = sf_ts.utc(day_end.year, day_end.month, day_end.day, 0, 0, 0)
+
+                if mode == "dawn_dusk":
+                    expand = timedelta(hours=12)
+                    t0_exp = sf_ts.utc((day_start - expand).year, (day_start - expand).month, (day_start - expand).day, (day_start - expand).hour, (day_start - expand).minute, (day_start - expand).second)
+                    t1_exp = sf_ts.utc((day_end + expand).year, (day_end + expand).month, (day_end + expand).day, (day_end + expand).hour, (day_end + expand).minute, (day_end + expand).second)
+                    f = sf_almanac.sunrise_sunset(sf_eph, topos)
+                    times, events = sf_almanac.find_discrete(t0_exp, t1_exp, f)
+                    if not times:
+                        raise RuntimeError(f"No sunrise/sunset events found for date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}")
+                    sunrise_candidates: List[datetime] = []
+                    sunset_candidates: List[datetime] = []
+                    evt_dt_list: List[datetime] = []
+                    for t, ev in zip(times, events):
+                        try:
+                            evt_dt = t.utc_datetime().replace(tzinfo=timezone.utc)
+                        except Exception:
+                            evt_dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
+                        evt_dt_list.append(evt_dt)
+                        if bool(ev):
+                            sunrise_candidates.append(evt_dt)
+                        else:
+                            sunset_candidates.append(evt_dt)
+                    _LOGGER.debug(
+                        "Skyfield sunrise/sunset discrete events for date=%s lat=%s lon=%s -> times=%s events=%s",
+                        d.isoformat(),
+                        self.latitude,
+                        self.longitude,
+                        [e.isoformat().replace("+00:00", "Z") for e in evt_dt_list],
+                        list(map(int, list(events))),
+                    )
+                    if not sunrise_candidates or not sunset_candidates:
+                        _LOGGER.error(
+                            "Failed to classify sunrise/sunset by event flags for date %s at lat=%s,lon=%s; sunrise_candidates=%s sunset_candidates=%s",
+                            d.isoformat(),
+                            self.latitude,
+                            self.longitude,
+                            [s.isoformat().replace("+00:00", "Z") for s in sunrise_candidates],
+                            [s.isoformat().replace("+00:00", "Z") for s in sunset_candidates],
+                        )
+                        raise RuntimeError(f"Unable to determine sunrise or sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+                    morning_target = day_start + timedelta(hours=6)
+                    evening_target = day_start + timedelta(hours=18)
+                    sunrise_dt = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
+                    sunset_dt = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
+                    dawn_start = sunrise_dt - timedelta(hours=dawn_window_hours)
+                    dawn_end = sunrise_dt + timedelta(hours=dawn_window_hours)
+                    dusk_start = sunset_dt - timedelta(hours=dawn_window_hours)
+                    dusk_end = sunset_dt + timedelta(hours=dawn_window_hours)
+                    date_key = d.isoformat()
+                    result.setdefault(date_key, {})
+                    dawn_indices: List[int] = []
+                    dusk_indices: List[int] = []
+                    for idx, dt in index_dt_pairs:
+                        if dt >= dawn_start and dt < dawn_end:
+                            dawn_indices.append(idx)
+                        if dt >= dusk_start and dt < dusk_end:
+                            dusk_indices.append(idx)
+                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z(dawn_start), "end": _iso_z(dawn_end)}
+                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z(dusk_start), "end": _iso_z(dusk_end)}
+                else:
+                    date_key = d.isoformat()
+                    result.setdefault(date_key, {})
+                    p00_start = day_start
+                    p00_end = day_start + timedelta(hours=6)
+                    p06_start = p00_end
+                    p06_end = day_start + timedelta(hours=12)
+                    p12_start = p06_end
+                    p12_end = day_start + timedelta(hours=18)
+                    p18_start = p12_end
+                    p18_end = day_end
+                    periods = [
+                        ("period_00_06", p00_start, p00_end),
+                        ("period_06_12", p06_start, p06_end),
+                        ("period_12_18", p12_start, p12_end),
+                        ("period_18_24", p18_start, p18_end),
+                    ]
+                    for pname, pstart, pend in periods:
+                        indices: List[int] = []
+                        for idx, dt in index_dt_pairs:
+                            if dt >= pstart and dt < pend:
+                                indices.append(idx)
+                        result[date_key][pname] = {"indices": indices, "start": _iso_z(pstart), "end": _iso_z(pend)}
+            except Exception as exc:
+                _LOGGER.exception("compute_period_indices_for_timestamps failed for date %s: %s", d.isoformat(), exc)
+                raise
+        return result
 
     # ------------------ Small helpers ------------------
 
