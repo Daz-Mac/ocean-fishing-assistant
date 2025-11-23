@@ -1,4 +1,7 @@
-# Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
+# custom_components/ocean_fishing_assistant/coordinator.py
+"""
+Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
+"""
 
 from datetime import timedelta
 import async_timeout
@@ -166,6 +169,48 @@ class OFACoordinator(DataUpdateCoordinator):
             tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
             if not isinstance(tide, dict):
                 raise ValueError("TideProxy returned invalid shape (strict)")
+
+            # --- Normalization for strict canonical shape ---
+            # Sensor + other code expect:
+            #   tide["next_high"] = {"timestamp": ISOZ, "height_m": float}  (or None)
+            #   tide["next_low"]  = {"timestamp": ISOZ, "height_m": float}  (or None)
+            # But older tide_proxy versions returned:
+            #   tide["next_high"] = ISOZ (string) and separate tide["next_high_height_m"] = float
+            # To surface clear errors but remain operational, normalize legacy shapes into canonical dicts here.
+            try:
+                nh = tide.get("next_high")
+                nl = tide.get("next_low")
+                nh_h = tide.get("next_high_height_m")
+                nl_h = tide.get("next_low_height_m")
+
+                def _normalize_entry(entry, height_scalar):
+                    # If already dict, pass through
+                    if isinstance(entry, dict):
+                        return entry
+                    # If a simple timestamp string, convert to strict dict and attach possible height
+                    if isinstance(entry, str):
+                        try:
+                            h_val = None if height_scalar is None else float(height_scalar)
+                        except Exception:
+                            h_val = None
+                        return {"timestamp": entry, "height_m": h_val}
+                    # Unknown or missing -> None
+                    return None
+
+                nh_obj = _normalize_entry(nh, nh_h)
+                nl_obj = _normalize_entry(nl, nl_h)
+
+                # Remove legacy separate height keys to avoid duplication/ambiguity downstream
+                tide.pop("next_high_height_m", None)
+                tide.pop("next_low_height_m", None)
+
+                # Overwrite canonical keys with normalized objects (may be None)
+                tide["next_high"] = nh_obj
+                tide["next_low"] = nl_obj
+            except Exception:
+                # If normalization fails for any reason, log but continue — downstream strict checks will catch it.
+                _LOGGER.exception("Failed to normalize tide 'next_high'/'next_low' payload; continuing with original tide object")
+
             # only attach tide arrays if they are same length as timestamps; attach scalars as well
             for k, v in tide.items():
                 if isinstance(v, (list, tuple)):
