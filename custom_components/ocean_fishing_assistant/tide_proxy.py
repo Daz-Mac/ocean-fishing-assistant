@@ -24,10 +24,9 @@ _TIDE_HALF_DAY_HOURS = 12.42
 _SECONDS_PER_HOUR = 3600.0
 _ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
 
-# ---- Expanded constituent metadata ----
-# NOTE: periods are in hours. Semidiurnal/diurnal canonical values retained for primary constituents.
-# Some overtides are computed from base constituents (e.g., M4 = M2/2).
-_CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
+# ---- Expanded constituent metadata (canonical names: no leading underscore) ----
+# Periods are in hours.
+CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
     # primary astronomical constituents
     "M2": 12.4206,   # principal lunar semidiurnal
     "S2": 12.0,      # principal solar semidiurnal
@@ -35,35 +34,33 @@ _CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
     "K1": 23.9345,   # lunisolar diurnal
     "O1": 25.8193,   # lunar diurnal
     # additional diurnal constituents
-    "P1": 24.0659,   # lunar diurnal (approx)
-    "Q1": 26.8683,   # lunar diurnal (approx)
-    "S1": 24.0,      # solar diurnal
-    # overtides / shallow-water terms (derived where appropriate)
-    "M4": 12.4206 / 2.0,   # first overtide of M2 (~6.2103)
-    "M6": 12.4206 / 3.0,   # second overtide (~4.1402)
-    "2N2": 12.6583 / 2.0,  # overtone related to N2
-    # longer-period constituents (used rarely for short-range forecasts)
-    "Mf": 14.765294 * 24.0 / 24.0,  # placeholder: lunar fortnightly (use sparingly)
-    "Mm": 27.55455 * 24.0 / 24.0,   # placeholder: lunar monthly (use sparingly)
+    "P1": 24.0659,
+    "Q1": 26.8683,
+    "S1": 24.0,
+    # overtides / shallow-water terms
+    "M4": 12.4206 / 2.0,
+    "M6": 12.4206 / 3.0,
+    "2N2": 12.6583 / 2.0,
+    # longer-period constituents (small influence on short-range forecasts)
+    "Mf": 14.765294,  # lunar fortnightly (hours)
+    "Mm": 27.55455,   # lunar monthly (hours)
 }
 
-# Default relative amplitudes (used when no persisted coefficients are supplied).
-# These are heuristic starting values (not station-specific). They bias the in-memory model
-# toward common behaviors while avoiding extreme negative swings when used with clamp/scale.
-_CONSTITUENT_DEFAULT_RATIOS: Dict[str, float] = {
+# Default relative amplitudes (heuristic, NOT station-specific).
+CONSTITUENT_DEFAULT_RATIOS: Dict[str, float] = {
     "M2": 1.00,    # dominant semidiurnal
     "S2": 0.25,    # solar semidiurnal
-    "N2": 0.18,    # elliptic semidiurnal
+    "N2": 0.18,
     "K1": 0.45,    # prominent diurnal
     "O1": 0.25,
     "P1": 0.12,
     "Q1": 0.08,
     "S1": 0.06,
     "M4": 0.06,    # small overtide
-    "M6": 0.02,    # smaller overtide
+    "M6": 0.02,
     "2N2": 0.05,
-    "Mf": 0.10,    # long-period; small influence on short windows
-    "Mm": 0.08,    # long-period; small influence
+    "Mf": 0.10,
+    "Mm": 0.08,
 }
 
 
@@ -150,9 +147,8 @@ class TideProxy:
 
     def _build_default_coef_vec(self, m2_amp: float) -> np.ndarray:
         """
-        Build a default coefficient vector from _CONSTITUENT_DEFAULT_RATIOS.
-        We set cosine (A) coefficients to ratio * m2_amp and sine (B) coefficients to 0.0.
-        This provides deterministic timing (zero-phase) and heuristic amplitudes.
+        Build a default coefficient vector from CONSTITUENT_DEFAULT_RATIOS.
+        Set cosine (A) coefficients to ratio * m2_amp and sine (B) coefficients to 0.0.
         """
         vals: List[float] = []
         for c in self._constituents:
