@@ -280,7 +280,7 @@ class TideProxy:
 
         tide_heights = [round(float(v), 3) for v in pred.tolist()]
 
-        # --- compute next high/low (timestamps + heights) for sensor compatibility ---
+        # --- compute next high/low (timestamps + heights) for sensor compatibility (strict dict shape) ---
         next_high = None
         next_low = None
         next_high_height = None
@@ -344,6 +344,20 @@ class TideProxy:
         except Exception:
             moon_phases = [None] * len(dt_objs)
 
+        # Build strict dicts for next_high/next_low (sensor expects dict shape)
+        next_high_obj = None
+        next_low_obj = None
+        if next_high is not None:
+            try:
+                next_high_obj = {"timestamp": next_high, "height_m": next_high_height}
+            except Exception:
+                next_high_obj = None
+        if next_low is not None:
+            try:
+                next_low_obj = {"timestamp": next_low, "height_m": next_low_height}
+            except Exception:
+                next_low_obj = None
+
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
             "tide_height_m": tide_heights,
@@ -357,11 +371,9 @@ class TideProxy:
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
             },
-            # compatibility fields for sensor.py
-            "next_high": next_high,
-            "next_low": next_low,
-            "next_high_height_m": next_high_height,
-            "next_low_height_m": next_low_height,
+            # Strict canonical tide objects expected by sensor.py:
+            "next_high": next_high_obj,
+            "next_low": next_low_obj,
         }
 
         self._cache = raw_tide
