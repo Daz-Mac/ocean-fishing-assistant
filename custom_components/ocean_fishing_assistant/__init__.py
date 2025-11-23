@@ -101,13 +101,9 @@ async def async_setup_entry(hass, entry):
     selected_species = entry.data.get(CONF_SPECIES_ID)
     selected_region = entry.data.get(CONF_SPECIES_REGION)
 
-    # Resolve species into either:
-    #  - a concrete species profile dict (preferred), or
-    #  - a synthetic string ("general_mixed" or "general_mixed_<region>") which the integration will treat specially.
     resolved_species = None
     if selected_species:
         try:
-            # Synthetic selection pattern: "general_mixed_<region>"
             if isinstance(selected_species, str) and selected_species.startswith("general_mixed_"):
                 region = selected_species.replace("general_mixed_", "")
                 region_info = loader.get_region_info(region)
@@ -119,10 +115,8 @@ async def async_setup_entry(hass, entry):
                     raise ValueError(
                         f"Selected synthetic region '{region}' is not an ocean region (strict)"
                     )
-                # Keep the synthetic string (formatter/scoring can handle it as a string marker)
                 resolved_species = selected_species
             elif selected_species == "general_mixed":
-                # require explicit region to be present and valid
                 if not selected_region:
                     raise ValueError(
                         "Selected species 'general_mixed' requires 'species_region' in entry.data (strict)"
@@ -136,10 +130,8 @@ async def async_setup_entry(hass, entry):
                     raise ValueError(
                         f"Selected species_region '{selected_region}' is not an ocean region (strict)"
                     )
-                # keep the 'general_mixed' marker
                 resolved_species = "general_mixed"
             else:
-                # Load concrete species profile dict and pass that into coordinator/formatter so scoring receives a dict
                 sp = loader.get_species(selected_species)
                 if not sp:
                     raise ValueError(
@@ -177,28 +169,8 @@ async def async_setup_entry(hass, entry):
     )
     _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
 
-    # Ensure persisted tide coefficients (if any) are loaded into the TideProxy before the first refresh.
-    try:
-        await coord._tide_proxy.async_load_persisted_coeffs()
-    except Exception:
-        _LOGGER.exception("Failed to load persisted tide coefficients into TideProxy")
-
-    # try to load persisted last successful fetch before first refresh (fast recovery)
-    if entry.data.get("persist_last_fetch", False):
-        _LOGGER.debug(
-            "persist_last_fetch enabled for entry %s; attempting to load persisted data", entry.entry_id
-        )
-        try:
-            loaded = await coord.async_load_from_store()
-            if loaded:
-                _LOGGER.debug("Successfully loaded persisted fetch for entry %s", entry.entry_id)
-            else:
-                _LOGGER.debug("No persisted fetch available for entry %s (first run)", entry.entry_id)
-        except Exception:
-            _LOGGER.exception("Failed to load persisted fetch for entry %s", entry.entry_id)
-            # Treat failure to restore as non-fatal but log the stack.
-
-    # request a fresh update (will run after any restored data is available)
+    # NOTE: persistence removed — TideProxy now uses deterministic in-memory coefficients by default.
+    # Request a fresh update (will run after any restored data is available)
     _LOGGER.debug("Requesting initial data refresh for entry %s", entry.entry_id)
     await coord.async_request_refresh()
     _LOGGER.debug("Initial data refresh requested for entry %s", entry.entry_id)
