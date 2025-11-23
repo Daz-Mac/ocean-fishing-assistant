@@ -3,7 +3,8 @@ import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
+
 import asyncio
 
 from homeassistant.util import dt as dt_util
@@ -117,8 +118,14 @@ class TideProxy:
         else:
             self._coef_vec = self._build_default_coef_vec(default_m2_amp)
 
-        _LOGGER.debug("TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.3f clamp=%s",
-                      self.latitude, self.longitude, self._coef_vec.size, self._bias, self._auto_clamp_enabled)
+        _LOGGER.debug(
+            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.3f clamp=%s",
+            self.latitude,
+            self.longitude,
+            self._coef_vec.size,
+            self._bias,
+            self._auto_clamp_enabled,
+        )
 
     def _build_default_coef_vec(self, m2_amp: float) -> np.ndarray:
         vals: List[float] = []
@@ -133,7 +140,9 @@ class TideProxy:
         try:
             arr = np.asarray(coef_vec, dtype=float)
             if arr.size != 2 * len(self._constituents):
-                _LOGGER.error("set_coefficients: coef_vec length %d != expected %d", arr.size, 2 * len(self._constituents))
+                _LOGGER.error(
+                    "set_coefficients: coef_vec length %d != expected %d", arr.size, 2 * len(self._constituents)
+                )
                 return False
             self._coef_vec = arr.copy()
             if bias is not None:
@@ -161,7 +170,9 @@ class TideProxy:
                 return sf_ts, sf_eph, sf_wgs, sf_almanac, version
 
             try:
-                sf_ts, sf_eph, sf_wgs, sf_almanac, version = await self.hass.async_add_executor_job(_blocking_load)
+                sf_ts, sf_eph, sf_wgs, sf_almanac, version = await self.hass.async_add_executor_job(
+                    _blocking_load
+                )
                 self._sf_ts = sf_ts
                 self._sf_eph = sf_eph
                 self._sf_wgs = sf_wgs
@@ -178,15 +189,27 @@ class TideProxy:
             if self._cache.get("timestamps") == list(timestamps):
                 return self._cache
 
-        # parse
+        # parse timestamps into aware datetimes (UTC)
         dt_objs: List[datetime] = []
         for ts in timestamps:
             parsed = dt_util.parse_datetime(str(ts))
             if parsed is None:
-                parsed = datetime.fromisoformat(str(ts)).replace(tzinfo=timezone.utc) if isinstance(ts, str) else None
+                try:
+                    # handle numeric epoch strings
+                    v = float(ts)
+                    if v > 1e12:  # probably milliseconds
+                        v = v / 1000.0
+                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                except Exception:
+                    parsed = None
             if parsed is None:
                 _LOGGER.error("Unable to parse timestamp: %s", ts)
-                return {"timestamps": list(timestamps), "tide_height_m": [None] * len(timestamps), "confidence": "bad_timestamps", "source": "tide_proxy"}
+                return {
+                    "timestamps": list(timestamps),
+                    "tide_height_m": [None] * len(timestamps),
+                    "confidence": "bad_timestamps",
+                    "source": "tide_proxy",
+                }
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             else:
@@ -198,7 +221,12 @@ class TideProxy:
             await self._ensure_loaded()
         except Exception:
             _LOGGER.exception("Skyfield unavailable")
-            return {"timestamps": [dt.isoformat().replace('+00:00', 'Z') for dt in dt_objs], "tide_height_m": [None] * len(dt_objs), "confidence": "astronomical_unavailable", "source": "astronomical_unavailable"}
+            return {
+                "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
+                "tide_height_m": [None] * len(dt_objs),
+                "confidence": "astronomical_unavailable",
+                "source": "astronomical_unavailable",
+            }
 
         sf_ts = self._sf_ts
         sf_eph = self._sf_eph
@@ -252,6 +280,51 @@ class TideProxy:
 
         tide_heights = [round(float(v), 3) for v in pred.tolist()]
 
+        # --- compute next high/low (timestamps + heights) for sensor compatibility ---
+        next_high = None
+        next_low = None
+        next_high_height = None
+        next_low_height = None
+        try:
+            now_ts = now.timestamp()
+            # index of first timestamp >= now (fallback to 0)
+            first_future_idx = 0
+            for i, dt in enumerate(dt_objs):
+                if dt.timestamp() >= now_ts:
+                    first_future_idx = i
+                    break
+
+            next_high_idx = None
+            next_low_idx = None
+            # search for local extrema (simple neighbor check)
+            for i in range(first_future_idx + 1, len(pred) - 1):
+                if pred[i] >= pred[i - 1] and pred[i] >= pred[i + 1]:
+                    next_high_idx = i
+                    break
+            for i in range(first_future_idx + 1, len(pred) - 1):
+                if pred[i] <= pred[i - 1] and pred[i] <= pred[i + 1]:
+                    next_low_idx = i
+                    break
+
+            # fallback: use the global max/min in the future window if no local extremum found
+            if next_high_idx is None and len(pred) > first_future_idx:
+                rel = pred[first_future_idx:]
+                if rel.size:
+                    next_high_idx = int(np.argmax(rel)) + first_future_idx
+            if next_low_idx is None and len(pred) > first_future_idx:
+                rel = pred[first_future_idx:]
+                if rel.size:
+                    next_low_idx = int(np.argmin(rel)) + first_future_idx
+
+            if next_high_idx is not None and 0 <= next_high_idx < len(dt_objs):
+                next_high = dt_objs[next_high_idx].isoformat().replace("+00:00", "Z")
+                next_high_height = float(round(float(pred[next_high_idx]), 3))
+            if next_low_idx is not None and 0 <= next_low_idx < len(dt_objs):
+                next_low = dt_objs[next_low_idx].isoformat().replace("+00:00", "Z")
+                next_low_height = float(round(float(pred[next_low_idx]), 3))
+        except Exception:
+            _LOGGER.debug("Failed to compute next_high/next_low", exc_info=True)
+
         # moon phases for payload (best-effort)
         try:
             earth = sf_eph["earth"]
@@ -278,7 +351,17 @@ class TideProxy:
             "tide_strength": float(round(_compute_tide_strength(moon_phases[0] if moon_phases else None), 3)),
             "confidence": "in_memory_model",
             "source": "in_memory_harmonic_model",
-            "_helpers": {"constituents": self._constituents, "t_anchor": float(t_anchor), "period_seconds": float(period_seconds), "coef_vec_len": int(self._coef_vec.size)},
+            "_helpers": {
+                "constituents": self._constituents,
+                "t_anchor": float(t_anchor),
+                "period_seconds": float(period_seconds),
+                "coef_vec_len": int(self._coef_vec.size),
+            },
+            # compatibility fields for sensor.py
+            "next_high": next_high,
+            "next_low": next_low,
+            "next_high_height_m": next_high_height,
+            "next_low_height_m": next_low_height,
         }
 
         self._cache = raw_tide
@@ -442,3 +525,20 @@ def _compute_tide_strength(phase: Optional[float]) -> float:
         return float(max(0.0, min(1.0, val)))
     except Exception:
         return 0.5
+
+
+def _coerce_phase(phase: Any) -> Optional[float]:
+    """
+    Normalize a moon phase value to 0..1 float.
+    sensor.py expects tide_proxy._coerce_phase to exist.
+    """
+    if phase is None:
+        return None
+    try:
+        p = float(phase)
+        p = p % 1.0
+        if p < 0:
+            p += 1.0
+        return float(p)
+    except Exception:
+        return None

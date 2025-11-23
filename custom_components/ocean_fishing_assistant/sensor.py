@@ -558,13 +558,51 @@ class OFASensor(CoordinatorEntity):
         attrs["profile_used"] = current.get("profile_used")
         attrs["units"] = entry_units
 
-        # Tide & moon: prefer canonical tide block if present
+        # Strict tide handling (NO backwards-compat fallbacks)
         tide_obj = data.get("tide")
-        if tide_obj and isinstance(tide_obj, dict):
-            next_high = tide_obj.get("next_high")
-            next_low = tide_obj.get("next_low")
-            attrs["next_high_tide"] = {"timestamp": next_high} if next_high else None
-            attrs["next_low_tide"] = {"timestamp": next_low} if next_low else None
+        if not tide_obj or not isinstance(tide_obj, dict):
+            _LOGGER.error("Coordinator tide block missing or invalid (strict): %r", tide_obj)
+            attrs["next_high_tide"] = None
+            attrs["next_low_tide"] = None
+        else:
+            def _build_tide_attr(tobj: dict) -> Optional[dict]:
+                """
+                Expect tobj to be {'timestamp': ISOZ, 'height_m': float}. Return
+                dict with timestamp, canonical height_m, and converted display height/unit.
+                Return None if malformed (strict).
+                """
+                if not isinstance(tobj, dict):
+                    _LOGGER.error("Tide entry malformed (expected dict): %r", tobj)
+                    return None
+                ts = tobj.get("timestamp")
+                h_m = tobj.get("height_m")
+                if ts is None or h_m is None:
+                    _LOGGER.error("Tide entry missing required keys 'timestamp'/'height_m': %r", tobj)
+                    return None
+                # Ensure timestamp parses to ISOZ
+                dt = _parse_dt_isoz(ts)
+                if dt is None:
+                    _LOGGER.error("Tide entry timestamp not ISOZ: %r", ts)
+                    return None
+                # Canonical height (meters) — enforce float
+                try:
+                    h_m = float(h_m)
+                except Exception:
+                    _LOGGER.error("Tide entry height_m not numeric: %r", tobj.get("height_m"))
+                    return None
+
+                # Convert to display units using unit_helpers; will return (value, unit) or (None, None)
+                disp_val, disp_unit = unit_helpers.length_m_to_display(h_m, entry_units)
+                if disp_val is not None:
+                    disp_val = _round_opt(disp_val, 3)
+
+                return {"timestamp": dt.isoformat().replace("+00:00", "Z"), "height_m": round(h_m, 3), "height": disp_val, "height_unit": disp_unit}
+
+            nh_attr = _build_tide_attr(tide_obj.get("next_high"))
+            nl_attr = _build_tide_attr(tide_obj.get("next_low"))
+
+            attrs["next_high_tide"] = nh_attr
+            attrs["next_low_tide"] = nl_attr
 
         # moon_phase: prefer score_calc_raw.raw.moon_phase then canonical top-level moon_phase array
         moon_numeric = None
