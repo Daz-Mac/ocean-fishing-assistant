@@ -19,6 +19,42 @@ import numpy as np
 
 _LOGGER = logging.getLogger(__name__)
 
+# Enforce UTide dependency strictly for nodal corrections
+try:
+    import utide  # type: ignore
+    from utide import utilities as _utide_utils  # type: ignore
+    from utide import harmonics as _utide_harmonics  # type: ignore
+except Exception as exc:
+    raise RuntimeError(
+        "UTide (>=0.3.1) is required for nodal corrections.\n"
+        "Install it in your Home Assistant environment (e.g. `pip install utide==0.3.1`) and restart."
+    ) from exc
+
+# Verify UTide API surface expected for v0.3.1+ (strict)
+_ok_utide_api = False
+try:
+    ver = getattr(utide, "__version__", None)
+    if ver is not None:
+        try:
+            v_parts = [int(x) for x in ver.split('.')[:3]]
+            if v_parts >= [0, 3, 1]:
+                _ok_utide_api = True
+        except Exception:
+            # If version parsing fails, still accept but ensure utilities/harmonics functions exist
+            pass
+    # Also require at least one of the expected helpers to exist
+    if not _ok_utide_api:
+        if hasattr(_utide_utils, 'nfactors') or hasattr(_utide_utils, 'compute_nodal_factors') or hasattr(_utide_harmonics, 'ut_E'):
+            _ok_utide_api = True
+except Exception:
+    _ok_utide_api = False
+
+if not _ok_utide_api:
+    raise RuntimeError(
+        "UTide is installed but the expected API (nfactors/compute_nodal_factors or harmonics.ut_E) was not found.\n"
+        "Please install utide==0.3.1 or a compatible release and restart Home Assistant."
+    )
+
 # constants
 _DEFAULT_TTL = 15 * 60  # seconds
 _TIDE_HALF_DAY_HOURS = 12.42
@@ -34,6 +70,9 @@ GRID_SECONDS_DEFAULT = 300  # 5 minutes
 # Reference epoch for amplitude/phase storage (UTC)
 T_REF = datetime(2000, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 T_REF_EPOCH = T_REF.timestamp()
+
+# Vertical datum offset (meters). Set per-station by changing instance attribute if needed.
+VERTICAL_DATUM_OFFSET_M = 0.0
 
 # Constituent metadata (canonical)
 # Kept to ~10 constituents useful for short-term forecasts (today + 5 days)
@@ -259,6 +298,9 @@ class TideProxy:
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
 
+        # allow per-instance vertical datum override
+        self.VERTICAL_DATUM_OFFSET_M = VERTICAL_DATUM_OFFSET_M
+
         # Skyfield loader (lazy)
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
@@ -299,6 +341,7 @@ class TideProxy:
         for c in self._constituents:
             ratio = CONSTITUENT_DEFAULT_RATIOS.get(c, 0.0)
             a = float(m2_amp * ratio)
+            a = _ensure_amplitude_meters(a, name=c) if ' _ensure_amplitude_meters' in globals() else float(a)
             b = 0.0
             vals.extend([a, b])
         return np.asarray(vals, dtype=float)
@@ -364,7 +407,9 @@ class TideProxy:
             pred += float(A[i]) * np.cos(w * t_rel) + float(B[i]) * np.sin(w * t_rel)
         if float(self._bias) != 0.0:
             pred = pred + float(self._bias)
-        # optional clamp/scale applied later by caller if needed
+        # Apply vertical datum offset (per-instance)
+        if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0):
+            pred = pred + float(self.VERTICAL_DATUM_OFFSET_M)
         return grid_epochs, pred
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[Any]) -> Dict[str, Any]:
@@ -495,6 +540,82 @@ class TideProxy:
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
 
+        # Try to apply nodal corrections using UTide (strict)
+        try:
+            Hs, gs = coefvec_to_amp_phase(self._coef_vec, self._constituents, omegas, float(T_REF_EPOCH), float(t_anchor))
+            # Ensure amplitudes reasonable (meters)
+            Hs = np.array([_ensure_amplitude_meters(h, name=c) for h, c in zip(Hs, self._constituents)], dtype=float)
+            gs = np.asarray(gs, dtype=float)
+
+            # compute Julian date for t_anchor (UTC)
+            t_jd = float(t_anchor) / 86400.0 + 2440587.5
+
+            f_dict = {}
+            # Preferred: utilities.nfactors
+            if hasattr(_utide_utils, "nfactors"):
+                nf_out = _utide_utils.nfactors(t_jd, self._constituents)
+                if isinstance(nf_out, dict):
+                    for name in self._constituents:
+                        val = nf_out.get(name)
+                        if val is None:
+                            continue
+                        if isinstance(val, (tuple, list)) and len(val) >= 2:
+                            f_val = float(val[0])
+                            u_deg = float(val[1])
+                        elif isinstance(val, dict):
+                            f_val = float(val.get("f", 1.0))
+                            u_deg = float(val.get("u", 0.0))
+                        else:
+                            continue
+                        f_dict[name] = (f_val, math.radians(u_deg))
+            # fallback: utilities.compute_nodal_factors
+            if not f_dict and hasattr(_utide_utils, "compute_nodal_factors"):
+                nf_out = _utide_utils.compute_nodal_factors(t_jd, self._constituents)
+                if isinstance(nf_out, dict):
+                    for nm in nf_out:
+                        f_val = float(nf_out[nm].get("f", 1.0))
+                        u_deg = float(nf_out[nm].get("u", 0.0))
+                        f_dict[nm] = (f_val, math.radians(u_deg))
+            # fallback: harmonics.ut_E
+            if not f_dict and hasattr(_utide_harmonics, "ut_E"):
+                e_out = _utide_harmonics.ut_E(t_jd, lat=self.latitude)
+                # Parse e_out if it provides per-constituent factors (implementation dependent)
+                if hasattr(e_out, "factors"):
+                    for name in self._constituents:
+                        fac = e_out.factors.get(name)
+                        if fac:
+                            f_dict[name] = (float(fac.get("f", 1.0)), math.radians(float(fac.get("u", 0.0))))
+
+            if not f_dict:
+                raise RuntimeError("UTide did not return nodal factors for the configured constituents (API mismatch or unsupported utide build). Please install utide==0.3.1")
+
+            # apply nodal corrections
+            Hs_corr = []
+            gs_corr = []
+            for name, H_val, g_val in zip(self._constituents, Hs, gs):
+                f_u = f_dict.get(name)
+                if f_u:
+                    f_val, u_rad = f_u
+                    Hc = float(H_val) * float(f_val)
+                    gc = float(g_val) + float(u_rad)
+                    Hs_corr.append(Hc)
+                    gs_corr.append(gc)
+                else:
+                    Hs_corr.append(float(H_val))
+                    gs_corr.append(float(g_val))
+            Hs = np.asarray(Hs_corr, dtype=float)
+            gs = np.asarray(gs_corr, dtype=float)
+            # rebuild coef vec at t_anchor
+            new_coef = amp_phase_to_coefvec(Hs, gs, self._constituents, omegas, float(T_REF_EPOCH), float(t_anchor))
+            coef_arr = np.asarray(new_coef, dtype=float)
+            A = coef_arr[0::2].astype(float)
+            B = coef_arr[1::2].astype(float)
+            _LOGGER.debug("Applied UTide nodal corrections for t_anchor=%s (jd=%s)", t_anchor, t_jd)
+        except Exception:
+            _LOGGER.exception("UTide nodal correction failed (strict mode) - aborting initialization")
+            # Re-raise so the failure is explicit (strict requirement)
+            raise
+
         # For robust short-term forecasts, synthesize a fine grid over today + 5 days and use it for interpolation and peak finding
         grid_start_dt = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
         grid_end_dt = grid_start_dt + timedelta(days=5)
@@ -530,6 +651,9 @@ class TideProxy:
                 for j, c in enumerate(self._constituents):
                     w = omegas[c]
                     s += float(A[j]) * math.cos(w * t_rel_single) + float(B[j]) * math.sin(w * t_rel_single)
+                # apply vertical datum offset if not applied in _synthesize_grid path
+                if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0):
+                    s = s + float(self.VERTICAL_DATUM_OFFSET_M)
                 h = float(s)
             tide_heights_out.append(round(h, 3))
 
@@ -631,6 +755,9 @@ class TideProxy:
                         nh_h = self._height_analytic(root, omegas, A, B, t_anchor)
                 except Exception:
                     pass
+                # ensure vertical datum offset included (analytic path includes it already)
+                if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0) and not (grid_pred.size and nh_ts >= grid_epochs[0] and nh_ts <= grid_epochs[-1]):
+                    nh_h = nh_h + float(self.VERTICAL_DATUM_OFFSET_M)
                 next_high = datetime.fromtimestamp(nh_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 next_high_height = float(round(float(nh_h), 3))
             if next_low_tuple is not None:
@@ -642,6 +769,8 @@ class TideProxy:
                         nl_h = self._height_analytic(root, omegas, A, B, t_anchor)
                 except Exception:
                     pass
+                if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0) and not (grid_pred.size and nl_ts >= grid_epochs[0] and nl_ts <= grid_epochs[-1]):
+                    nl_h = nl_h + float(self.VERTICAL_DATUM_OFFSET_M)
                 next_low = datetime.fromtimestamp(nl_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 next_low_height = float(round(float(nl_h), 3))
         except Exception:
@@ -729,6 +858,8 @@ class TideProxy:
                 "t_ref": float(T_REF_EPOCH),
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
+                "vertical_datum_offset_m": float(getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0)),
+                "utide_applied": True,
             },
             # Strict canonical tide objects expected by sensor.py:
             "next_high": next_high_obj,
@@ -892,6 +1023,8 @@ class TideProxy:
         for j, c in enumerate(self._constituents):
             w = omegas[c]
             s += float(A[j]) * math.cos(w * t_rel) + float(B[j]) * math.sin(w * t_rel)
+        if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0):
+            s = s + float(self.VERTICAL_DATUM_OFFSET_M)
         return s
 
     def _derivative_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:

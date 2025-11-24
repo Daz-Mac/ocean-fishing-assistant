@@ -7,7 +7,8 @@
   "requirements": [
     "skyfield>=1.53,<2",
     "jplephem>=2.20,<3",
-    "numpy>=2.3.2,<3"
+    "numpy>=2.3.2,<3",
+    "utide>=0.3.1,<1"
   ],
   "config_flow": true,
   "dependencies": [],
