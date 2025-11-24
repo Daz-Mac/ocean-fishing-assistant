@@ -1,3 +1,5 @@
+# Full tide_proxy.py - updated: lazy non-blocking UTide import + restored helpers
+
 from __future__ import annotations
 import logging
 import math
@@ -19,41 +21,11 @@ import numpy as np
 
 _LOGGER = logging.getLogger(__name__)
 
-# Enforce UTide dependency strictly for nodal corrections
-try:
-    import utide  # type: ignore
-    from utide import utilities as _utide_utils  # type: ignore
-    from utide import harmonics as _utide_harmonics  # type: ignore
-except Exception as exc:
-    raise RuntimeError(
-        "UTide (>=0.3.1) is required for nodal corrections.\n"
-        "Install it in your Home Assistant environment (e.g. `pip install utide==0.3.1`) and restart."
-    ) from exc
-
-# Verify UTide API surface expected for v0.3.1+ (strict)
-_ok_utide_api = False
-try:
-    ver = getattr(utide, "__version__", None)
-    if ver is not None:
-        try:
-            v_parts = [int(x) for x in ver.split('.')[:3]]
-            if v_parts >= [0, 3, 1]:
-                _ok_utide_api = True
-        except Exception:
-            # If version parsing fails, still accept but ensure utilities/harmonics functions exist
-            pass
-    # Also require at least one of the expected helpers to exist
-    if not _ok_utide_api:
-        if hasattr(_utide_utils, 'nfactors') or hasattr(_utide_utils, 'compute_nodal_factors') or hasattr(_utide_harmonics, 'ut_E'):
-            _ok_utide_api = True
-except Exception:
-    _ok_utide_api = False
-
-if not _ok_utide_api:
-    raise RuntimeError(
-        "UTide is installed but the expected API (nfactors/compute_nodal_factors or harmonics.ut_E) was not found.\n"
-        "Please install utide==0.3.1 or a compatible release and restart Home Assistant."
-    )
+# UTide will be imported lazily in an executor to avoid blocking the HA event loop.
+utide = None
+_utide_utils = None
+_utide_harmonics = None
+_UTIDE_IMPORTED = False
 
 # constants
 _DEFAULT_TTL = 15 * 60  # seconds
@@ -195,6 +167,25 @@ def _coerce_phase(phase: Any) -> Optional[float]:
         return None
 
 
+def _ensure_amplitude_meters(amplitude: float, name: Optional[str] = None) -> float:
+    """
+    Heuristic guard to ensure amplitude is in meters.
+
+    - If amplitude > 50 -> likely millimetres (mm) -> convert /1000
+    - If amplitude between 1 and 50 -> ambiguous (could be cm or m) -> assume meters.
+    Adjust heuristics if you expect different source units.
+    """
+    try:
+        a = float(amplitude)
+    except Exception:
+        return float(amplitude)
+    if a > 50.0:
+        a_m = a / 1000.0
+        _LOGGER.debug("Converted amplitude for %s from likely mm: %s -> %s m", name or "<unknown>", a, a_m)
+        return a_m
+    return a
+
+
 def amp_phase_to_coefvec(
     amplitudes: Sequence[float],
     phases: Sequence[float],
@@ -254,6 +245,63 @@ def coefvec_to_amp_phase(
         Hs.append(H)
         gs.append(g)
     return np.asarray(Hs, dtype=float), np.asarray(gs, dtype=float)
+
+
+async def _ensure_utide_loaded(hass) -> None:
+    """
+    Lazily import UTide in an executor (non-blocking to the event loop),
+    verify API/version >= 0.3.1 or presence of expected helpers, and set module globals.
+    Raises RuntimeError if import or API checks fail (strict behavior).
+    """
+    global utide, _utide_utils, _utide_harmonics, _UTIDE_IMPORTED
+
+    if _UTIDE_IMPORTED:
+        return
+
+    def _blocking_import():
+        # executed in executor thread
+        import importlib
+        _ut = importlib.import_module("utide")
+        _utils = getattr(_ut, "utilities", None)
+        _harm = getattr(_ut, "harmonics", None)
+        ver = getattr(_ut, "__version__", None)
+        return _ut, _utils, _harm, ver
+
+    try:
+        _ut, _utils, _harm, ver = await hass.async_add_executor_job(_blocking_import)
+    except Exception as exc:
+        raise RuntimeError(
+            "UTide (>=0.3.1) is required for nodal corrections. "
+            "Install it in your Home Assistant environment (e.g. `pip install utide==0.3.1`) and restart."
+        ) from exc
+
+    ok_api = False
+    if ver:
+        try:
+            v_parts = [int(x) for x in str(ver).split(".")[:3]]
+            if v_parts >= [0, 3, 1]:
+                ok_api = True
+        except Exception:
+            pass
+
+    if not ok_api:
+        if _utils and (hasattr(_utils, "nfactors") or hasattr(_utils, "compute_nodal_factors")):
+            ok_api = True
+        if _harm and hasattr(_harm, "ut_E"):
+            ok_api = True
+
+    if not ok_api:
+        raise RuntimeError(
+            "UTide is installed but the expected API (nfactors/compute_nodal_factors or harmonics.ut_E) was not found. "
+            "Please install utide==0.3.1 or a compatible release and restart Home Assistant."
+        )
+
+    # assign module globals
+    utide = _ut
+    _utide_utils = _utils
+    _utide_harmonics = _harm
+    _UTIDE_IMPORTED = True
+    _LOGGER.debug("UTide successfully imported (lazy) and API verified")
 
 
 # ----
@@ -341,7 +389,7 @@ class TideProxy:
         for c in self._constituents:
             ratio = CONSTITUENT_DEFAULT_RATIOS.get(c, 0.0)
             a = float(m2_amp * ratio)
-            a = _ensure_amplitude_meters(a, name=c) if ' _ensure_amplitude_meters' in globals() else float(a)
+            a = _ensure_amplitude_meters(a, name=c)
             b = 0.0
             vals.extend([a, b])
         return np.asarray(vals, dtype=float)
@@ -540,8 +588,11 @@ class TideProxy:
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
 
-        # Try to apply nodal corrections using UTide (strict)
+        # Try to apply nodal corrections using UTide (strict, lazy non-blocking import)
         try:
+            # Ensure UTide is imported and API verified (async, non-blocking)
+            await _ensure_utide_loaded(self.hass)
+
             Hs, gs = coefvec_to_amp_phase(self._coef_vec, self._constituents, omegas, float(T_REF_EPOCH), float(t_anchor))
             # Ensure amplitudes reasonable (meters)
             Hs = np.array([_ensure_amplitude_meters(h, name=c) for h, c in zip(Hs, self._constituents)], dtype=float)
@@ -552,7 +603,7 @@ class TideProxy:
 
             f_dict = {}
             # Preferred: utilities.nfactors
-            if hasattr(_utide_utils, "nfactors"):
+            if _utide_utils and hasattr(_utide_utils, "nfactors"):
                 nf_out = _utide_utils.nfactors(t_jd, self._constituents)
                 if isinstance(nf_out, dict):
                     for name in self._constituents:
@@ -568,18 +619,19 @@ class TideProxy:
                         else:
                             continue
                         f_dict[name] = (f_val, math.radians(u_deg))
+
             # fallback: utilities.compute_nodal_factors
-            if not f_dict and hasattr(_utide_utils, "compute_nodal_factors"):
+            if not f_dict and _utide_utils and hasattr(_utide_utils, "compute_nodal_factors"):
                 nf_out = _utide_utils.compute_nodal_factors(t_jd, self._constituents)
                 if isinstance(nf_out, dict):
                     for nm in nf_out:
                         f_val = float(nf_out[nm].get("f", 1.0))
                         u_deg = float(nf_out[nm].get("u", 0.0))
                         f_dict[nm] = (f_val, math.radians(u_deg))
+
             # fallback: harmonics.ut_E
-            if not f_dict and hasattr(_utide_harmonics, "ut_E"):
+            if not f_dict and _utide_harmonics and hasattr(_utide_harmonics, "ut_E"):
                 e_out = _utide_harmonics.ut_E(t_jd, lat=self.latitude)
-                # Parse e_out if it provides per-constituent factors (implementation dependent)
                 if hasattr(e_out, "factors"):
                     for name in self._constituents:
                         fac = e_out.factors.get(name)
@@ -613,7 +665,6 @@ class TideProxy:
             _LOGGER.debug("Applied UTide nodal corrections for t_anchor=%s (jd=%s)", t_anchor, t_jd)
         except Exception:
             _LOGGER.exception("UTide nodal correction failed (strict mode) - aborting initialization")
-            # Re-raise so the failure is explicit (strict requirement)
             raise
 
         # For robust short-term forecasts, synthesize a fine grid over today + 5 days and use it for interpolation and peak finding
