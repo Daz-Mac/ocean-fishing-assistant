@@ -1,4 +1,3 @@
-# tide_proxy.py
 from __future__ import annotations
 import logging
 import math
@@ -20,12 +19,6 @@ import numpy as np
 
 _LOGGER = logging.getLogger(__name__)
 
-# UTide will be imported lazily in an executor to avoid blocking the HA event loop.
-utide = None
-_utide_utils = None
-_utide_harmonics = None
-_UTIDE_IMPORTED = False
-
 # constants
 _DEFAULT_TTL = 15 * 60  # seconds
 _TIDE_HALF_DAY_HOURS = 12.42
@@ -38,26 +31,19 @@ EPS_ROOT = 1e-9
 BISECT_TOL_SEC = 1e-3  # stopping tolerance for root bisection (seconds)
 GRID_SECONDS_DEFAULT = 300  # 5 minutes
 
-# Reference epoch for amplitude/phase storage (UTC)
-T_REF = datetime(2000, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-T_REF_EPOCH = T_REF.timestamp()
-
-# Vertical datum offset (meters). Set per-station by changing instance attribute if needed.
-VERTICAL_DATUM_OFFSET_M = 0.0
-
 # Constituent metadata (canonical)
-# Kept to ~10 constituents useful for short-term forecasts (today + 5 days)
 CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
-    "M2": 12.420641,  # principal lunar semidiurnal
-    "S2": 12.0,       # principal solar semidiurnal
-    "N2": 12.658348,  # larger lunar elliptic semidiurnal
-    "K1": 23.934472,  # lunisolar diurnal
-    "O1": 25.819338,  # lunar diurnal
-    "P1": 24.065887,
-    "Q1": 26.868352,
+    "M2": 12.4206,
+    "S2": 12.0,
+    "N2": 12.6583,
+    "K1": 23.9345,
+    "O1": 25.8193,
+    # a few extra short/overtone constituents for better default waveform
+    "P1": 24.0659,
+    "Q1": 26.8683,
     "S1": 24.0,
-    "M4": 12.420641 / 2.0,
-    "M6": 12.420641 / 3.0,
+    "M4": 12.4206 / 2.0,
+    "M6": 12.4206 / 3.0,
 }
 
 # Default relative amplitudes (heuristic; not station-specific)
@@ -166,148 +152,104 @@ def _coerce_phase(phase: Any) -> Optional[float]:
         return None
 
 
-def _ensure_amplitude_meters(amplitude: float, name: Optional[str] = None) -> float:
+# ----
+# UTide nfactors helper (ported / wrapped)
+# ----
+def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
     """
-    Heuristic guard to ensure amplitude is in meters.
+    Compute nodal amplitude factor (f) and phase correction (u) for the given
+    Julian date (jd) and constituent names using installed UTide helpers where available.
 
-    - If amplitude > 50 -> likely millimetres (mm) -> convert /1000
-    - If amplitude between 1 and 50 -> ambiguous (could be cm or m) -> assume meters.
-    Adjust heuristics if you expect different source units.
+    Parameters
+    ----------
+    jd : float
+        Time in days (Julian-like). UTide's astronomy code accepts jd in the
+        same convention used by UTide (see utide.astronomy.ut_astron doc).
+    names : sequence of str
+        Constituent short names, e.g. ['M2', 'S2', ...]
+    latitude : float
+        Latitude in degrees (passed to UTide harmonics.FUV if used)
+
+    Returns
+    -------
+    dict: {name: {"f": float, "u": float_in_degrees}}
     """
-    try:
-        a = float(amplitude)
-    except Exception:
-        return float(amplitude)
-    if a > 50.0:
-        a_m = a / 1000.0
-        _LOGGER.debug("Converted amplitude for %s from likely mm: %s -> %s m", name or "<unknown>", a, a_m)
-        return a_m
-    return a
-
-
-def amp_phase_to_coefvec(
-    amplitudes: Sequence[float],
-    phases: Sequence[float],
-    constituents: Sequence[str],
-    omegas: Dict[str, float],
-    t_ref_epoch: float,
-    t_anchor_epoch: float,
-) -> np.ndarray:
-    """
-    Convert amplitude/phase pairs (H_k, g_k) defined at reference epoch t_ref into
-    coef_vec (A0,B0,A1,B1,...) aligned with t_anchor used by the internal model.
-
-    phases are expected in radians.
-    Formula:
-      phi = g_k + omega * (t_ref - t_anchor)
-      term = H_k * cos(omega*(t - t_anchor) + phi)
-      => A = H_k * cos(phi), B = -H_k * sin(phi)
-    """
-    amps = np.asarray(amplitudes, dtype=float)
-    phs = np.asarray(phases, dtype=float)
-    vals: List[float] = []
-    for i, c in enumerate(constituents):
-        H = float(amps[i])
-        g = float(phs[i])
-        omega = float(omegas[c])
-        phi = g + omega * (t_ref_epoch - t_anchor_epoch)
-        A = H * math.cos(phi)
-        B = -H * math.sin(phi)
-        vals.extend([A, B])
-    return np.asarray(vals, dtype=float)
-
-
-def coefvec_to_amp_phase(
-    coef_vec: Sequence[float],
-    constituents: Sequence[str],
-    omegas: Dict[str, float],
-    t_ref_epoch: float,
-    t_anchor_epoch: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Convert internal coef_vec (A,B ordered) back to amplitude & phase at t_ref.
-    Returns (H_array, g_array) with g in radians.
-    """
-    arr = np.asarray(coef_vec, dtype=float)
-    A = arr[0::2]
-    B = arr[1::2]
-    Hs = []
-    gs = []
-    for i, c in enumerate(constituents):
-        omega = float(omegas[c])
-        A_i = float(A[i])
-        B_i = float(B[i])
-        H = math.hypot(A_i, B_i)
-        phi = math.atan2(-B_i, A_i)  # because A = H cos(phi), B = -H sin(phi)
-        # convert phi at t_anchor back to phase at t_ref: g = phi - omega*(t_ref - t_anchor)
-        g = phi - omega * (t_ref_epoch - t_anchor_epoch)
-        Hs.append(H)
-        gs.append(g)
-    return np.asarray(Hs, dtype=float), np.asarray(gs, dtype=float)
-
-
-async def _ensure_utide_loaded(hass) -> None:
-    """
-    Lazily import UTide in an executor (non-blocking to the event loop),
-    verify utilities.nfactors exists (strict requirement), and set module globals.
-    Raises RuntimeError if import or API checks fail (strict behavior).
-
-    This variant logs the utide version and module members to aid debugging when
-    manifest.json reports utide installed but the API is different than expected.
-    """
-    global utide, _utide_utils, _utide_harmonics, _UTIDE_IMPORTED
-
-    if _UTIDE_IMPORTED:
-        return
-
-    def _blocking_import():
-        # executed in executor thread
-        import importlib
-        _ut = importlib.import_module("utide")
-        _utils = getattr(_ut, "utilities", None)
-        _harm = getattr(_ut, "harmonics", None)
-        ver = getattr(_ut, "__version__", None)
-        return _ut, _utils, _harm, ver
+    out: Dict[str, Dict[str, float]] = {}
+    # default fallback
+    for nm in names:
+        out[nm] = {"f": 1.0, "u": 0.0}
 
     try:
-        _ut, _utils, _harm, ver = await hass.async_add_executor_job(_blocking_import)
-    except Exception as exc:
-        raise RuntimeError(
-            "UTide (>=0.3.1) is required for nodal corrections. "
-            "Install it in your Home Assistant environment (e.g. `pip install utide==0.3.1`) and restart."
-        ) from exc
+        # Import UTide internals lazily so the integration doesn't fail if utide missing
+        import utide  # type: ignore
+        # harmonics module provides FUV which returns (F, U, V) arrays
+        from utide import harmonics  # type: ignore
+        # UTide top-level mapping from constituent name -> index (1-based or 0-based depending on version)
+        constit_index = getattr(utide, "constit_index_dict", None)
+        # utide.ut_constants is usually available as utide.ut_constants or utide._ut_constants.ut_constants
+        uc = getattr(utide, "ut_constants", None)
+        if constit_index is None or uc is None:
+            # can't proceed with UTide internals
+            return out
 
-    # Diagnostic logging: show what's present in the installed utide package
-    try:
-        ver = getattr(_ut, "__version__", "<unknown>")
-        top_members = sorted([n for n in dir(_ut) if not n.startswith("_")])
-        utils_exist = bool(_utils)
-        util_members = sorted([n for n in dir(_utils) if not n.startswith("_")]) if _utils else []
-        has_nfactors = hasattr(_utils, "nfactors") if _utils else False
-        _LOGGER.info(
-            "UTide imported (version=%s). top-level: %s; utilities present=%s; utilities members=%s; utilities.nfactors=%s",
-            ver,
-            top_members,
-            utils_exist,
-            util_members,
-            has_nfactors,
-        )
-    except Exception:
-        _LOGGER.debug("UTide import diagnostic logging failed", exc_info=True)
+        # Prepare indices list for requested names. Filter out unknown constituents.
+        known = []
+        name_idx_map = {}
+        for nm in names:
+            if nm in constit_index:
+                # utide.constit_index_dict values appear to be 1-based indices; convert to 0-based
+                idx = int(constit_index[nm]) - 1
+                if idx < 0:
+                    idx = 0
+                known.append(idx)
+                name_idx_map[nm] = idx
+            else:
+                # unknown -> keep default f=1,u=0
+                _LOGGER.debug("nfactors: constituent %s not found in utide.constit_index_dict", nm)
 
-    # Strict mode: require utilities.nfactors to be present
-    if not (_utils and hasattr(_utils, "nfactors")):
-        raise RuntimeError(
-            "UTide strict mode: required function utilities.nfactors missing. "
-            "Install utide==0.3.1 (or compatible) and restart Home Assistant."
-        )
+        if not known:
+            return out
 
-    # assign module globals
-    utide = _ut
-    _utide_utils = _utils
-    _utide_harmonics = _harm
-    _UTIDE_IMPORTED = True
-    _LOGGER.debug("UTide successfully imported (lazy) and utilities.nfactors verified")
+        # Prepare arrays expected by harmonics.FUV
+        # FUV signature in UTide repo: FUV(t, tref, lind, lat, ngflgs)
+        # where 'lind' are the internal indices used by UTide - the 'known' indices above map directly
+        lind = np.atleast_1d(known).astype(int)
+
+        # call harmonics.FUV; use single time array [jd] (UTide expects days)
+        # build ngflgs to enable nodal/satellite corrections (conservative default):
+        # [nodsatlint, nodsatnone, gwchlint, gwchnone] -> choose to apply nodal correction: leave nodsatnone=False
+        ngflgs = [False, False, False, False]
+        # Prefer to call FUV directly if present
+        if hasattr(harmonics, "FUV"):
+            # F, U, V shapes: (nt, nc) or similar
+            t_arr = np.atleast_1d(jd)
+            try:
+                F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
+            except TypeError:
+                # Some UTide versions define FUV with signature (t, tref, lind, lat, ngflgs)
+                F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
+            # F and U are arrays shaped (nt, nc)
+            # we used nt=1, so pick first row
+            F_row = np.asarray(F).reshape((1, -1))[0]
+            U_row = np.asarray(U).reshape((1, -1))[0]
+            # U returned by UTide is in cycles (fraction of 2π). Convert to degrees (cycles * 360)
+            for nm, idx in name_idx_map.items():
+                try:
+                    pos = lind.tolist().index(int(idx))
+                except ValueError:
+                    # if not found, leave default
+                    continue
+                fval = float(F_row[pos])
+                uval_deg = float(U_row[pos]) * 360.0
+                out[nm] = {"f": fval if np.isfinite(fval) else 1.0, "u": uval_deg if np.isfinite(uval_deg) else 0.0}
+            return out
+
+        # If harmonics.FUV not present, return defaults
+        return out
+
+    except Exception:  # pragma: no cover - defensive fallback
+        _LOGGER.debug("nfactors: UTide not available or call failed; using fallback factors", exc_info=True)
+        return out
 
 
 # ----
@@ -352,9 +294,6 @@ class TideProxy:
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
 
-        # allow per-instance vertical datum override
-        self.VERTICAL_DATUM_OFFSET_M = VERTICAL_DATUM_OFFSET_M
-
         # Skyfield loader (lazy)
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
@@ -395,7 +334,6 @@ class TideProxy:
         for c in self._constituents:
             ratio = CONSTITUENT_DEFAULT_RATIOS.get(c, 0.0)
             a = float(m2_amp * ratio)
-            a = _ensure_amplitude_meters(a, name=c)
             b = 0.0
             vals.extend([a, b])
         return np.asarray(vals, dtype=float)
@@ -445,26 +383,6 @@ class TideProxy:
             except Exception:
                 _LOGGER.exception("Failed to load Skyfield resources")
                 raise
-
-    def _synthesize_grid(self, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float, start_epoch: float, end_epoch: float, grid_seconds: int = GRID_SECONDS_DEFAULT) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Synthesize the harmonic model onto a regular grid (epoch seconds) between start_epoch and end_epoch.
-        Returns (grid_epochs, grid_pred)
-        """
-        if end_epoch <= start_epoch:
-            return np.array([], dtype=float), np.array([], dtype=float)
-        grid_epochs = np.arange(start_epoch, end_epoch + 1, grid_seconds, dtype=float)
-        t_rel = grid_epochs - t_anchor
-        pred = np.zeros_like(grid_epochs, dtype=float)
-        for i, c in enumerate(self._constituents):
-            w = omegas[c]
-            pred += float(A[i]) * np.cos(w * t_rel) + float(B[i]) * np.sin(w * t_rel)
-        if float(self._bias) != 0.0:
-            pred = pred + float(self._bias)
-        # Apply vertical datum offset (per-instance)
-        if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0):
-            pred = pred + float(self.VERTICAL_DATUM_OFFSET_M)
-        return grid_epochs, pred
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[Any]) -> Dict[str, Any]:
         """
@@ -594,128 +512,61 @@ class TideProxy:
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
 
-        # Try to apply nodal corrections using UTide (strict, lazy non-blocking import)
+        # --- Apply UTide nodal corrections (if UTide present) to A,B ---
         try:
-            # Ensure UTide is imported and API verified (async, non-blocking)
-            await _ensure_utide_loaded(self.hass)
-
-            Hs, gs = coefvec_to_amp_phase(self._coef_vec, self._constituents, omegas, float(T_REF_EPOCH), float(t_anchor))
-            # Ensure amplitudes reasonable (meters)
-            Hs = np.array([_ensure_amplitude_meters(h, name=c) for h, c in zip(Hs, self._constituents)], dtype=float)
-            gs = np.asarray(gs, dtype=float)
-
-            # compute Julian date for t_anchor (UTC)
-            t_jd = float(t_anchor) / 86400.0 + 2440587.5
-
-            # Strict nodal-factor discovery: require utilities.nfactors only (no fallbacks)
-            f_dict = {}
-
-            # Must have utide utilities.nfactors present (strict requirement)
-            if not (_utide_utils and hasattr(_utide_utils, "nfactors")):
-                raise RuntimeError(
-                    "UTide strict mode: required function utilities.nfactors missing. "
-                    "Install utide==0.3.1 (or compatible) and restart Home Assistant."
-                )
-
-            # Call nfactors and validate its output strictly
-            try:
-                nf_out = _utide_utils.nfactors(t_jd, self._constituents)
-            except Exception as exc:
-                raise RuntimeError("UTide strict mode: utilities.nfactors() call failed") from exc
-
-            if not isinstance(nf_out, dict):
-                raise RuntimeError("UTide strict mode: utilities.nfactors() returned unexpected type (expected dict)")
-
-            # Expect each constituent to be present with either tuple/list (f,u) or dict with 'f' and 'u'
-            for name in self._constituents:
-                if name not in nf_out:
-                    raise RuntimeError(f"UTide strict mode: nfactors did not return data for constituent '{name}'")
-                val = nf_out[name]
-                if isinstance(val, (tuple, list)) and len(val) >= 2:
-                    f_val = float(val[0])
-                    u_deg = float(val[1])
-                elif isinstance(val, dict):
-                    if "f" not in val or "u" not in val:
-                        raise RuntimeError(f"UTide strict mode: nfactors returned dict for '{name}' missing 'f' or 'u'")
-                    f_val = float(val["f"])
-                    u_deg = float(val["u"])
-                else:
-                    raise RuntimeError(
-                        f"UTide strict mode: nfactors returned unsupported format for '{name}': {type(val)}"
-                    )
-                f_dict[name] = (f_val, math.radians(u_deg))
-
-            # apply nodal corrections
-            Hs_corr = []
-            gs_corr = []
-            for name, H_val, g_val in zip(self._constituents, Hs, gs):
-                f_u = f_dict.get(name)
-                if f_u:
-                    f_val, u_rad = f_u
-                    Hc = float(H_val) * float(f_val)
-                    gc = float(g_val) + float(u_rad)
-                    Hs_corr.append(Hc)
-                    gs_corr.append(gc)
-                else:
-                    # In strict mode we shouldn't ever reach here because we required each constituent above
-                    Hs_corr.append(float(H_val))
-                    gs_corr.append(float(g_val))
-            Hs = np.asarray(Hs_corr, dtype=float)
-            gs = np.asarray(gs_corr, dtype=float)
-            # rebuild coef vec at t_anchor
-            new_coef = amp_phase_to_coefvec(Hs, gs, self._constituents, omegas, float(T_REF_EPOCH), float(t_anchor))
-            coef_arr = np.asarray(new_coef, dtype=float)
-            A = coef_arr[0::2].astype(float)
-            B = coef_arr[1::2].astype(float)
-            _LOGGER.debug("Applied UTide nodal corrections for t_anchor=%s (jd=%s)", t_anchor, t_jd)
+            # convert t_anchor (epoch seconds) to Julian-like days for UTide:
+            # UTide's ut_astron in package expects jd in days; common approach is to use Julian date:
+            jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
+            nf = nfactors(jd_anchor, self._constituents, latitude=self.latitude)
+            # convert A,B to amplitude/phase, apply f (multiplier) and u (degrees), then back
+            for i, cname in enumerate(self._constituents):
+                if cname in nf:
+                    fval = float(nf[cname].get("f", 1.0))
+                    udeg = float(nf[cname].get("u", 0.0))
+                    # current coefficients: A*cos(w t) + B*sin(w t) = R * cos(w t - phi)
+                    # where phi = atan2(B, A) with our sign convention; we will recompute A,B from R' and phi'
+                    R = math.hypot(float(A[i]), float(B[i]))
+                    if R <= 0.0 or not np.isfinite(R):
+                        # nothing to adjust
+                        continue
+                    phi = math.atan2(float(B[i]), float(A[i]))  # radians
+                    # apply nodal amplitude factor and phase correction
+                    R2 = R * float(fval)
+                    # UTide's U is in cycles -> degrees; convert to radians and add
+                    phi2 = phi + math.radians(float(udeg))
+                    # rebuild corrected A,B
+                    A[i] = float(R2 * math.cos(phi2))
+                    B[i] = float(R2 * math.sin(phi2))
         except Exception:
-            _LOGGER.exception("UTide nodal correction failed (strict mode) - aborting initialization")
-            raise
+            # don't fail the whole prediction because nodal application failed
+            _LOGGER.debug("Applying nodal corrections failed; proceeding without them", exc_info=True)
 
-        # For robust short-term forecasts, synthesize a fine grid over today + 5 days and use it for interpolation and peak finding
-        grid_start_dt = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
-        grid_end_dt = grid_start_dt + timedelta(days=5)
-        start_epoch = grid_start_dt.timestamp()
-        end_epoch = grid_end_dt.timestamp()
+        # compute prediction in original timestamp order
+        t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
+        pred = np.zeros_like(t_rel)
+        for i, c in enumerate(self._constituents):
+            w = omegas[c]
+            pred += A[i] * np.cos(w * t_rel) + B[i] * np.sin(w * t_rel)
+        if float(self._bias) != 0.0:
+            pred = pred + float(self._bias)
 
-        grid_epochs, grid_pred = self._synthesize_grid(omegas, A, B, t_anchor, start_epoch, end_epoch, GRID_SECONDS_DEFAULT)
-
-        # If clamp/scale enabled, apply to grid and (later) to sampled preds
-        if self._auto_clamp_enabled and grid_pred.size:
+        # clamp/scale (optional)
+        if self._auto_clamp_enabled:
             try:
                 if self._max_amplitude_m is not None:
-                    current_amp = float(np.max(grid_pred) - np.min(grid_pred))
+                    current_amp = float(np.max(pred) - np.min(pred))
                     if current_amp > float(self._max_amplitude_m) and current_amp > 1e-12:
-                        mean_val = float(np.mean(grid_pred))
+                        mean_val = float(np.mean(pred))
                         scale = float(self._max_amplitude_m) / current_amp
-                        grid_pred = mean_val + (grid_pred - mean_val) * scale
+                        pred = mean_val + (pred - mean_val) * scale
                 if self._min_height_floor is not None:
-                    grid_pred = np.maximum(grid_pred, float(self._min_height_floor))
+                    pred = np.maximum(pred, float(self._min_height_floor))
             except Exception:
-                _LOGGER.exception("Error applying clamp/scale to grid")
+                _LOGGER.exception("Error applying clamp/scale")
 
-        # compute heights for requested timestamps by interpolating the grid where possible
-        req_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
-        tide_heights_out: List[Optional[float]] = []
-        for e in req_epochs:
-            if grid_epochs.size and e >= grid_epochs[0] and e <= grid_epochs[-1]:
-                h = float(np.interp(e, grid_epochs, grid_pred))
-            else:
-                # fallback to analytic evaluation for out-of-grid times
-                t_rel_single = e - t_anchor
-                s = float(self._bias) if hasattr(self, "_bias") else 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += float(A[j]) * math.cos(w * t_rel_single) + float(B[j]) * math.sin(w * t_rel_single)
-                # apply vertical datum offset if not applied in _synthesize_grid path
-                if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0):
-                    s = s + float(self.VERTICAL_DATUM_OFFSET_M)
-                h = float(s)
-            tide_heights_out.append(round(h, 3))
+        tide_heights = [round(float(v), 3) for v in pred.tolist()]
 
-        tide_heights = tide_heights_out
-
-        # --- compute next high/low using the grid for candidate detection and analytic refinement ---
+        # --- compute next high/low (timestamps + heights) for sensor compatibility (strict dict shape) ---
         next_high: Optional[str] = None
         next_low: Optional[str] = None
         next_high_height: Optional[float] = None
@@ -723,65 +574,118 @@ class TideProxy:
 
         try:
             now_ts = now.timestamp()
-            # candidate detection via derivative sampled on grid (analytic derivative evaluated on grid points)
-            candidates: List[float] = []
-            if grid_epochs.size:
-                # analytic derivative at grid points
-                t_rel_grid = grid_epochs - t_anchor
-                deriv_grid = np.zeros_like(grid_pred)
+
+            # use sorted times for analytic root finding (safer)
+            t_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
+            order = np.argsort(t_epochs)
+            t_sorted = t_epochs[order]
+            pred_sorted = pred[order]
+
+            # find first future index in sorted array
+            first_future_idx_sorted = 0
+            for i_s, tval in enumerate(t_sorted):
+                if tval >= now_ts:
+                    first_future_idx_sorted = i_s
+                    break
+
+            # helpers for continuous model evaluation
+            def _height_at_epoch(epoch_ts: float) -> float:
+                t_rel_local = epoch_ts - t_anchor
+                s = float(self._bias) if hasattr(self, "_bias") else 0.0
                 for j, c in enumerate(self._constituents):
                     w = omegas[c]
-                    deriv_grid += -float(A[j]) * w * np.sin(w * t_rel_grid) + float(B[j]) * w * np.cos(w * t_rel_grid)
-                # find sign changes in derivative after 'now'
-                idx_start = int(max(0, np.searchsorted(grid_epochs, now_ts) - 1))
-                for k in range(idx_start, len(grid_epochs) - 1):
-                    d0 = deriv_grid[k]
-                    d1 = deriv_grid[k + 1]
-                    t0 = float(grid_epochs[k])
-                    t1 = float(grid_epochs[k + 1])
-                    if abs(d0) < EPS_DERIV and t0 >= now_ts:
-                        candidates.append(t0)
-                    if d0 * d1 < 0:
-                        # refine root analytically between t0 and t1
-                        def _deriv_local(x):
-                            t_rel_local = x - t_anchor
-                            s = 0.0
-                            for jj, cc in enumerate(self._constituents):
-                                ww = omegas[cc]
-                                s += -float(A[jj]) * ww * math.sin(ww * t_rel_local) + float(B[jj]) * ww * math.cos(ww * t_rel_local)
-                            return s
+                    s += float(A[j]) * math.cos(w * t_rel_local) + float(B[j]) * math.sin(w * t_rel_local)
+                return s
 
-                        root = None
-                        try:
-                            root = (lambda f, a, b: self._find_root_bisect_helper(f, a, b))( _deriv_local, t0, t1)
-                        except Exception:
-                            root = None
+            def _derivative_at_epoch(epoch_ts: float) -> float:
+                t_rel_local = epoch_ts - t_anchor
+                s = 0.0
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    s += -float(A[j]) * w * math.sin(w * t_rel_local) + float(B[j]) * w * math.cos(w * t_rel_local)
+                return s
+
+            def _second_derivative_at_epoch(epoch_ts: float) -> float:
+                t_rel_local = epoch_ts - t_anchor
+                s = 0.0
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel_local) - float(B[j]) * (w ** 2) * math.sin(w * t_rel_local)
+                return s
+
+            def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
+                fa = f(a)
+                fb = f(b)
+                if abs(fa) < EPS_ROOT:
+                    return a
+                if abs(fb) < EPS_ROOT:
+                    return b
+                if fa * fb > 0:
+                    return None
+                lo = a
+                hi = b
+                fa_local = fa
+                for _ in range(maxiter):
+                    mid = 0.5 * (lo + hi)
+                    fm = f(mid)
+                    if abs(fm) < EPS_ROOT or (hi - lo) < tol:
+                        return mid
+                    if fa_local * fm <= 0:
+                        hi = mid
+                    else:
+                        lo = mid
+                        fa_local = fm
+                return 0.5 * (lo + hi)
+
+            candidates: List[float] = []
+
+            # For each interval starting near the first future window, subdivide if necessary and detect derivative sign changes
+            n_sorted = len(t_sorted)
+            start_idx = max(0, first_future_idx_sorted - 1)
+            for i in range(start_idx, n_sorted - 1):
+                a = float(t_sorted[i])
+                b = float(t_sorted[i + 1])
+                dt_interval = b - a
+                if dt_interval <= GRID_SECONDS_DEFAULT:
+                    d_a = _derivative_at_epoch(a)
+                    d_b = _derivative_at_epoch(b)
+                    if abs(d_a) < EPS_DERIV and a >= now_ts:
+                        candidates.append(a)
+                    if d_a * d_b < 0:
+                        root = _find_root_bisection(_derivative_at_epoch, a, b)
                         if root is not None and root >= now_ts:
                             candidates.append(root)
-            # fallback: if no grid or no candidates, sample a small forward window analytically to find extrema
-            if not candidates:
-                # sample analytic derivative across next 48 hours at GRID_SECONDS_DEFAULT spacing
-                span_end = now_ts + 48 * 3600
-                pts = np.arange(now_ts, span_end + 1, GRID_SECONDS_DEFAULT)
-                deriv_vals = []
-                for x in pts:
-                    deriv_vals.append(self._derivative_analytic(x, omegas, A, B, t_anchor))
-                deriv_vals = np.array(deriv_vals)
-                for k in range(len(pts) - 1):
-                    if deriv_vals[k] * deriv_vals[k + 1] < 0:
-                        candidates.append(float(pts[k]))
+                else:
+                    # subdivide the interval into smaller sub-intervals of ~GRID_SECONDS_DEFAULT
+                    n_sub = int(math.ceil(dt_interval / GRID_SECONDS_DEFAULT))
+                    pts = [a + i * dt_interval / n_sub for i in range(n_sub + 1)]
+                    prev_d = _derivative_at_epoch(pts[0])
+                    if abs(prev_d) < EPS_DERIV and pts[0] >= now_ts:
+                        candidates.append(pts[0])
+                    for k in range(1, len(pts)):
+                        cur_pt = pts[k]
+                        cur_d = _derivative_at_epoch(cur_pt)
+                        if abs(cur_d) < EPS_DERIV and cur_pt >= now_ts:
+                            candidates.append(cur_pt)
+                        if prev_d * cur_d < 0:
+                            root = _find_root_bisection(_derivative_at_epoch, pts[k - 1], pts[k])
+                            if root is not None and root >= now_ts:
+                                candidates.append(root)
+                        prev_d = cur_d
 
-            # classify candidates into maxima/minima using second derivative evaluation
+            # classify candidates into maxima/minima using second derivative
             maxima: List[Tuple[float, float]] = []
             minima: List[Tuple[float, float]] = []
             for rt in candidates:
-                h = self._height_analytic(rt, omegas, A, B, t_anchor)
-                sec = self._second_derivative_analytic(rt, omegas, A, B, t_anchor)
+                h = _height_at_epoch(rt)
+                sec = _second_derivative_at_epoch(rt)
                 if sec < -EPS_DERIV:
                     maxima.append((rt, h))
                 elif sec > EPS_DERIV:
                     minima.append((rt, h))
+                # ignore near-inflection candidates
 
+            # pick earliest future max/min
             next_high_tuple: Optional[Tuple[float, float]] = None
             next_low_tuple: Optional[Tuple[float, float]] = None
             if maxima:
@@ -789,44 +693,26 @@ class TideProxy:
             if minima:
                 next_low_tuple = min(minima, key=lambda x: x[0])
 
-            # fallback: use grid-sampled argmax/argmin
-            if next_high_tuple is None and grid_pred.size:
-                idx = int(np.argmax(grid_pred[np.searchsorted(grid_epochs, now_ts):]))
-                idx_abs = np.searchsorted(grid_epochs, now_ts) + idx
-                if idx_abs < len(grid_epochs):
-                    next_high_tuple = (float(grid_epochs[idx_abs]), float(grid_pred[idx_abs]))
-            if next_low_tuple is None and grid_pred.size:
-                idx = int(np.argmin(grid_pred[np.searchsorted(grid_epochs, now_ts):]))
-                idx_abs = np.searchsorted(grid_epochs, now_ts) + idx
-                if idx_abs < len(grid_epochs):
-                    next_low_tuple = (float(grid_epochs[idx_abs]), float(grid_pred[idx_abs]))
+            # fallback: use sampled argmax/argmin on sorted future samples
+            if next_high_tuple is None:
+                rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
+                if rel.size:
+                    idx_rel = int(np.argmax(rel))
+                    idx_sorted = first_future_idx_sorted + idx_rel
+                    next_high_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
+            if next_low_tuple is None:
+                rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
+                if rel.size:
+                    idx_rel = int(np.argmin(rel))
+                    idx_sorted = first_future_idx_sorted + idx_rel
+                    next_low_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
 
             if next_high_tuple is not None:
                 nh_ts, nh_h = next_high_tuple
-                # refine using analytic bisection around a small window
-                try:
-                    root = self._refine_extremum_around(nh_ts - GRID_SECONDS_DEFAULT, nh_ts + GRID_SECONDS_DEFAULT, omegas, A, B, t_anchor)
-                    if root is not None:
-                        nh_ts = root
-                        nh_h = self._height_analytic(root, omegas, A, B, t_anchor)
-                except Exception:
-                    pass
-                # ensure vertical datum offset included (analytic path includes it already)
-                if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0) and not (grid_pred.size and nh_ts >= grid_epochs[0] and nh_ts <= grid_epochs[-1]):
-                    nh_h = nh_h + float(self.VERTICAL_DATUM_OFFSET_M)
                 next_high = datetime.fromtimestamp(nh_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 next_high_height = float(round(float(nh_h), 3))
             if next_low_tuple is not None:
                 nl_ts, nl_h = next_low_tuple
-                try:
-                    root = self._refine_extremum_around(nl_ts - GRID_SECONDS_DEFAULT, nl_ts + GRID_SECONDS_DEFAULT, omegas, A, B, t_anchor)
-                    if root is not None:
-                        nl_ts = root
-                        nl_h = self._height_analytic(root, omegas, A, B, t_anchor)
-                except Exception:
-                    pass
-                if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0) and not (grid_pred.size and nl_ts >= grid_epochs[0] and nl_ts <= grid_epochs[-1]):
-                    nl_h = nl_h + float(self.VERTICAL_DATUM_OFFSET_M)
                 next_low = datetime.fromtimestamp(nl_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 next_low_height = float(round(float(nl_h), 3))
         except Exception:
@@ -858,6 +744,7 @@ class TideProxy:
         tide_strength_value = 0.5
         try:
             if sf_ts is not None and sf_eph is not None and len(dt_objs) > 0:
+                # try to compute a physical proxy using moon distance and alignment
                 try:
                     t0 = sf_ts.from_datetime(dt_objs[0])
                     earth = sf_eph["earth"]
@@ -911,11 +798,8 @@ class TideProxy:
             "_helpers": {
                 "constituents": self._constituents,
                 "t_anchor": float(t_anchor),
-                "t_ref": float(T_REF_EPOCH),
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
-                "vertical_datum_offset_m": float(getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0)),
-                "utide_applied": True,
             },
             # Strict canonical tide objects expected by sensor.py:
             "next_high": next_high_obj,
@@ -1071,67 +955,3 @@ class TideProxy:
                 _LOGGER.exception("compute_period_indices_for_timestamps failed for date %s: %s", d.isoformat(), exc)
                 raise
         return result
-
-    # --- analytic helpers used by the grid-based peak finder ---
-    def _height_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:
-        t_rel = epoch_ts - t_anchor
-        s = float(self._bias) if hasattr(self, "_bias") else 0.0
-        for j, c in enumerate(self._constituents):
-            w = omegas[c]
-            s += float(A[j]) * math.cos(w * t_rel) + float(B[j]) * math.sin(w * t_rel)
-        if getattr(self, "VERTICAL_DATUM_OFFSET_M", 0.0):
-            s = s + float(self.VERTICAL_DATUM_OFFSET_M)
-        return s
-
-    def _derivative_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:
-        t_rel = epoch_ts - t_anchor
-        s = 0.0
-        for j, c in enumerate(self._constituents):
-            w = omegas[c]
-            s += -float(A[j]) * w * math.sin(w * t_rel) + float(B[j]) * w * math.cos(w * t_rel)
-        return s
-
-    def _second_derivative_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:
-        t_rel = epoch_ts - t_anchor
-        s = 0.0
-        for j, c in enumerate(self._constituents):
-            w = omegas[c]
-            s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel) - float(B[j]) * (w ** 2) * math.sin(w * t_rel)
-        return s
-
-    def _find_root_bisect_helper(self, f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
-        fa = f(a)
-        fb = f(b)
-        if abs(fa) < EPS_ROOT:
-            return a
-        if abs(fb) < EPS_ROOT:
-            return b
-        if fa * fb > 0:
-            return None
-        lo = a
-        hi = b
-        fa_local = fa
-        for _ in range(maxiter):
-            mid = 0.5 * (lo + hi)
-            fm = f(mid)
-            if abs(fm) < EPS_ROOT or (hi - lo) < tol:
-                return mid
-            if fa_local * fm <= 0:
-                hi = mid
-            else:
-                lo = mid
-                fa_local = fm
-        return 0.5 * (lo + hi)
-
-    def _refine_extremum_around(self, a: float, b: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> Optional[float]:
-        """
-        Refine a candidate extremum by finding a root of derivative between a and b.
-        """
-        try:
-            def deriv_local(x):
-                return self._derivative_analytic(x, omegas, A, B, t_anchor)
-
-            root = self._find_root_bisect_helper(deriv_local, a, b)
-            return root
-        except Exception:
-            return None
