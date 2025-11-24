@@ -251,6 +251,9 @@ async def _ensure_utide_loaded(hass) -> None:
     Lazily import UTide in an executor (non-blocking to the event loop),
     verify utilities.nfactors exists (strict requirement), and set module globals.
     Raises RuntimeError if import or API checks fail (strict behavior).
+
+    This variant logs the utide version and module members to aid debugging when
+    manifest.json reports utide installed but the API is different than expected.
     """
     global utide, _utide_utils, _utide_harmonics, _UTIDE_IMPORTED
 
@@ -273,6 +276,24 @@ async def _ensure_utide_loaded(hass) -> None:
             "UTide (>=0.3.1) is required for nodal corrections. "
             "Install it in your Home Assistant environment (e.g. `pip install utide==0.3.1`) and restart."
         ) from exc
+
+    # Diagnostic logging: show what's present in the installed utide package
+    try:
+        ver = getattr(_ut, "__version__", "<unknown>")
+        top_members = sorted([n for n in dir(_ut) if not n.startswith("_")])
+        utils_exist = bool(_utils)
+        util_members = sorted([n for n in dir(_utils) if not n.startswith("_")]) if _utils else []
+        has_nfactors = hasattr(_utils, "nfactors") if _utils else False
+        _LOGGER.info(
+            "UTide imported (version=%s). top-level: %s; utilities present=%s; utilities members=%s; utilities.nfactors=%s",
+            ver,
+            top_members,
+            utils_exist,
+            util_members,
+            has_nfactors,
+        )
+    except Exception:
+        _LOGGER.debug("UTide import diagnostic logging failed", exc_info=True)
 
     # Strict mode: require utilities.nfactors to be present
     if not (_utils and hasattr(_utils, "nfactors")):
