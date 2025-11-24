@@ -3,7 +3,7 @@ import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncio
 
@@ -24,6 +24,12 @@ _DEFAULT_TTL = 15 * 60  # seconds
 _TIDE_HALF_DAY_HOURS = 12.42
 _SECONDS_PER_HOUR = 3600.0
 _ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
+
+# numeric tolerances
+EPS_DERIV = 1e-8
+EPS_ROOT = 1e-9
+BISECT_TOL_SEC = 1e-3  # stopping tolerance for root bisection (seconds)
+GRID_SECONDS_DEFAULT = 300  # 5 minutes
 
 # Constituent metadata (canonical)
 CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
@@ -55,6 +61,100 @@ CONSTITUENT_DEFAULT_RATIOS: Dict[str, float] = {
 }
 
 
+# -------------------------
+# Helpers: timestamp parsing / normalization for cache
+# -------------------------
+def _to_epoch_seconds(ts: Any) -> int:
+    """
+    Accepts: datetime, str (ISO), numeric epoch seconds or milliseconds
+    Returns: int epoch seconds (UTC)
+    Raises ValueError on unrecognized input.
+    """
+    if isinstance(ts, (int, np.integer)):
+        return int(ts)
+    if isinstance(ts, float):
+        return int(ts)
+    if isinstance(ts, datetime):
+        return int(ts.astimezone(timezone.utc).timestamp())
+    if isinstance(ts, str):
+        s = ts.strip()
+        # numeric string?
+        try:
+            v = float(s)
+            # Heuristic: if huge, treat as ms
+            if v > 1e12:
+                v = v / 1000.0
+            return int(v)
+        except Exception:
+            pass
+        # ISO parse
+        try:
+            if s.endswith("Z"):
+                s = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return int(dt.timestamp())
+        except Exception as exc:
+            raise ValueError(f"Unrecognized timestamp string: {ts}") from exc
+    raise ValueError(f"Unsupported timestamp type: {type(ts)}")
+
+
+def _normalize_timestamps_for_cache(timestamps: Sequence[Any]) -> List[int]:
+    return [_to_epoch_seconds(t) for t in timestamps]
+
+
+def _iso_z(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+# -------------------------
+# Module helpers
+# -------------------------
+def _compute_tide_strength_phase_heuristic(phase: Optional[float]) -> float:
+    """
+    Original simple phase-based heuristic preserved as fallback.
+    """
+    try:
+        if phase is None:
+            return 0.5
+        p = float(phase)
+        p = max(0.0, min(1.0, p))
+        dist_new = min(abs(p - 0.0), abs(1.0 - p))
+        dist_full = abs(p - 0.5)
+        dist = min(dist_new, dist_full)
+        val = max(0.0, 1.0 - (dist / 0.25))
+        return float(max(0.0, min(1.0, val)))
+    except Exception:
+        return 0.5
+
+
+def _coerce_phase(phase: Any) -> Optional[float]:
+    """
+    Normalize a moon phase value to 0..1 float.
+    sensor.py expects tide_proxy._coerce_phase to exist.
+    """
+    if phase is None:
+        return None
+    try:
+        p = float(phase)
+        p = p % 1.0
+        if p < 0:
+            p += 1.0
+        return float(p)
+    except Exception:
+        return None
+
+
+# -------------------------
+# TideProxy
+# -------------------------
 class TideProxy:
     """
     TideProxy with NO persistence. Uses in-memory deterministic coefficients (A_cos, B_sin)
@@ -63,7 +163,7 @@ class TideProxy:
     Public methods used by the integration:
       - get_tide_for_timestamps(timestamps)
       - compute_period_indices_for_timestamps(timestamps, mode=..., dawn_window_hours=...)
-      - set_coefficients(coef_vec, bias=None)  <-- optional: you can seed real coefficients
+      - set_coefficients(coef_vec, bias=None)
     """
 
     def __init__(
@@ -85,6 +185,7 @@ class TideProxy:
         self.longitude = float(longitude or 0.0)
         self._ttl = int(ttl)
         self._last_calc: Optional[datetime] = None
+        # cache structure: {"timestamps": [epoch_ints], "raw_tide": {...}, "version": 1}
         self._cache: Optional[Dict[str, Any]] = None
 
         self._constituents = list(CONSTITUENT_PERIOD_HOURS.keys())
@@ -98,6 +199,7 @@ class TideProxy:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
         except Exception:
             from homeassistant.const import CONFIG_DIR  # type: ignore
+
             data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
         os.makedirs(data_dir, exist_ok=True)
         self._loader = Loader(data_dir)
@@ -182,22 +284,75 @@ class TideProxy:
                 _LOGGER.exception("Failed to load Skyfield resources")
                 raise
 
-    async def get_tide_for_timestamps(self, timestamps: Sequence[str]) -> Dict[str, Any]:
+    async def get_tide_for_timestamps(self, timestamps: Sequence[Any]) -> Dict[str, Any]:
+        """
+        Main entrypoint: timestamps can be ISO strings, epoch numbers, or datetime objects.
+        Returns a strict dict with tide heights and next_high/next_low objects.
+        """
         now = dt_util.now().astimezone(timezone.utc)
-        # cache fast-path
-        if self._last_calc and self._cache and (now - self._last_calc).total_seconds() < self._ttl:
-            if self._cache.get("timestamps") == list(timestamps):
-                return self._cache
 
-        # parse timestamps into aware datetimes (UTC)
+        # Normalize incoming timestamps for cache compare (epoch ints)
+        try:
+            new_keys = _normalize_timestamps_for_cache(timestamps)
+        except Exception:
+            # fallback: attempt per-element parse using dt_util, but fail if any unparseable
+            dt_objs_try: List[datetime] = []
+            for ts in timestamps:
+                parsed = dt_util.parse_datetime(str(ts))
+                if parsed is None:
+                    try:
+                        v = float(ts)
+                        if v > 1e12:
+                            v = v / 1000.0
+                        parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                    except Exception:
+                        parsed = None
+                if parsed is None:
+                    _LOGGER.error("Unable to parse timestamp for cache normalization: %s", ts)
+                    return {
+                        "timestamps": [str(t) for t in timestamps],
+                        "tide_height_m": [None] * len(timestamps),
+                        "confidence": "bad_timestamps",
+                        "source": "tide_proxy",
+                    }
+                dt_objs_try.append(parsed.astimezone(timezone.utc))
+            new_keys = [int(dt.timestamp()) for dt in dt_objs_try]
+
+        # cache fast-path (compare normalized epoch lists)
+        if self._last_calc and self._cache and (now - self._last_calc).total_seconds() < self._ttl:
+            cached_keys = self._cache.get("timestamps")
+            if cached_keys is not None and cached_keys == new_keys:
+                return self._cache["raw_tide"]
+
+        # parse timestamps into aware datetimes (UTC) in original order
         dt_objs: List[datetime] = []
         for ts in timestamps:
+            # If ts already a datetime, keep
+            if isinstance(ts, datetime):
+                dt = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                dt_objs.append(dt)
+                continue
+            # numeric string / number
+            try:
+                epoch = None
+                if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.strip().replace(".", "", 1).isdigit()):
+                    # numeric-ish
+                    v = float(ts)
+                    if v > 1e12:
+                        v = v / 1000.0
+                    epoch = int(v)
+                    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+                    dt_objs.append(dt)
+                    continue
+            except Exception:
+                pass
+
+            # fallback to ISO parsing
             parsed = dt_util.parse_datetime(str(ts))
             if parsed is None:
                 try:
-                    # handle numeric epoch strings
-                    v = float(ts)
-                    if v > 1e12:  # probably milliseconds
+                    v = float(str(ts))
+                    if v > 1e12:
                         v = v / 1000.0
                     parsed = datetime.fromtimestamp(v, tz=timezone.utc)
                 except Exception:
@@ -205,7 +360,7 @@ class TideProxy:
             if parsed is None:
                 _LOGGER.error("Unable to parse timestamp: %s", ts)
                 return {
-                    "timestamps": list(timestamps),
+                    "timestamps": [str(t) for t in timestamps],
                     "tide_height_m": [None] * len(timestamps),
                     "confidence": "bad_timestamps",
                     "source": "tide_proxy",
@@ -252,10 +407,12 @@ class TideProxy:
         periods_sec = {k: (CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR) for k in self._constituents}
         omegas = {k: 2.0 * math.pi / periods_sec[k] for k in periods_sec}
 
-        # evaluate model using in-memory coef_vec
+        # evaluate model using in-memory coef_vec (order preserved)
         coef_arr = np.asarray(self._coef_vec, dtype=float)
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
+
+        # compute prediction in original timestamp order
         t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
         pred = np.zeros_like(t_rel)
         for i, c in enumerate(self._constituents):
@@ -281,113 +438,145 @@ class TideProxy:
         tide_heights = [round(float(v), 3) for v in pred.tolist()]
 
         # --- compute next high/low (timestamps + heights) for sensor compatibility (strict dict shape) ---
-        next_high = None
-        next_low = None
-        next_high_height = None
-        next_low_height = None
+        next_high: Optional[str] = None
+        next_low: Optional[str] = None
+        next_high_height: Optional[float] = None
+        next_low_height: Optional[float] = None
+
         try:
             now_ts = now.timestamp()
-            # index of first timestamp >= now (fallback to 0)
-            first_future_idx = 0
-            for i, dt in enumerate(dt_objs):
-                if dt.timestamp() >= now_ts:
-                    first_future_idx = i
+
+            # use sorted times for analytic root finding (safer)
+            t_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
+            order = np.argsort(t_epochs)
+            t_sorted = t_epochs[order]
+            pred_sorted = pred[order]
+
+            # find first future index in sorted array
+            first_future_idx_sorted = 0
+            for i_s, tval in enumerate(t_sorted):
+                if tval >= now_ts:
+                    first_future_idx_sorted = i_s
                     break
 
-            # Analytic derivative + root-finding approach to find extrema between samples
+            # helpers for continuous model evaluation
             def _height_at_epoch(epoch_ts: float) -> float:
-                t_rel = epoch_ts - t_anchor
+                t_rel_local = epoch_ts - t_anchor
                 s = float(self._bias) if hasattr(self, "_bias") else 0.0
                 for j, c in enumerate(self._constituents):
                     w = omegas[c]
-                    s += float(A[j]) * math.cos(w * t_rel) + float(B[j]) * math.sin(w * t_rel)
+                    s += float(A[j]) * math.cos(w * t_rel_local) + float(B[j]) * math.sin(w * t_rel_local)
                 return s
 
             def _derivative_at_epoch(epoch_ts: float) -> float:
-                t_rel = epoch_ts - t_anchor
+                t_rel_local = epoch_ts - t_anchor
                 s = 0.0
                 for j, c in enumerate(self._constituents):
                     w = omegas[c]
-                    s += -float(A[j]) * w * math.sin(w * t_rel) + float(B[j]) * w * math.cos(w * t_rel)
+                    s += -float(A[j]) * w * math.sin(w * t_rel_local) + float(B[j]) * w * math.cos(w * t_rel_local)
                 return s
 
             def _second_derivative_at_epoch(epoch_ts: float) -> float:
-                t_rel = epoch_ts - t_anchor
+                t_rel_local = epoch_ts - t_anchor
                 s = 0.0
                 for j, c in enumerate(self._constituents):
                     w = omegas[c]
-                    s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel) - float(B[j]) * (w ** 2) * math.sin(w * t_rel)
+                    s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel_local) - float(B[j]) * (w ** 2) * math.sin(w * t_rel_local)
                 return s
 
-            def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = 1e-3) -> Optional[float]:
+            def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
                 fa = f(a)
                 fb = f(b)
-                if abs(fa) < 1e-12:
+                if abs(fa) < EPS_ROOT:
                     return a
-                if abs(fb) < 1e-12:
+                if abs(fb) < EPS_ROOT:
                     return b
                 if fa * fb > 0:
                     return None
                 lo = a
                 hi = b
+                fa_local = fa
                 for _ in range(maxiter):
                     mid = 0.5 * (lo + hi)
                     fm = f(mid)
-                    if abs(fm) < 1e-9 or (hi - lo) < tol:
+                    if abs(fm) < EPS_ROOT or (hi - lo) < tol:
                         return mid
-                    if fa * fm <= 0:
+                    if fa_local * fm <= 0:
                         hi = mid
-                        fb = fm
                     else:
                         lo = mid
-                        fa = fm
+                        fa_local = fm
                 return 0.5 * (lo + hi)
 
             candidates: List[float] = []
-            # search each interval between consecutive samples for derivative sign change
-            for i in range(max(0, first_future_idx - 1), len(dt_objs) - 1):
-                t0 = dt_objs[i].timestamp()
-                t1 = dt_objs[i + 1].timestamp()
-                d0 = _derivative_at_epoch(t0)
-                d1 = _derivative_at_epoch(t1)
-                # if derivative near zero at sample point, consider that point a candidate
-                if abs(d0) < 1e-12 and t0 >= now_ts:
-                    candidates.append(t0)
-                if d0 * d1 < 0:
-                    root = _find_root_bisection(_derivative_at_epoch, t0, t1)
-                    if root is not None and root >= now_ts:
-                        candidates.append(root)
+
+            # For each interval starting near the first future window, subdivide if necessary and detect derivative sign changes
+            n_sorted = len(t_sorted)
+            start_idx = max(0, first_future_idx_sorted - 1)
+            for i in range(start_idx, n_sorted - 1):
+                a = float(t_sorted[i])
+                b = float(t_sorted[i + 1])
+                dt_interval = b - a
+                if dt_interval <= GRID_SECONDS_DEFAULT:
+                    d_a = _derivative_at_epoch(a)
+                    d_b = _derivative_at_epoch(b)
+                    if abs(d_a) < EPS_DERIV and a >= now_ts:
+                        candidates.append(a)
+                    if d_a * d_b < 0:
+                        root = _find_root_bisection(_derivative_at_epoch, a, b)
+                        if root is not None and root >= now_ts:
+                            candidates.append(root)
+                else:
+                    # subdivide the interval into smaller sub-intervals of ~GRID_SECONDS_DEFAULT
+                    n_sub = int(math.ceil(dt_interval / GRID_SECONDS_DEFAULT))
+                    pts = [a + i * dt_interval / n_sub for i in range(n_sub + 1)]
+                    prev_d = _derivative_at_epoch(pts[0])
+                    if abs(prev_d) < EPS_DERIV and pts[0] >= now_ts:
+                        candidates.append(pts[0])
+                    for k in range(1, len(pts)):
+                        cur_pt = pts[k]
+                        cur_d = _derivative_at_epoch(cur_pt)
+                        if abs(cur_d) < EPS_DERIV and cur_pt >= now_ts:
+                            candidates.append(cur_pt)
+                        if prev_d * cur_d < 0:
+                            root = _find_root_bisection(_derivative_at_epoch, pts[k - 1], pts[k])
+                            if root is not None and root >= now_ts:
+                                candidates.append(root)
+                        prev_d = cur_d
 
             # classify candidates into maxima/minima using second derivative
-            maxima: List[tuple] = []
-            minima: List[tuple] = []
+            maxima: List[Tuple[float, float]] = []
+            minima: List[Tuple[float, float]] = []
             for rt in candidates:
                 h = _height_at_epoch(rt)
                 sec = _second_derivative_at_epoch(rt)
-                if sec < 0:
+                if sec < -EPS_DERIV:
                     maxima.append((rt, h))
-                else:
+                elif sec > EPS_DERIV:
                     minima.append((rt, h))
+                # ignore near-inflection candidates
 
             # pick earliest future max/min
-            next_high_tuple = None
-            next_low_tuple = None
+            next_high_tuple: Optional[Tuple[float, float]] = None
+            next_low_tuple: Optional[Tuple[float, float]] = None
             if maxima:
                 next_high_tuple = min(maxima, key=lambda x: x[0])
             if minima:
                 next_low_tuple = min(minima, key=lambda x: x[0])
 
-            # fallback: if none found, use sampled argmax/argmin in future window
+            # fallback: use sampled argmax/argmin on sorted future samples
             if next_high_tuple is None:
-                rel = pred[first_future_idx:]
+                rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
                 if rel.size:
-                    idx = int(np.argmax(rel)) + first_future_idx
-                    next_high_tuple = (dt_objs[idx].timestamp(), float(pred[idx]))
+                    idx_rel = int(np.argmax(rel))
+                    idx_sorted = first_future_idx_sorted + idx_rel
+                    next_high_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
             if next_low_tuple is None:
-                rel = pred[first_future_idx:]
+                rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
                 if rel.size:
-                    idx = int(np.argmin(rel)) + first_future_idx
-                    next_low_tuple = (dt_objs[idx].timestamp(), float(pred[idx]))
+                    idx_rel = int(np.argmin(rel))
+                    idx_sorted = first_future_idx_sorted + idx_rel
+                    next_low_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
 
             if next_high_tuple is not None:
                 nh_ts, nh_h = next_high_tuple
@@ -408,16 +597,53 @@ class TideProxy:
             times_list = [sf_ts.from_datetime(dt) for dt in dt_objs]
             moon_phases: List[Optional[float]] = []
             for t in times_list:
-                sun_app = earth.at(t).observe(sun_obj).apparent()
-                moon_app = earth.at(t).observe(moon_obj).apparent()
-                sun_ecl = sun_app.frame_latlon(ecliptic_frame)
-                moon_ecl = moon_app.frame_latlon(ecliptic_frame)
-                lon_sun = float(sun_ecl[1].degrees)
-                lon_moon = float(moon_ecl[1].degrees)
-                diff = (lon_moon - lon_sun) % 360.0
-                moon_phases.append(diff / 360.0)
+                try:
+                    sun_app = earth.at(t).observe(sun_obj).apparent()
+                    moon_app = earth.at(t).observe(moon_obj).apparent()
+                    sun_ecl = sun_app.frame_latlon(ecliptic_frame)
+                    moon_ecl = moon_app.frame_latlon(ecliptic_frame)
+                    lon_sun = float(sun_ecl[1].degrees)
+                    lon_moon = float(moon_ecl[1].degrees)
+                    diff = (lon_moon - lon_sun) % 360.0
+                    moon_phases.append(diff / 360.0)
+                except Exception:
+                    moon_phases.append(None)
         except Exception:
             moon_phases = [None] * len(dt_objs)
+
+        # compute tide_strength: prefer Skyfield physical proxy when available, else fallback heuristic
+        tide_strength_value = 0.5
+        try:
+            if sf_ts is not None and sf_eph is not None and len(dt_objs) > 0:
+                # try to compute a physical proxy using moon distance and alignment
+                try:
+                    t0 = sf_ts.from_datetime(dt_objs[0])
+                    earth = sf_eph["earth"]
+                    moon_obj = sf_eph["moon"]
+                    sun_obj = sf_eph["sun"]
+                    mpos = earth.at(t0).observe(moon_obj)
+                    spos = earth.at(t0).observe(sun_obj)
+                    d_moon_au = float(mpos.distance().au)
+                    moon_ecl = mpos.apparent().frame_latlon(ecliptic_frame)
+                    sun_ecl = spos.apparent().frame_latlon(ecliptic_frame)
+                    lon_moon = float(moon_ecl[1].radians)
+                    lon_sun = float(sun_ecl[1].radians)
+                    delta = (lon_moon - lon_sun)  # radians
+                    # heuristic physical proxy: alignment term * inverse-cube distance
+                    d_ref = 0.00257  # approx mean moon distance (AU)
+                    # compute raw strength (0..~1.2)
+                    raw = 0.5 * (1.0 + math.cos(delta)) * (d_ref / max(d_moon_au, 1e-9)) ** 3
+                    # normalize by plausible maximum (perigee spring)
+                    d_min_plausible = 0.0024
+                    max_raw = 0.5 * (1.0 + 1.0) * (d_ref / d_min_plausible) ** 3  # = (d_ref/d_min)^3
+                    strength = raw / max_raw if max_raw > 0 else raw
+                    tide_strength_value = float(max(0.0, min(1.0, strength)))
+                except Exception:
+                    tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
+            else:
+                tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
+        except Exception:
+            tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
 
         # Build strict dicts for next_high/next_low (sensor expects dict shape)
         next_high_obj = None
@@ -437,7 +663,7 @@ class TideProxy:
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
             "tide_height_m": tide_heights,
             "tide_phase": moon_phases,
-            "tide_strength": float(round(_compute_tide_strength(moon_phases[0] if moon_phases else None), 3)),
+            "tide_strength": float(round(tide_strength_value, 3)),
             "confidence": "in_memory_model",
             "source": "in_memory_harmonic_model",
             "_helpers": {
@@ -451,7 +677,11 @@ class TideProxy:
             "next_low": next_low_obj,
         }
 
-        self._cache = raw_tide
+        # store cache normalized timestamps (epoch ints) and raw_tide payload
+        try:
+            self._cache = {"timestamps": new_keys, "raw_tide": raw_tide, "version": 1}
+        except Exception:
+            self._cache = {"timestamps": new_keys, "raw_tide": raw_tide}
         self._last_calc = now
         return raw_tide
 
@@ -478,7 +708,7 @@ class TideProxy:
 
     async def compute_period_indices_for_timestamps(
         self,
-        timestamps: Sequence[str],
+        timestamps: Sequence[Any],
         mode: str = "full_day",
         dawn_window_hours: float = 1.0,
     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -517,7 +747,7 @@ class TideProxy:
 
         result: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
-        def _iso_z(dt: datetime) -> str:
+        def _iso_z_local(dt: datetime) -> str:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             else:
@@ -567,8 +797,8 @@ class TideProxy:
                             dawn_indices.append(idx)
                         if dt >= dusk_start and dt < dusk_end:
                             dusk_indices.append(idx)
-                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z(dawn_start), "end": _iso_z(dawn_end)}
-                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z(dusk_start), "end": _iso_z(dusk_end)}
+                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z_local(dawn_start), "end": _iso_z_local(dawn_end)}
+                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z_local(dusk_start), "end": _iso_z_local(dusk_end)}
                 else:
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})
@@ -591,41 +821,8 @@ class TideProxy:
                         for idx, dt in index_dt_pairs:
                             if dt >= pstart and dt < pend:
                                 indices.append(idx)
-                        result[date_key][pname] = {"indices": indices, "start": _iso_z(pstart), "end": _iso_z(pend)}
+                        result[date_key][pname] = {"indices": indices, "start": _iso_z_local(pstart), "end": _iso_z_local(pend)}
             except Exception as exc:
                 _LOGGER.exception("compute_period_indices_for_timestamps failed for date %s: %s", d.isoformat(), exc)
                 raise
         return result
-
-
-# module helpers
-def _compute_tide_strength(phase: Optional[float]) -> float:
-    try:
-        if phase is None:
-            return 0.5
-        p = float(phase)
-        p = max(0.0, min(1.0, p))
-        dist_new = min(abs(p - 0.0), abs(1.0 - p))
-        dist_full = abs(p - 0.5)
-        dist = min(dist_new, dist_full)
-        val = max(0.0, 1.0 - (dist / 0.25))
-        return float(max(0.0, min(1.0, val)))
-    except Exception:
-        return 0.5
-
-
-def _coerce_phase(phase: Any) -> Optional[float]:
-    """
-    Normalize a moon phase value to 0..1 float.
-    sensor.py expects tide_proxy._coerce_phase to exist.
-    """
-    if phase is None:
-        return None
-    try:
-        p = float(phase)
-        p = p % 1.0
-        if p < 0:
-            p += 1.0
-        return float(p)
-    except Exception:
-        return None
