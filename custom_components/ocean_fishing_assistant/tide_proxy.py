@@ -1,5 +1,4 @@
-# Full tide_proxy.py - updated: lazy non-blocking UTide import + restored helpers
-
+# tide_proxy.py
 from __future__ import annotations
 import logging
 import math
@@ -250,7 +249,7 @@ def coefvec_to_amp_phase(
 async def _ensure_utide_loaded(hass) -> None:
     """
     Lazily import UTide in an executor (non-blocking to the event loop),
-    verify API/version >= 0.3.1 or presence of expected helpers, and set module globals.
+    verify utilities.nfactors exists (strict requirement), and set module globals.
     Raises RuntimeError if import or API checks fail (strict behavior).
     """
     global utide, _utide_utils, _utide_harmonics, _UTIDE_IMPORTED
@@ -275,25 +274,11 @@ async def _ensure_utide_loaded(hass) -> None:
             "Install it in your Home Assistant environment (e.g. `pip install utide==0.3.1`) and restart."
         ) from exc
 
-    ok_api = False
-    if ver:
-        try:
-            v_parts = [int(x) for x in str(ver).split(".")[:3]]
-            if v_parts >= [0, 3, 1]:
-                ok_api = True
-        except Exception:
-            pass
-
-    if not ok_api:
-        if _utils and (hasattr(_utils, "nfactors") or hasattr(_utils, "compute_nodal_factors")):
-            ok_api = True
-        if _harm and hasattr(_harm, "ut_E"):
-            ok_api = True
-
-    if not ok_api:
+    # Strict mode: require utilities.nfactors to be present
+    if not (_utils and hasattr(_utils, "nfactors")):
         raise RuntimeError(
-            "UTide is installed but the expected API (nfactors/compute_nodal_factors or harmonics.ut_E) was not found. "
-            "Please install utide==0.3.1 or a compatible release and restart Home Assistant."
+            "UTide strict mode: required function utilities.nfactors missing. "
+            "Install utide==0.3.1 (or compatible) and restart Home Assistant."
         )
 
     # assign module globals
@@ -301,7 +286,7 @@ async def _ensure_utide_loaded(hass) -> None:
     _utide_utils = _utils
     _utide_harmonics = _harm
     _UTIDE_IMPORTED = True
-    _LOGGER.debug("UTide successfully imported (lazy) and API verified")
+    _LOGGER.debug("UTide successfully imported (lazy) and utilities.nfactors verified")
 
 
 # ----
@@ -601,45 +586,43 @@ class TideProxy:
             # compute Julian date for t_anchor (UTC)
             t_jd = float(t_anchor) / 86400.0 + 2440587.5
 
+            # Strict nodal-factor discovery: require utilities.nfactors only (no fallbacks)
             f_dict = {}
-            # Preferred: utilities.nfactors
-            if _utide_utils and hasattr(_utide_utils, "nfactors"):
+
+            # Must have utide utilities.nfactors present (strict requirement)
+            if not (_utide_utils and hasattr(_utide_utils, "nfactors")):
+                raise RuntimeError(
+                    "UTide strict mode: required function utilities.nfactors missing. "
+                    "Install utide==0.3.1 (or compatible) and restart Home Assistant."
+                )
+
+            # Call nfactors and validate its output strictly
+            try:
                 nf_out = _utide_utils.nfactors(t_jd, self._constituents)
-                if isinstance(nf_out, dict):
-                    for name in self._constituents:
-                        val = nf_out.get(name)
-                        if val is None:
-                            continue
-                        if isinstance(val, (tuple, list)) and len(val) >= 2:
-                            f_val = float(val[0])
-                            u_deg = float(val[1])
-                        elif isinstance(val, dict):
-                            f_val = float(val.get("f", 1.0))
-                            u_deg = float(val.get("u", 0.0))
-                        else:
-                            continue
-                        f_dict[name] = (f_val, math.radians(u_deg))
+            except Exception as exc:
+                raise RuntimeError("UTide strict mode: utilities.nfactors() call failed") from exc
 
-            # fallback: utilities.compute_nodal_factors
-            if not f_dict and _utide_utils and hasattr(_utide_utils, "compute_nodal_factors"):
-                nf_out = _utide_utils.compute_nodal_factors(t_jd, self._constituents)
-                if isinstance(nf_out, dict):
-                    for nm in nf_out:
-                        f_val = float(nf_out[nm].get("f", 1.0))
-                        u_deg = float(nf_out[nm].get("u", 0.0))
-                        f_dict[nm] = (f_val, math.radians(u_deg))
+            if not isinstance(nf_out, dict):
+                raise RuntimeError("UTide strict mode: utilities.nfactors() returned unexpected type (expected dict)")
 
-            # fallback: harmonics.ut_E
-            if not f_dict and _utide_harmonics and hasattr(_utide_harmonics, "ut_E"):
-                e_out = _utide_harmonics.ut_E(t_jd, lat=self.latitude)
-                if hasattr(e_out, "factors"):
-                    for name in self._constituents:
-                        fac = e_out.factors.get(name)
-                        if fac:
-                            f_dict[name] = (float(fac.get("f", 1.0)), math.radians(float(fac.get("u", 0.0))))
-
-            if not f_dict:
-                raise RuntimeError("UTide did not return nodal factors for the configured constituents (API mismatch or unsupported utide build). Please install utide==0.3.1")
+            # Expect each constituent to be present with either tuple/list (f,u) or dict with 'f' and 'u'
+            for name in self._constituents:
+                if name not in nf_out:
+                    raise RuntimeError(f"UTide strict mode: nfactors did not return data for constituent '{name}'")
+                val = nf_out[name]
+                if isinstance(val, (tuple, list)) and len(val) >= 2:
+                    f_val = float(val[0])
+                    u_deg = float(val[1])
+                elif isinstance(val, dict):
+                    if "f" not in val or "u" not in val:
+                        raise RuntimeError(f"UTide strict mode: nfactors returned dict for '{name}' missing 'f' or 'u'")
+                    f_val = float(val["f"])
+                    u_deg = float(val["u"])
+                else:
+                    raise RuntimeError(
+                        f"UTide strict mode: nfactors returned unsupported format for '{name}': {type(val)}"
+                    )
+                f_dict[name] = (f_val, math.radians(u_deg))
 
             # apply nodal corrections
             Hs_corr = []
@@ -653,6 +636,7 @@ class TideProxy:
                     Hs_corr.append(Hc)
                     gs_corr.append(gc)
                 else:
+                    # In strict mode we shouldn't ever reach here because we required each constituent above
                     Hs_corr.append(float(H_val))
                     gs_corr.append(float(g_val))
             Hs = np.asarray(Hs_corr, dtype=float)
