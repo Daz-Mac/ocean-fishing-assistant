@@ -31,19 +31,23 @@ EPS_ROOT = 1e-9
 BISECT_TOL_SEC = 1e-3  # stopping tolerance for root bisection (seconds)
 GRID_SECONDS_DEFAULT = 300  # 5 minutes
 
+# Reference epoch for amplitude/phase storage (UTC)
+T_REF = datetime(2000, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+T_REF_EPOCH = T_REF.timestamp()
+
 # Constituent metadata (canonical)
+# Kept to ~10 constituents useful for short-term forecasts (today + 5 days)
 CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
-    "M2": 12.4206,
-    "S2": 12.0,
-    "N2": 12.6583,
-    "K1": 23.9345,
-    "O1": 25.8193,
-    # a few extra short/overtone constituents for better default waveform
-    "P1": 24.0659,
-    "Q1": 26.8683,
+    "M2": 12.420641,  # principal lunar semidiurnal
+    "S2": 12.0,       # principal solar semidiurnal
+    "N2": 12.658348,  # larger lunar elliptic semidiurnal
+    "K1": 23.934472,  # lunisolar diurnal
+    "O1": 25.819338,  # lunar diurnal
+    "P1": 24.065887,
+    "Q1": 26.868352,
     "S1": 24.0,
-    "M4": 12.4206 / 2.0,
-    "M6": 12.4206 / 3.0,
+    "M4": 12.420641 / 2.0,
+    "M6": 12.420641 / 3.0,
 }
 
 # Default relative amplitudes (heuristic; not station-specific)
@@ -61,9 +65,9 @@ CONSTITUENT_DEFAULT_RATIOS: Dict[str, float] = {
 }
 
 
-# -------------------------
+# ----
 # Helpers: timestamp parsing / normalization for cache
-# -------------------------
+# ----
 def _to_epoch_seconds(ts: Any) -> int:
     """
     Accepts: datetime, str (ISO), numeric epoch seconds or milliseconds
@@ -114,9 +118,9 @@ def _iso_z(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-# -------------------------
+# ----
 # Module helpers
-# -------------------------
+# ----
 def _compute_tide_strength_phase_heuristic(phase: Optional[float]) -> float:
     """
     Original simple phase-based heuristic preserved as fallback.
@@ -152,18 +156,79 @@ def _coerce_phase(phase: Any) -> Optional[float]:
         return None
 
 
-# -------------------------
+def amp_phase_to_coefvec(
+    amplitudes: Sequence[float],
+    phases: Sequence[float],
+    constituents: Sequence[str],
+    omegas: Dict[str, float],
+    t_ref_epoch: float,
+    t_anchor_epoch: float,
+) -> np.ndarray:
+    """
+    Convert amplitude/phase pairs (H_k, g_k) defined at reference epoch t_ref into
+    coef_vec (A0,B0,A1,B1,...) aligned with t_anchor used by the internal model.
+
+    phases are expected in radians.
+    Formula:
+      phi = g_k + omega * (t_ref - t_anchor)
+      term = H_k * cos(omega*(t - t_anchor) + phi)
+      => A = H_k * cos(phi), B = -H_k * sin(phi)
+    """
+    amps = np.asarray(amplitudes, dtype=float)
+    phs = np.asarray(phases, dtype=float)
+    vals: List[float] = []
+    for i, c in enumerate(constituents):
+        H = float(amps[i])
+        g = float(phs[i])
+        omega = float(omegas[c])
+        phi = g + omega * (t_ref_epoch - t_anchor_epoch)
+        A = H * math.cos(phi)
+        B = -H * math.sin(phi)
+        vals.extend([A, B])
+    return np.asarray(vals, dtype=float)
+
+
+def coefvec_to_amp_phase(
+    coef_vec: Sequence[float],
+    constituents: Sequence[str],
+    omegas: Dict[str, float],
+    t_ref_epoch: float,
+    t_anchor_epoch: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Convert internal coef_vec (A,B ordered) back to amplitude & phase at t_ref.
+    Returns (H_array, g_array) with g in radians.
+    """
+    arr = np.asarray(coef_vec, dtype=float)
+    A = arr[0::2]
+    B = arr[1::2]
+    Hs = []
+    gs = []
+    for i, c in enumerate(constituents):
+        omega = float(omegas[c])
+        A_i = float(A[i])
+        B_i = float(B[i])
+        H = math.hypot(A_i, B_i)
+        phi = math.atan2(-B_i, A_i)  # because A = H cos(phi), B = -H sin(phi)
+        # convert phi at t_anchor back to phase at t_ref: g = phi - omega*(t_ref - t_anchor)
+        g = phi - omega * (t_ref_epoch - t_anchor_epoch)
+        Hs.append(H)
+        gs.append(g)
+    return np.asarray(Hs, dtype=float), np.asarray(gs, dtype=float)
+
+
+# ----
 # TideProxy
-# -------------------------
+# ----
 class TideProxy:
     """
     TideProxy with NO persistence. Uses in-memory deterministic coefficients (A_cos, B_sin)
     derived from CONSTITUENT_DEFAULT_RATIOS when no explicit coef_vec is supplied.
 
     Public methods used by the integration:
-      - get_tide_for_timestamps(timestamps)
-      - compute_period_indices_for_timestamps(timestamps, mode=..., dawn_window_hours=...)
-      - set_coefficients(coef_vec, bias=None)
+    - get_tide_for_timestamps(timestamps)
+    - compute_period_indices_for_timestamps(timestamps, mode=..., dawn_window_hours=...)
+    - set_coefficients(coef_vec, bias=None)
     """
 
     def __init__(
@@ -283,6 +348,24 @@ class TideProxy:
             except Exception:
                 _LOGGER.exception("Failed to load Skyfield resources")
                 raise
+
+    def _synthesize_grid(self, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float, start_epoch: float, end_epoch: float, grid_seconds: int = GRID_SECONDS_DEFAULT) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Synthesize the harmonic model onto a regular grid (epoch seconds) between start_epoch and end_epoch.
+        Returns (grid_epochs, grid_pred)
+        """
+        if end_epoch <= start_epoch:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        grid_epochs = np.arange(start_epoch, end_epoch + 1, grid_seconds, dtype=float)
+        t_rel = grid_epochs - t_anchor
+        pred = np.zeros_like(grid_epochs, dtype=float)
+        for i, c in enumerate(self._constituents):
+            w = omegas[c]
+            pred += float(A[i]) * np.cos(w * t_rel) + float(B[i]) * np.sin(w * t_rel)
+        if float(self._bias) != 0.0:
+            pred = pred + float(self._bias)
+        # optional clamp/scale applied later by caller if needed
+        return grid_epochs, pred
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[Any]) -> Dict[str, Any]:
         """
@@ -412,32 +495,47 @@ class TideProxy:
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
 
-        # compute prediction in original timestamp order
-        t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
-        pred = np.zeros_like(t_rel)
-        for i, c in enumerate(self._constituents):
-            w = omegas[c]
-            pred += A[i] * np.cos(w * t_rel) + B[i] * np.sin(w * t_rel)
-        if float(self._bias) != 0.0:
-            pred = pred + float(self._bias)
+        # For robust short-term forecasts, synthesize a fine grid over today + 5 days and use it for interpolation and peak finding
+        grid_start_dt = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
+        grid_end_dt = grid_start_dt + timedelta(days=5)
+        start_epoch = grid_start_dt.timestamp()
+        end_epoch = grid_end_dt.timestamp()
 
-        # clamp/scale (optional)
-        if self._auto_clamp_enabled:
+        grid_epochs, grid_pred = self._synthesize_grid(omegas, A, B, t_anchor, start_epoch, end_epoch, GRID_SECONDS_DEFAULT)
+
+        # If clamp/scale enabled, apply to grid and (later) to sampled preds
+        if self._auto_clamp_enabled and grid_pred.size:
             try:
                 if self._max_amplitude_m is not None:
-                    current_amp = float(np.max(pred) - np.min(pred))
+                    current_amp = float(np.max(grid_pred) - np.min(grid_pred))
                     if current_amp > float(self._max_amplitude_m) and current_amp > 1e-12:
-                        mean_val = float(np.mean(pred))
+                        mean_val = float(np.mean(grid_pred))
                         scale = float(self._max_amplitude_m) / current_amp
-                        pred = mean_val + (pred - mean_val) * scale
+                        grid_pred = mean_val + (grid_pred - mean_val) * scale
                 if self._min_height_floor is not None:
-                    pred = np.maximum(pred, float(self._min_height_floor))
+                    grid_pred = np.maximum(grid_pred, float(self._min_height_floor))
             except Exception:
-                _LOGGER.exception("Error applying clamp/scale")
+                _LOGGER.exception("Error applying clamp/scale to grid")
 
-        tide_heights = [round(float(v), 3) for v in pred.tolist()]
+        # compute heights for requested timestamps by interpolating the grid where possible
+        req_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
+        tide_heights_out: List[Optional[float]] = []
+        for e in req_epochs:
+            if grid_epochs.size and e >= grid_epochs[0] and e <= grid_epochs[-1]:
+                h = float(np.interp(e, grid_epochs, grid_pred))
+            else:
+                # fallback to analytic evaluation for out-of-grid times
+                t_rel_single = e - t_anchor
+                s = float(self._bias) if hasattr(self, "_bias") else 0.0
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    s += float(A[j]) * math.cos(w * t_rel_single) + float(B[j]) * math.sin(w * t_rel_single)
+                h = float(s)
+            tide_heights_out.append(round(h, 3))
 
-        # --- compute next high/low (timestamps + heights) for sensor compatibility (strict dict shape) ---
+        tide_heights = tide_heights_out
+
+        # --- compute next high/low using the grid for candidate detection and analytic refinement ---
         next_high: Optional[str] = None
         next_low: Optional[str] = None
         next_high_height: Optional[float] = None
@@ -445,118 +543,65 @@ class TideProxy:
 
         try:
             now_ts = now.timestamp()
-
-            # use sorted times for analytic root finding (safer)
-            t_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
-            order = np.argsort(t_epochs)
-            t_sorted = t_epochs[order]
-            pred_sorted = pred[order]
-
-            # find first future index in sorted array
-            first_future_idx_sorted = 0
-            for i_s, tval in enumerate(t_sorted):
-                if tval >= now_ts:
-                    first_future_idx_sorted = i_s
-                    break
-
-            # helpers for continuous model evaluation
-            def _height_at_epoch(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = float(self._bias) if hasattr(self, "_bias") else 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += float(A[j]) * math.cos(w * t_rel_local) + float(B[j]) * math.sin(w * t_rel_local)
-                return s
-
-            def _derivative_at_epoch(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += -float(A[j]) * w * math.sin(w * t_rel_local) + float(B[j]) * w * math.cos(w * t_rel_local)
-                return s
-
-            def _second_derivative_at_epoch(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel_local) - float(B[j]) * (w ** 2) * math.sin(w * t_rel_local)
-                return s
-
-            def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
-                fa = f(a)
-                fb = f(b)
-                if abs(fa) < EPS_ROOT:
-                    return a
-                if abs(fb) < EPS_ROOT:
-                    return b
-                if fa * fb > 0:
-                    return None
-                lo = a
-                hi = b
-                fa_local = fa
-                for _ in range(maxiter):
-                    mid = 0.5 * (lo + hi)
-                    fm = f(mid)
-                    if abs(fm) < EPS_ROOT or (hi - lo) < tol:
-                        return mid
-                    if fa_local * fm <= 0:
-                        hi = mid
-                    else:
-                        lo = mid
-                        fa_local = fm
-                return 0.5 * (lo + hi)
-
+            # candidate detection via derivative sampled on grid (analytic derivative evaluated on grid points)
             candidates: List[float] = []
+            if grid_epochs.size:
+                # analytic derivative at grid points
+                t_rel_grid = grid_epochs - t_anchor
+                deriv_grid = np.zeros_like(grid_pred)
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    deriv_grid += -float(A[j]) * w * np.sin(w * t_rel_grid) + float(B[j]) * w * np.cos(w * t_rel_grid)
+                # find sign changes in derivative after 'now'
+                idx_start = int(max(0, np.searchsorted(grid_epochs, now_ts) - 1))
+                for k in range(idx_start, len(grid_epochs) - 1):
+                    d0 = deriv_grid[k]
+                    d1 = deriv_grid[k + 1]
+                    t0 = float(grid_epochs[k])
+                    t1 = float(grid_epochs[k + 1])
+                    if abs(d0) < EPS_DERIV and t0 >= now_ts:
+                        candidates.append(t0)
+                    if d0 * d1 < 0:
+                        # refine root analytically between t0 and t1
+                        def _deriv_local(x):
+                            t_rel_local = x - t_anchor
+                            s = 0.0
+                            for jj, cc in enumerate(self._constituents):
+                                ww = omegas[cc]
+                                s += -float(A[jj]) * ww * math.sin(ww * t_rel_local) + float(B[jj]) * ww * math.cos(ww * t_rel_local)
+                            return s
 
-            # For each interval starting near the first future window, subdivide if necessary and detect derivative sign changes
-            n_sorted = len(t_sorted)
-            start_idx = max(0, first_future_idx_sorted - 1)
-            for i in range(start_idx, n_sorted - 1):
-                a = float(t_sorted[i])
-                b = float(t_sorted[i + 1])
-                dt_interval = b - a
-                if dt_interval <= GRID_SECONDS_DEFAULT:
-                    d_a = _derivative_at_epoch(a)
-                    d_b = _derivative_at_epoch(b)
-                    if abs(d_a) < EPS_DERIV and a >= now_ts:
-                        candidates.append(a)
-                    if d_a * d_b < 0:
-                        root = _find_root_bisection(_derivative_at_epoch, a, b)
+                        root = None
+                        try:
+                            root = (lambda f, a, b: self._find_root_bisect_helper(f, a, b))( _deriv_local, t0, t1)
+                        except Exception:
+                            root = None
                         if root is not None and root >= now_ts:
                             candidates.append(root)
-                else:
-                    # subdivide the interval into smaller sub-intervals of ~GRID_SECONDS_DEFAULT
-                    n_sub = int(math.ceil(dt_interval / GRID_SECONDS_DEFAULT))
-                    pts = [a + i * dt_interval / n_sub for i in range(n_sub + 1)]
-                    prev_d = _derivative_at_epoch(pts[0])
-                    if abs(prev_d) < EPS_DERIV and pts[0] >= now_ts:
-                        candidates.append(pts[0])
-                    for k in range(1, len(pts)):
-                        cur_pt = pts[k]
-                        cur_d = _derivative_at_epoch(cur_pt)
-                        if abs(cur_d) < EPS_DERIV and cur_pt >= now_ts:
-                            candidates.append(cur_pt)
-                        if prev_d * cur_d < 0:
-                            root = _find_root_bisection(_derivative_at_epoch, pts[k - 1], pts[k])
-                            if root is not None and root >= now_ts:
-                                candidates.append(root)
-                        prev_d = cur_d
+            # fallback: if no grid or no candidates, sample a small forward window analytically to find extrema
+            if not candidates:
+                # sample analytic derivative across next 48 hours at GRID_SECONDS_DEFAULT spacing
+                span_end = now_ts + 48 * 3600
+                pts = np.arange(now_ts, span_end + 1, GRID_SECONDS_DEFAULT)
+                deriv_vals = []
+                for x in pts:
+                    deriv_vals.append(self._derivative_analytic(x, omegas, A, B, t_anchor))
+                deriv_vals = np.array(deriv_vals)
+                for k in range(len(pts) - 1):
+                    if deriv_vals[k] * deriv_vals[k + 1] < 0:
+                        candidates.append(float(pts[k]))
 
-            # classify candidates into maxima/minima using second derivative
+            # classify candidates into maxima/minima using second derivative evaluation
             maxima: List[Tuple[float, float]] = []
             minima: List[Tuple[float, float]] = []
             for rt in candidates:
-                h = _height_at_epoch(rt)
-                sec = _second_derivative_at_epoch(rt)
+                h = self._height_analytic(rt, omegas, A, B, t_anchor)
+                sec = self._second_derivative_analytic(rt, omegas, A, B, t_anchor)
                 if sec < -EPS_DERIV:
                     maxima.append((rt, h))
                 elif sec > EPS_DERIV:
                     minima.append((rt, h))
-                # ignore near-inflection candidates
 
-            # pick earliest future max/min
             next_high_tuple: Optional[Tuple[float, float]] = None
             next_low_tuple: Optional[Tuple[float, float]] = None
             if maxima:
@@ -564,26 +609,39 @@ class TideProxy:
             if minima:
                 next_low_tuple = min(minima, key=lambda x: x[0])
 
-            # fallback: use sampled argmax/argmin on sorted future samples
-            if next_high_tuple is None:
-                rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
-                if rel.size:
-                    idx_rel = int(np.argmax(rel))
-                    idx_sorted = first_future_idx_sorted + idx_rel
-                    next_high_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
-            if next_low_tuple is None:
-                rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
-                if rel.size:
-                    idx_rel = int(np.argmin(rel))
-                    idx_sorted = first_future_idx_sorted + idx_rel
-                    next_low_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
+            # fallback: use grid-sampled argmax/argmin
+            if next_high_tuple is None and grid_pred.size:
+                idx = int(np.argmax(grid_pred[np.searchsorted(grid_epochs, now_ts):]))
+                idx_abs = np.searchsorted(grid_epochs, now_ts) + idx
+                if idx_abs < len(grid_epochs):
+                    next_high_tuple = (float(grid_epochs[idx_abs]), float(grid_pred[idx_abs]))
+            if next_low_tuple is None and grid_pred.size:
+                idx = int(np.argmin(grid_pred[np.searchsorted(grid_epochs, now_ts):]))
+                idx_abs = np.searchsorted(grid_epochs, now_ts) + idx
+                if idx_abs < len(grid_epochs):
+                    next_low_tuple = (float(grid_epochs[idx_abs]), float(grid_pred[idx_abs]))
 
             if next_high_tuple is not None:
                 nh_ts, nh_h = next_high_tuple
+                # refine using analytic bisection around a small window
+                try:
+                    root = self._refine_extremum_around(nh_ts - GRID_SECONDS_DEFAULT, nh_ts + GRID_SECONDS_DEFAULT, omegas, A, B, t_anchor)
+                    if root is not None:
+                        nh_ts = root
+                        nh_h = self._height_analytic(root, omegas, A, B, t_anchor)
+                except Exception:
+                    pass
                 next_high = datetime.fromtimestamp(nh_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 next_high_height = float(round(float(nh_h), 3))
             if next_low_tuple is not None:
                 nl_ts, nl_h = next_low_tuple
+                try:
+                    root = self._refine_extremum_around(nl_ts - GRID_SECONDS_DEFAULT, nl_ts + GRID_SECONDS_DEFAULT, omegas, A, B, t_anchor)
+                    if root is not None:
+                        nl_ts = root
+                        nl_h = self._height_analytic(root, omegas, A, B, t_anchor)
+                except Exception:
+                    pass
                 next_low = datetime.fromtimestamp(nl_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 next_low_height = float(round(float(nl_h), 3))
         except Exception:
@@ -615,7 +673,6 @@ class TideProxy:
         tide_strength_value = 0.5
         try:
             if sf_ts is not None and sf_eph is not None and len(dt_objs) > 0:
-                # try to compute a physical proxy using moon distance and alignment
                 try:
                     t0 = sf_ts.from_datetime(dt_objs[0])
                     earth = sf_eph["earth"]
@@ -669,6 +726,7 @@ class TideProxy:
             "_helpers": {
                 "constituents": self._constituents,
                 "t_anchor": float(t_anchor),
+                "t_ref": float(T_REF_EPOCH),
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
             },
@@ -826,3 +884,65 @@ class TideProxy:
                 _LOGGER.exception("compute_period_indices_for_timestamps failed for date %s: %s", d.isoformat(), exc)
                 raise
         return result
+
+    # --- analytic helpers used by the grid-based peak finder ---
+    def _height_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:
+        t_rel = epoch_ts - t_anchor
+        s = float(self._bias) if hasattr(self, "_bias") else 0.0
+        for j, c in enumerate(self._constituents):
+            w = omegas[c]
+            s += float(A[j]) * math.cos(w * t_rel) + float(B[j]) * math.sin(w * t_rel)
+        return s
+
+    def _derivative_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:
+        t_rel = epoch_ts - t_anchor
+        s = 0.0
+        for j, c in enumerate(self._constituents):
+            w = omegas[c]
+            s += -float(A[j]) * w * math.sin(w * t_rel) + float(B[j]) * w * math.cos(w * t_rel)
+        return s
+
+    def _second_derivative_analytic(self, epoch_ts: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> float:
+        t_rel = epoch_ts - t_anchor
+        s = 0.0
+        for j, c in enumerate(self._constituents):
+            w = omegas[c]
+            s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel) - float(B[j]) * (w ** 2) * math.sin(w * t_rel)
+        return s
+
+    def _find_root_bisect_helper(self, f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
+        fa = f(a)
+        fb = f(b)
+        if abs(fa) < EPS_ROOT:
+            return a
+        if abs(fb) < EPS_ROOT:
+            return b
+        if fa * fb > 0:
+            return None
+        lo = a
+        hi = b
+        fa_local = fa
+        for _ in range(maxiter):
+            mid = 0.5 * (lo + hi)
+            fm = f(mid)
+            if abs(fm) < EPS_ROOT or (hi - lo) < tol:
+                return mid
+            if fa_local * fm <= 0:
+                hi = mid
+            else:
+                lo = mid
+                fa_local = fm
+        return 0.5 * (lo + hi)
+
+    def _refine_extremum_around(self, a: float, b: float, omegas: Dict[str, float], A: np.ndarray, B: np.ndarray, t_anchor: float) -> Optional[float]:
+        """
+        Refine a candidate extremum by finding a root of derivative between a and b.
+        """
+        try:
+            def deriv_local(x):
+                return self._derivative_analytic(x, omegas, A, B, t_anchor)
+
+            root = self._find_root_bisect_helper(deriv_local, a, b)
+            return root
+        except Exception:
+            return None
