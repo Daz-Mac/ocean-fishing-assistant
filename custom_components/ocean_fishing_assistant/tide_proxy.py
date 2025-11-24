@@ -294,34 +294,109 @@ class TideProxy:
                     first_future_idx = i
                     break
 
-            next_high_idx = None
-            next_low_idx = None
-            # search for local extrema (simple neighbor check)
-            for i in range(first_future_idx + 1, len(pred) - 1):
-                if pred[i] >= pred[i - 1] and pred[i] >= pred[i + 1]:
-                    next_high_idx = i
-                    break
-            for i in range(first_future_idx + 1, len(pred) - 1):
-                if pred[i] <= pred[i - 1] and pred[i] <= pred[i + 1]:
-                    next_low_idx = i
-                    break
+            # Analytic derivative + root-finding approach to find extrema between samples
+            def _height_at_epoch(epoch_ts: float) -> float:
+                t_rel = epoch_ts - t_anchor
+                s = float(self._bias) if hasattr(self, "_bias") else 0.0
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    s += float(A[j]) * math.cos(w * t_rel) + float(B[j]) * math.sin(w * t_rel)
+                return s
 
-            # fallback: use the global max/min in the future window if no local extremum found
-            if next_high_idx is None and len(pred) > first_future_idx:
+            def _derivative_at_epoch(epoch_ts: float) -> float:
+                t_rel = epoch_ts - t_anchor
+                s = 0.0
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    s += -float(A[j]) * w * math.sin(w * t_rel) + float(B[j]) * w * math.cos(w * t_rel)
+                return s
+
+            def _second_derivative_at_epoch(epoch_ts: float) -> float:
+                t_rel = epoch_ts - t_anchor
+                s = 0.0
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel) - float(B[j]) * (w ** 2) * math.sin(w * t_rel)
+                return s
+
+            def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = 1e-3) -> Optional[float]:
+                fa = f(a)
+                fb = f(b)
+                if abs(fa) < 1e-12:
+                    return a
+                if abs(fb) < 1e-12:
+                    return b
+                if fa * fb > 0:
+                    return None
+                lo = a
+                hi = b
+                for _ in range(maxiter):
+                    mid = 0.5 * (lo + hi)
+                    fm = f(mid)
+                    if abs(fm) < 1e-9 or (hi - lo) < tol:
+                        return mid
+                    if fa * fm <= 0:
+                        hi = mid
+                        fb = fm
+                    else:
+                        lo = mid
+                        fa = fm
+                return 0.5 * (lo + hi)
+
+            candidates: List[float] = []
+            # search each interval between consecutive samples for derivative sign change
+            for i in range(max(0, first_future_idx - 1), len(dt_objs) - 1):
+                t0 = dt_objs[i].timestamp()
+                t1 = dt_objs[i + 1].timestamp()
+                d0 = _derivative_at_epoch(t0)
+                d1 = _derivative_at_epoch(t1)
+                # if derivative near zero at sample point, consider that point a candidate
+                if abs(d0) < 1e-12 and t0 >= now_ts:
+                    candidates.append(t0)
+                if d0 * d1 < 0:
+                    root = _find_root_bisection(_derivative_at_epoch, t0, t1)
+                    if root is not None and root >= now_ts:
+                        candidates.append(root)
+
+            # classify candidates into maxima/minima using second derivative
+            maxima: List[tuple] = []
+            minima: List[tuple] = []
+            for rt in candidates:
+                h = _height_at_epoch(rt)
+                sec = _second_derivative_at_epoch(rt)
+                if sec < 0:
+                    maxima.append((rt, h))
+                else:
+                    minima.append((rt, h))
+
+            # pick earliest future max/min
+            next_high_tuple = None
+            next_low_tuple = None
+            if maxima:
+                next_high_tuple = min(maxima, key=lambda x: x[0])
+            if minima:
+                next_low_tuple = min(minima, key=lambda x: x[0])
+
+            # fallback: if none found, use sampled argmax/argmin in future window
+            if next_high_tuple is None:
                 rel = pred[first_future_idx:]
                 if rel.size:
-                    next_high_idx = int(np.argmax(rel)) + first_future_idx
-            if next_low_idx is None and len(pred) > first_future_idx:
+                    idx = int(np.argmax(rel)) + first_future_idx
+                    next_high_tuple = (dt_objs[idx].timestamp(), float(pred[idx]))
+            if next_low_tuple is None:
                 rel = pred[first_future_idx:]
                 if rel.size:
-                    next_low_idx = int(np.argmin(rel)) + first_future_idx
+                    idx = int(np.argmin(rel)) + first_future_idx
+                    next_low_tuple = (dt_objs[idx].timestamp(), float(pred[idx]))
 
-            if next_high_idx is not None and 0 <= next_high_idx < len(dt_objs):
-                next_high = dt_objs[next_high_idx].isoformat().replace("+00:00", "Z")
-                next_high_height = float(round(float(pred[next_high_idx]), 3))
-            if next_low_idx is not None and 0 <= next_low_idx < len(dt_objs):
-                next_low = dt_objs[next_low_idx].isoformat().replace("+00:00", "Z")
-                next_low_height = float(round(float(pred[next_low_idx]), 3))
+            if next_high_tuple is not None:
+                nh_ts, nh_h = next_high_tuple
+                next_high = datetime.fromtimestamp(nh_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                next_high_height = float(round(float(nh_h), 3))
+            if next_low_tuple is not None:
+                nl_ts, nl_h = next_low_tuple
+                next_low = datetime.fromtimestamp(nl_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                next_low_height = float(round(float(nl_h), 3))
         except Exception:
             _LOGGER.debug("Failed to compute next_high/next_low", exc_info=True)
 
