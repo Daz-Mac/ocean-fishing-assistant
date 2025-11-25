@@ -194,7 +194,7 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
     if not hasattr(harmonics, "FUV"):
         raise RuntimeError("utide.harmonics.FUV not found in installed UTide; cannot compute nodal corrections.")
 
-    # Map names to indices, raising if unknown
+    # Map names to indices, raising if unknown or invalid
     lind_list: List[int] = []
     name_idx_map: Dict[str, int] = {}
     for nm in names:
@@ -202,9 +202,11 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
             raise KeyError(f"Constituent '{nm}' not known to utide.constit_index_dict.")
         idx = int(constit_index[nm]) - 1
         if idx < 0:
-            idx = 0
+            # Do not silently remap to zero; surface error early
+            raise KeyError(f"Constituent '{nm}' maps to invalid index {idx+1} in utide.constit_index_dict.")
         lind_list.append(int(idx))
         name_idx_map[nm] = int(idx)
+        _LOGGER.debug("nfactors: mapped %s -> index %d", nm, idx + 1)
 
     if not lind_list:
         raise RuntimeError("No constituents provided to nfactors.")
@@ -224,8 +226,19 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
     for nm, idx in name_idx_map.items():
         pos = lind.tolist().index(int(idx))
         fval = float(F_row[pos])
-        # UTide returns U in cycles -> convert to degrees
-        uval_deg = float(U_row[pos]) * 360.0
+        u_raw = float(U_row[pos])
+        # Heuristic conversion of U to degrees: UTide historically returns cycles,
+        # but some installations/versions/packaging may present radians or degrees.
+        if abs(u_raw) <= 1.1:
+            # likely cycles (0..1)
+            uval_deg = u_raw * 360.0
+        elif abs(u_raw) <= 2.0 * math.pi + 0.1:
+            # likely radians
+            uval_deg = math.degrees(u_raw)
+        else:
+            # assume degrees already
+            uval_deg = u_raw
+        _LOGGER.debug("nfactors: %s -> f=%s u_raw=%s u_deg=%s", nm, fval, u_raw, uval_deg)
         out[nm] = {"f": fval, "u": uval_deg}
 
     return out
@@ -271,6 +284,8 @@ class TideProxy:
         self._bias = float(bias)
         self._auto_clamp_enabled = bool(auto_clamp_enabled)
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
+        # NOTE: _max_amplitude_m is interpreted as the HALF-RANGE amplitude (i.e. amplitude, not peak-to-peak).
+        # If you prefer peak-to-peak semantics, set this accordingly or request a change.
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
 
         # Skyfield loader (lazy)
@@ -317,6 +332,18 @@ class TideProxy:
                 dtype=float,
             )
 
+        # Heuristic check: warn if coefficients look like they're in cm rather than meters
+        try:
+            mean_abs_A = float(np.mean(np.abs(self._coef_vec[0::2])))
+            if mean_abs_A > 10.0:
+                _LOGGER.warning(
+                    "Large mean coefficient amplitude detected (%.3f). Ensure coef_vec elements are meters (A_cos,B_sin) not cm.",
+                    mean_abs_A,
+                )
+        except Exception:
+            # non-fatal
+            pass
+
         _LOGGER.debug(
             "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s",
             self.latitude,
@@ -347,6 +374,16 @@ class TideProxy:
             if bias is not None:
                 self._bias = float(bias)
             self._cache = None
+            # Heuristic check here too
+            try:
+                mean_abs_A = float(np.mean(np.abs(self._coef_vec[0::2])))
+                if mean_abs_A > 10.0:
+                    _LOGGER.warning(
+                        "Large mean coefficient amplitude detected in set_coefficients (%.3f). Ensure coef_vec elements are meters (A_cos,B_sin) not cm.",
+                        mean_abs_A,
+                    )
+            except Exception:
+                pass
             _LOGGER.info("set_coefficients applied (len=%d) bias=%.6f", arr.size, self._bias)
             return True
         except Exception:
@@ -387,6 +424,19 @@ class TideProxy:
         Returns a strict dict with tide heights and next_high/next_low objects.
         """
         now = dt_util.now().astimezone(timezone.utc)
+
+        # Early-guard for empty timestamps
+        if not timestamps:
+            return {
+                "timestamps": [],
+                "tide_height_m": [],
+                "tide_phase": [],
+                "tide_strength": 0.0,
+                "confidence": "no_timestamps",
+                "source": "tide_proxy",
+                "next_high": None,
+                "next_low": None,
+            }
 
         # Normalize incoming timestamps for cache compare (epoch ints)
         try:
@@ -498,6 +548,7 @@ class TideProxy:
             lon_shift = (self.longitude / 360.0) * period_seconds
             t_anchor = anchor_epoch - lon_shift
         else:
+            lon_shift = 0.0
             t_anchor = anchor_epoch
 
         # build omegas
@@ -509,9 +560,14 @@ class TideProxy:
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
 
+        # Save copies for diagnostics before nodal correction
+        A_orig = A.copy()
+        B_orig = B.copy()
+
         # --- Apply UTide nodal corrections (STRICT: will raise if UTide missing or mismatch) ---
         # convert t_anchor (epoch seconds) to Julian-like days for UTide:
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
+        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s lon_shift=%s", t_anchor, jd_anchor, lon_shift)
 
         # Run potentially-blocking UTide import and computation in executor to avoid blocking the event loop
         try:
@@ -535,6 +591,21 @@ class TideProxy:
             A[i] = float(R2 * math.cos(phi2))
             B[i] = float(R2 * math.sin(phi2))
 
+        # diagnostic logging: pre/post nodal amplitude stats
+        try:
+            Rs_pre = np.hypot(A_orig, B_orig)
+            Rs_post = np.hypot(A, B)
+            _LOGGER.debug(
+                "constituent amps: pre mean=%.4f max=%.4f post mean=%.4f max=%.4f",
+                float(Rs_pre.mean()),
+                float(Rs_pre.max()),
+                float(Rs_post.mean()),
+                float(Rs_post.max()),
+            )
+        except Exception:
+            # non-fatal
+            pass
+
         # compute prediction in original timestamp order
         t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
         pred = np.zeros_like(t_rel)
@@ -548,10 +619,11 @@ class TideProxy:
         if self._auto_clamp_enabled:
             try:
                 if self._max_amplitude_m is not None:
-                    current_amp = float(np.max(pred) - np.min(pred))
-                    if current_amp > float(self._max_amplitude_m) and current_amp > 1e-12:
+                    # Interpret configured _max_amplitude_m as HALF-RANGE amplitude (peak from mean)
+                    current_half = (float(np.max(pred)) - float(np.min(pred))) / 2.0
+                    if current_half > float(self._max_amplitude_m) and current_half > 1e-12:
                         mean_val = float(np.mean(pred))
-                        scale = float(self._max_amplitude_m) / current_amp
+                        scale = float(self._max_amplitude_m) / current_half
                         pred = mean_val + (pred - mean_val) * scale
                 if self._min_height_floor is not None:
                     pred = np.maximum(pred, float(self._min_height_floor))
@@ -576,7 +648,8 @@ class TideProxy:
             pred_sorted = pred[order]
 
             # find first future index in sorted array
-            first_future_idx_sorted = 0
+            n_sorted = len(t_sorted)
+            first_future_idx_sorted = n_sorted
             for i_s, tval in enumerate(t_sorted):
                 if tval >= now_ts:
                     first_future_idx_sorted = i_s
@@ -634,7 +707,6 @@ class TideProxy:
             candidates: List[float] = []
 
             # For each interval starting near the first future window, subdivide if necessary and detect derivative sign changes
-            n_sorted = len(t_sorted)
             start_idx = max(0, first_future_idx_sorted - 1)
             for i in range(start_idx, n_sorted - 1):
                 a = float(t_sorted[i])
