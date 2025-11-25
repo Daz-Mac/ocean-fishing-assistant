@@ -254,7 +254,7 @@ class TideProxy:
         *,
         coef_vec: Optional[Sequence[float]] = None,
         default_m2_amp: float = 1.0,
-        bias: float = 0.0,
+        bias: float = 0.575626550188,
         auto_clamp_enabled: bool = False,
         min_height_floor: Optional[float] = None,
         max_amplitude_m: Optional[float] = None,
