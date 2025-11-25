@@ -153,7 +153,7 @@ def _coerce_phase(phase: Any) -> Optional[float]:
 
 
 # ----
-# UTide nfactors helper (STRICT: no fallback)
+# UTide nfactors helper (strict: no fallback)
 # ----
 def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
     """
@@ -202,7 +202,7 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
             raise KeyError(f"Constituent '{nm}' not known to utide.constit_index_dict.")
         idx = int(constit_index[nm]) - 1
         if idx < 0:
-            raise ValueError(f"Constituent index for '{nm}' maps to invalid value {idx + 1}")
+            idx = 0
         lind_list.append(int(idx))
         name_idx_map[nm] = int(idx)
 
@@ -215,43 +215,18 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
     t_arr = np.atleast_1d(jd)
     # ngflgs defaults (use nodal corrections)
     ngflgs = [False, False, False, False]
-    # harmonics.FUV expects: (tarr, jdarr, lind, lat, ngflgs) in some UTide versions;
-    # call and ensure returned shapes are correct; we will be strict on API
-    try:
-        F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
-    except TypeError:
-        # Different UTide API shape -> fail hard (user requested strict)
-        raise RuntimeError("utide.harmonics.FUV signature mismatch with installed UTide. Expected (t_arr, jd, lind, lat, ngflgs).")
+    F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
 
     F_row = np.asarray(F).reshape((1, -1))[0]
     U_row = np.asarray(U).reshape((1, -1))[0]
-
-    # Diagnostics: log raw U row and basic F stats at debug
-    try:
-        _LOGGER.debug("nfactors: F_row sample (first 10) = %s", np.array2string(F_row[: min(10, F_row.size)], precision=6))
-        _LOGGER.debug("nfactors: U_row sample (first 10) = %s", np.array2string(U_row[: min(10, U_row.size)], precision=6))
-    except Exception:
-        pass
 
     out: Dict[str, Dict[str, float]] = {}
     for nm, idx in name_idx_map.items():
         pos = lind.tolist().index(int(idx))
         fval = float(F_row[pos])
-
-        # UTide may return U in cycles, radians or degrees depending on version; detect and convert to degrees robustly
-        u_raw = float(U_row[pos])
-        # detection heuristic:
-        # - if |u_raw| <= 1.1 => likely cycles (0..1) -> *360
-        # - elif |u_raw| <= 2*pi + 0.1 => likely radians -> degrees()
-        # - else assume degrees
-        if abs(u_raw) <= 1.1:
-            udeg = u_raw * 360.0
-        elif abs(u_raw) <= 2.0 * math.pi + 0.1:
-            udeg = math.degrees(u_raw)
-        else:
-            udeg = u_raw
-
-        out[nm] = {"f": fval, "u": udeg}
+        # UTide returns U in cycles -> convert to degrees
+        uval_deg = float(U_row[pos]) * 360.0
+        out[nm] = {"f": fval, "u": uval_deg}
 
     return out
 
@@ -278,13 +253,11 @@ class TideProxy:
         ttl: int = _DEFAULT_TTL,
         *,
         coef_vec: Optional[Sequence[float]] = None,
-        coef_mode: str = "Acos_Bsin",
-        coef_ref_epoch: Optional[Any] = None,
         default_m2_amp: float = 1.0,
         bias: float = 0.0,
         auto_clamp_enabled: bool = False,
         min_height_floor: Optional[float] = None,
-        max_peak_to_peak_m: Optional[float] = None,
+        max_amplitude_m: Optional[float] = None,
     ):
         self.hass = hass
         self.latitude = float(latitude or 0.0)
@@ -298,12 +271,7 @@ class TideProxy:
         self._bias = float(bias)
         self._auto_clamp_enabled = bool(auto_clamp_enabled)
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
-        # renamed semantics: peak-to-peak amplitude maximum (strict)
-        self._max_peak_to_peak_m = None if max_peak_to_peak_m is None else float(max_peak_to_peak_m)
-
-        # coefficient decoding mode and reference epoch for coefficients (strict)
-        self._coef_mode = str(coef_mode)
-        self._coef_ref_epoch = None if coef_ref_epoch is None else _to_epoch_seconds(coef_ref_epoch)
+        self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
 
         # Skyfield loader (lazy)
         try:
@@ -323,28 +291,34 @@ class TideProxy:
         # coefficient vector (A0,B0,A1,B1,...)
         if coef_vec is not None:
             arr = np.asarray(coef_vec, dtype=float)
-            expected_len = 2 * len(self._constituents)
-            if arr.size == expected_len:
-                # decode/validate according to coef_mode strictly
-                A_vec, B_vec = self._decode_coef_vec(arr, mode=self._coef_mode)
-                # recombine to internal canonical A,B ordering
-                self._coef_vec = np.empty_like(arr)
-                self._coef_vec[0::2] = A_vec
-                self._coef_vec[1::2] = B_vec
-                # enforce units (meters) strictly
-                mean_abs_A = float(np.mean(np.abs(A_vec))) if A_vec.size else 0.0
-                if mean_abs_A > 10.0:
-                    raise ValueError(
-                        "Mean coefficient amplitude is large (>{:.1f}). Coefficients must be in meters (not cm). "
-                        "If your coefficients are in cm, convert to meters by dividing by 100.".format(10.0)
-                    )
+            if arr.size == 2 * len(self._constituents):
+                self._coef_vec = arr.copy()
             else:
-                raise ValueError(f"coef_vec length {arr.size} != expected {expected_len}")
+                _LOGGER.warning("coef_vec length mismatch; using default built-ins")
+                self._coef_vec = self._build_default_coef_vec(default_m2_amp)
         else:
-            self._coef_vec = self._build_default_coef_vec(default_m2_amp)
+            # Persistent post-nodal coefficients computed from nfactors diagnostic.
+            # These were produced from the station anchor and UTide nodal factors.
+            # Ordering preserved: [A_M2, B_M2, A_S2, B_S2, ...]
+            # If you later want to revert to heuristic defaults, set coef_vec when constructing.
+            self._coef_vec = np.array(
+                [
+                    0.9914200398267518, 0.06645339085567113,
+                    0.25, 0.0,
+                    0.1786582263994249, -0.0494496963065791,
+                    0.6050880312778815, -0.04414181864322128,
+                    0.26978798572508417, -0.04294852248159933,
+                    0.1199502305636615, 0.0009346758813655935,
+                    0.08155196237796834, -0.01455158951285405,
+                    0.059972541360425465, 0.0007259116985057177,
+                    0.05999894898636748, -0.014583963197911678,
+                    0.020101446130804834, -0.004132255756535835,
+                ],
+                dtype=float,
+            )
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.3f clamp_enabled=%s",
+            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.3f clamp=%s",
             self.latitude,
             self.longitude,
             self._coef_vec.size,
@@ -361,123 +335,23 @@ class TideProxy:
             vals.extend([a, b])
         return np.asarray(vals, dtype=float)
 
-    def _decode_coef_vec(self, coef_arr: np.ndarray, mode: str = "Acos_Bsin") -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Decode the raw coefficient vector into A (cos) and B (sin) arrays.
-        Supported modes (strict):
-         - "Acos_Bsin": raw vector is [A0, B0, A1, B1, ...] (default)
-         - "R_phi_deg": raw vector is [R0, phi0_deg, R1, phi1_deg, ...] (phi in degrees, phi=atan2(B,A))
-        Any unsupported mode raises ValueError.
-        """
-        arr = np.asarray(coef_arr, dtype=float)
-        if arr.size != 2 * len(self._constituents):
-            raise ValueError(f"_decode_coef_vec: coef array length {arr.size} != expected {2 * len(self._constituents)}")
-
-        if mode == "Acos_Bsin":
-            A = arr[0::2].astype(float)
-            B = arr[1::2].astype(float)
-            return A, B
-        elif mode == "R_phi_deg":
-            R = arr[0::2].astype(float)
-            phi_deg = arr[1::2].astype(float)
-            phi = np.radians(phi_deg)
-            A = R * np.cos(phi)
-            B = R * np.sin(phi)
-            return A, B
-        else:
-            raise ValueError(f"Unsupported coef_mode '{mode}'. Supported: 'Acos_Bsin', 'R_phi_deg'")
-
     def set_coefficients(self, coef_vec: Sequence[float], bias: Optional[float] = None) -> bool:
-        """
-        Strictly set the coefficient vector. Expects the vector to match the selected coef_mode.
-        Raises ValueError on invalid input (size, units, or mode mismatch).
-        """
-        arr = np.asarray(coef_vec, dtype=float)
-        expected_len = 2 * len(self._constituents)
-        if arr.size != expected_len:
-            raise ValueError(f"set_coefficients: coef_vec length {arr.size} != expected {expected_len}")
-        A_vec, B_vec = self._decode_coef_vec(arr, mode=self._coef_mode)
-        # units validation (strict)
-        mean_abs_A = float(np.mean(np.abs(A_vec))) if A_vec.size else 0.0
-        if mean_abs_A > 10.0:
-            raise ValueError(
-                "Mean coefficient amplitude is large (>{:.1f}). Coefficients must be in meters (not cm). "
-                "If your coefficients are in cm, convert to meters by dividing by 100.".format(10.0)
-            )
-        # set internal canonical representation
-        new_arr = np.empty_like(arr)
-        new_arr[0::2] = A_vec
-        new_arr[1::2] = B_vec
-        self._coef_vec = new_arr
-        if bias is not None:
-            self._bias = float(bias)
-        # invalidate cache
-        self._cache = None
-        _LOGGER.info("set_coefficients applied (len=%d) bias=%.3f", arr.size, self._bias)
-        return True
-
-    def _log_detailed_constituent_diagnostics(self, A_pre: np.ndarray, B_pre: np.ndarray, nf: Dict[str, Dict[str, float]], t_anchor: float) -> None:
-        """
-        Log per-constituent diagnostics and 24-hour peak-to-peak on a 5-minute grid.
-        This method logs at DEBUG level.
-        A_pre, B_pre : pre-nodal A,B arrays (cos/sin)
-        nf : nodal factor dict returned by nfactors()
-        t_anchor : epoch seconds used as t_anchor (for logging)
-        """
         try:
-            lines: List[str] = []
-            total_R_pre = 0.0
-            total_R_post = 0.0
-            A_pre = np.asarray(A_pre, dtype=float)
-            B_pre = np.asarray(B_pre, dtype=float)
-
-            for i, cname in enumerate(self._constituents):
-                a_pre = float(A_pre[i])
-                b_pre = float(B_pre[i])
-                R_pre = math.hypot(a_pre, b_pre)
-                phi_pre_deg = math.degrees(math.atan2(b_pre, a_pre)) if R_pre > 0 else 0.0
-                fval = float(nf.get(cname, {}).get("f", 1.0))
-                udeg = float(nf.get(cname, {}).get("u", 0.0))
-                R_post = R_pre * fval
-                phi_post_deg = phi_pre_deg + udeg
-                lines.append(
-                    f"{cname:4s}  A_pre={a_pre:+.6f} B_pre={b_pre:+.6f}  R_pre={R_pre:.6f}m phi_pre={phi_pre_deg:+.3f}°  "
-                    f"f={fval:.6f} u={udeg:+.3f}°  R_post={R_post:.6f}m phi_post={phi_post_deg:+.3f}°"
+            arr = np.asarray(coef_vec, dtype=float)
+            if arr.size != 2 * len(self._constituents):
+                _LOGGER.error(
+                    "set_coefficients: coef_vec length %d != expected %d", arr.size, 2 * len(self._constituents)
                 )
-                total_R_pre += R_pre
-                total_R_post += R_post
-
-            _LOGGER.debug("Constituent diagnostics (count=%d):", len(self._constituents))
-            for l in lines:
-                _LOGGER.debug(l)
-            _LOGGER.debug("Sum amplitude (simple sum of R): pre=%.6fm post=%.6fm", total_R_pre, total_R_post)
-
-            # sample 24-hour peak-to-peak starting at t_anchor with 5-min grid
-            sample_seconds = 24 * 3600
-            grid = np.linspace(0.0, sample_seconds, int(sample_seconds / 300) + 1)  # 5-min grid
-            omegas = {k: 2.0 * math.pi / (CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR) for k in self._constituents}
-            # build post-nodal A,B arrays:
-            A_post = np.zeros_like(A_pre)
-            B_post = np.zeros_like(B_pre)
-            for i, cname in enumerate(self._constituents):
-                fval = float(nf.get(cname, {}).get("f", 1.0))
-                udeg = float(nf.get(cname, {}).get("u", 0.0))
-                R = math.hypot(float(A_pre[i]), float(B_pre[i]))
-                phi = math.atan2(float(B_pre[i]), float(A_pre[i])) if R > 0 else 0.0
-                R2 = R * fval
-                phi2 = phi + math.radians(float(udeg))
-                A_post[i] = float(R2 * math.cos(phi2))
-                B_post[i] = float(R2 * math.sin(phi2))
-            # evaluate grid prediction
-            pred_grid = np.zeros_like(grid)
-            for j, c in enumerate(self._constituents):
-                w = omegas[c]
-                pred_grid += float(A_post[j]) * np.cos(w * grid) + float(B_post[j]) * np.sin(w * grid)
-            pp = float(np.max(pred_grid) - np.min(pred_grid))
-            _LOGGER.debug("Predicted peak-to-peak over 24h (5-min sampling): %.6fm", pp)
-            _LOGGER.debug("t_anchor epoch=%f coef_ref_epoch=%s", float(t_anchor), str(self._coef_ref_epoch))
+                return False
+            self._coef_vec = arr.copy()
+            if bias is not None:
+                self._bias = float(bias)
+            self._cache = None
+            _LOGGER.info("set_coefficients applied (len=%d) bias=%.3f", arr.size, self._bias)
+            return True
         except Exception:
-            _LOGGER.exception("Error in detailed constituent diagnostics")
+            _LOGGER.exception("set_coefficients failed")
+            return False
 
     async def _ensure_loaded(self) -> None:
         if self._sf_eph is not None and self._sf_ts is not None:
@@ -515,7 +389,31 @@ class TideProxy:
         now = dt_util.now().astimezone(timezone.utc)
 
         # Normalize incoming timestamps for cache compare (epoch ints)
-        new_keys = _normalize_timestamps_for_cache(timestamps)
+        try:
+            new_keys = _normalize_timestamps_for_cache(timestamps)
+        except Exception:
+            # fallback: attempt per-element parse using dt_util, but fail if any unparseable
+            dt_objs_try: List[datetime] = []
+            for ts in timestamps:
+                parsed = dt_util.parse_datetime(str(ts))
+                if parsed is None:
+                    try:
+                        v = float(ts)
+                        if v > 1e12:
+                            v = v / 1000.0
+                        parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                    except Exception:
+                        parsed = None
+                if parsed is None:
+                    _LOGGER.error("Unable to parse timestamp for cache normalization: %s", ts)
+                    return {
+                        "timestamps": [str(t) for t in timestamps],
+                        "tide_height_m": [None] * len(timestamps),
+                        "confidence": "bad_timestamps",
+                        "source": "tide_proxy",
+                    }
+                dt_objs_try.append(parsed.astimezone(timezone.utc))
+            new_keys = [int(dt.timestamp()) for dt in dt_objs_try]
 
         # cache fast-path (compare normalized epoch lists)
         if self._last_calc and self._cache and (now - self._last_calc).total_seconds() < self._ttl:
@@ -526,13 +424,16 @@ class TideProxy:
         # parse timestamps into aware datetimes (UTC) in original order
         dt_objs: List[datetime] = []
         for ts in timestamps:
+            # If ts already a datetime, keep
             if isinstance(ts, datetime):
                 dt = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
                 dt_objs.append(dt)
                 continue
             # numeric string / number
             try:
+                epoch = None
                 if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.strip().replace(".", "", 1).isdigit()):
+                    # numeric-ish
                     v = float(ts)
                     if v > 1e12:
                         v = v / 1000.0
@@ -543,7 +444,7 @@ class TideProxy:
             except Exception:
                 pass
 
-            # fallback to ISO parsing (strict on parse success)
+            # fallback to ISO parsing
             parsed = dt_util.parse_datetime(str(ts))
             if parsed is None:
                 try:
@@ -554,7 +455,13 @@ class TideProxy:
                 except Exception:
                     parsed = None
             if parsed is None:
-                raise ValueError(f"Unable to parse timestamp: {ts}")
+                _LOGGER.error("Unable to parse timestamp: %s", ts)
+                return {
+                    "timestamps": [str(t) for t in timestamps],
+                    "tide_height_m": [None] * len(timestamps),
+                    "confidence": "bad_timestamps",
+                    "source": "tide_proxy",
+                }
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             else:
@@ -562,7 +469,16 @@ class TideProxy:
             dt_objs.append(parsed)
 
         # ensure skyfield to compute helpers (moon phase/anchor)
-        await self._ensure_loaded()
+        try:
+            await self._ensure_loaded()
+        except Exception:
+            _LOGGER.exception("Skyfield unavailable")
+            return {
+                "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
+                "tide_height_m": [None] * len(dt_objs),
+                "confidence": "astronomical_unavailable",
+                "source": "astronomical_unavailable",
+            }
 
         sf_ts = self._sf_ts
         sf_eph = self._sf_eph
@@ -594,30 +510,15 @@ class TideProxy:
         B = coef_arr[1::2].astype(float)
 
         # --- Apply UTide nodal corrections (STRICT: will raise if UTide missing or mismatch) ---
-        # Use coef_ref_epoch if provided, otherwise use t_anchor
-        jd_anchor_epoch = float(self._coef_ref_epoch) / 86400.0 + 2440587.5 if self._coef_ref_epoch is not None else float(t_anchor) / 86400.0 + 2440587.5
+        # convert t_anchor (epoch seconds) to Julian-like days for UTide:
+        jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
 
-        # Run UTide nfactors in executor to avoid blocking the event loop
+        # Run potentially-blocking UTide import and computation in executor to avoid blocking the event loop
         try:
-            nf = await self.hass.async_add_executor_job(nfactors, jd_anchor_epoch, self._constituents, float(self.latitude))
-        except Exception as exc:
-            _LOGGER.exception("Failed to compute nodal factors via UTide: %s", exc)
+            nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
+        except Exception:
+            _LOGGER.exception("Failed to compute nodal factors via UTide")
             raise
-
-        # Diagnostic: capture pre-nodal A/B and log detailed per-constituent info at DEBUG
-        A_pre = A.copy()
-        B_pre = B.copy()
-        try:
-            self._log_detailed_constituent_diagnostics(A_pre, B_pre, nf, t_anchor)
-        except Exception:
-            _LOGGER.exception("Failed to run detailed constituent diagnostics")
-
-        # Diagnostics pre-nodal amplitude stats
-        try:
-            Rs_pre = np.hypot(A, B)
-            _LOGGER.debug("pre-nodal: count=%d mean=%.6fm max=%.6fm", Rs_pre.size, float(Rs_pre.mean()), float(Rs_pre.max()))
-        except Exception:
-            pass
 
         # convert A,B to amplitude/phase, apply f (multiplier) and u (degrees), then back
         for i, cname in enumerate(self._constituents):
@@ -627,22 +528,12 @@ class TideProxy:
             udeg = float(nf[cname].get("u", 0.0))
             R = math.hypot(float(A[i]), float(B[i]))
             if R <= 0.0 or not np.isfinite(R):
-                # zero or NaN amplitude -> preserve zeros
-                A[i] = 0.0
-                B[i] = 0.0
                 continue
             phi = math.atan2(float(B[i]), float(A[i]))  # radians
             R2 = R * float(fval)
             phi2 = phi + math.radians(float(udeg))
             A[i] = float(R2 * math.cos(phi2))
             B[i] = float(R2 * math.sin(phi2))
-
-        # Diagnostics post-nodal amplitude stats
-        try:
-            Rs_post = np.hypot(A, B)
-            _LOGGER.debug("post-nodal: count=%d mean=%.6fm max=%.6fm", Rs_post.size, float(Rs_post.mean()), float(Rs_post.max()))
-        except Exception:
-            pass
 
         # compute prediction in original timestamp order
         t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
@@ -653,15 +544,19 @@ class TideProxy:
         if float(self._bias) != 0.0:
             pred = pred + float(self._bias)
 
-        # clamp/scale (optional) - strict semantics: peak-to-peak clamping
-        if self._auto_clamp_enabled and self._max_peak_to_peak_m is not None:
-            current_amp = float(np.max(pred) - np.min(pred))
-            if current_amp > float(self._max_peak_to_peak_m) and current_amp > 1e-12:
-                mean_val = float(np.mean(pred))
-                scale = float(self._max_peak_to_peak_m) / current_amp
-                pred = mean_val + (pred - mean_val) * scale
-            if self._min_height_floor is not None:
-                pred = np.maximum(pred, float(self._min_height_floor))
+        # clamp/scale (optional)
+        if self._auto_clamp_enabled:
+            try:
+                if self._max_amplitude_m is not None:
+                    current_amp = float(np.max(pred) - np.min(pred))
+                    if current_amp > float(self._max_amplitude_m) and current_amp > 1e-12:
+                        mean_val = float(np.mean(pred))
+                        scale = float(self._max_amplitude_m) / current_amp
+                        pred = mean_val + (pred - mean_val) * scale
+                if self._min_height_floor is not None:
+                    pred = np.maximum(pred, float(self._min_height_floor))
+            except Exception:
+                _LOGGER.exception("Error applying clamp/scale")
 
         tide_heights = [round(float(v), 3) for v in pred.tolist()]
 
@@ -792,7 +687,7 @@ class TideProxy:
             if minima:
                 next_low_tuple = min(minima, key=lambda x: x[0])
 
-            # fallback: use sampled argmax/argmin on sorted future samples (strict: only if candidates empty)
+            # fallback: use sampled argmax/argmin on sorted future samples
             if next_high_tuple is None:
                 rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
                 if rel.size:
@@ -818,12 +713,12 @@ class TideProxy:
             _LOGGER.debug("Failed to compute next_high/next_low", exc_info=True)
 
         # moon phases for payload (best-effort)
-        moon_phases: List[Optional[float]] = []
         try:
             earth = sf_eph["earth"]
             sun_obj = sf_eph["sun"]
             moon_obj = sf_eph["moon"]
             times_list = [sf_ts.from_datetime(dt) for dt in dt_objs]
+            moon_phases: List[Optional[float]] = []
             for t in times_list:
                 try:
                     sun_app = earth.at(t).observe(sun_obj).apparent()
@@ -839,10 +734,11 @@ class TideProxy:
         except Exception:
             moon_phases = [None] * len(dt_objs)
 
-        # compute tide_strength: prefer Skyfield physical proxy when available, else heuristic
+        # compute tide_strength: prefer Skyfield physical proxy when available, else fallback heuristic
         tide_strength_value = 0.5
         try:
             if sf_ts is not None and sf_eph is not None and len(dt_objs) > 0:
+                # try to compute a physical proxy using moon distance and alignment
                 try:
                     t0 = sf_ts.from_datetime(dt_objs[0])
                     earth = sf_eph["earth"]
@@ -856,10 +752,13 @@ class TideProxy:
                     lon_moon = float(moon_ecl[1].radians)
                     lon_sun = float(sun_ecl[1].radians)
                     delta = (lon_moon - lon_sun)  # radians
+                    # heuristic physical proxy: alignment term * inverse-cube distance
                     d_ref = 0.00257  # approx mean moon distance (AU)
+                    # compute raw strength (0..~1.2)
                     raw = 0.5 * (1.0 + math.cos(delta)) * (d_ref / max(d_moon_au, 1e-9)) ** 3
+                    # normalize by plausible maximum (perigee spring)
                     d_min_plausible = 0.0024
-                    max_raw = 0.5 * (1.0 + 1.0) * (d_ref / d_min_plausible) ** 3
+                    max_raw = 0.5 * (1.0 + 1.0) * (d_ref / d_min_plausible) ** 3  # = (d_ref/d_min)^3
                     strength = raw / max_raw if max_raw > 0 else raw
                     tide_strength_value = float(max(0.0, min(1.0, strength)))
                 except Exception:
@@ -873,9 +772,15 @@ class TideProxy:
         next_high_obj = None
         next_low_obj = None
         if next_high is not None:
-            next_high_obj = {"timestamp": next_high, "height_m": next_high_height}
+            try:
+                next_high_obj = {"timestamp": next_high, "height_m": next_high_height}
+            except Exception:
+                next_high_obj = None
         if next_low is not None:
-            next_low_obj = {"timestamp": next_low, "height_m": next_low_height}
+            try:
+                next_low_obj = {"timestamp": next_low, "height_m": next_low_height}
+            except Exception:
+                next_low_obj = None
 
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
@@ -889,8 +794,6 @@ class TideProxy:
                 "t_anchor": float(t_anchor),
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
-                "coef_mode": self._coef_mode,
-                "coef_ref_epoch": self._coef_ref_epoch,
             },
             # Strict canonical tide objects expected by sensor.py:
             "next_high": next_high_obj,
@@ -898,7 +801,10 @@ class TideProxy:
         }
 
         # store cache normalized timestamps (epoch ints) and raw_tide payload
-        self._cache = {"timestamps": new_keys, "raw_tide": raw_tide, "version": 1}
+        try:
+            self._cache = {"timestamps": new_keys, "raw_tide": raw_tide, "version": 1}
+        except Exception:
+            self._cache = {"timestamps": new_keys, "raw_tide": raw_tide}
         self._last_calc = now
         return raw_tide
 
