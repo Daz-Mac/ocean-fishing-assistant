@@ -494,7 +494,14 @@ class TideProxy:
         # --- Apply UTide nodal corrections (STRICT: will raise if UTide missing or mismatch) ---
         # convert t_anchor (epoch seconds) to Julian-like days for UTide:
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
-        nf = nfactors(jd_anchor, self._constituents, latitude=self.latitude)
+
+        # Run potentially-blocking UTide import and computation in executor to avoid blocking the event loop
+        try:
+            nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
+        except Exception:
+            _LOGGER.exception("Failed to compute nodal factors via UTide")
+            raise
+
         # convert A,B to amplitude/phase, apply f (multiplier) and u (degrees), then back
         for i, cname in enumerate(self._constituents):
             if cname not in nf:
