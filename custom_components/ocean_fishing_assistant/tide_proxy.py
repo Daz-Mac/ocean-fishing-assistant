@@ -303,22 +303,22 @@ class TideProxy:
             # If you later want to revert to heuristic defaults, set coef_vec when constructing.
             self._coef_vec = np.array(
                 [
-                    0.9914200398267518, 0.06645339085567113,
-                    0.25, 0.0,
-                    0.1786582263994249, -0.0494496963065791,
-                    0.6050880312778815, -0.04414181864322128,
-                    0.26978798572508417, -0.04294852248159933,
-                    0.1199502305636615, 0.0009346758813655935,
-                    0.08155196237796834, -0.01455158951285405,
-                    0.059972541360425465, 0.0007259116985057177,
-                    0.05999894898636748, -0.014583963197911678,
-                    0.020101446130804834, -0.004132255756535835,
+                    0.14933269066304247, 0.010009545158976542,
+                    0.03765626189307662, 0.0,
+                    0.02691040385059728, -0.007448362858614585,
+                    0.09114141349666417, -0.006648863533063331,
+                    0.040636828184277544, -0.006469123241951175,
+                    0.018067509184960646, 0.00014078559909538,
+                    0.01228376821279643, -0.0021918338626263174,
+                    0.009033366895446204, 0.00010934048412071753,
+                    0.00903734454535999, -0.002196710150478214,
+                    0.0030277812797246343, -0.0006224212199091476,
                 ],
                 dtype=float,
             )
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.3f clamp=%s",
+            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s",
             self.latitude,
             self.longitude,
             self._coef_vec.size,
@@ -347,7 +347,7 @@ class TideProxy:
             if bias is not None:
                 self._bias = float(bias)
             self._cache = None
-            _LOGGER.info("set_coefficients applied (len=%d) bias=%.3f", arr.size, self._bias)
+            _LOGGER.info("set_coefficients applied (len=%d) bias=%.6f", arr.size, self._bias)
             return True
         except Exception:
             _LOGGER.exception("set_coefficients failed")
