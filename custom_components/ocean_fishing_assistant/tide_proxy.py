@@ -416,6 +416,69 @@ class TideProxy:
         _LOGGER.info("set_coefficients applied (len=%d) bias=%.3f", arr.size, self._bias)
         return True
 
+    def _log_detailed_constituent_diagnostics(self, A_pre: np.ndarray, B_pre: np.ndarray, nf: Dict[str, Dict[str, float]], t_anchor: float) -> None:
+        """
+        Log per-constituent diagnostics and 24-hour peak-to-peak on a 5-minute grid.
+        This method logs at DEBUG level.
+        A_pre, B_pre : pre-nodal A,B arrays (cos/sin)
+        nf : nodal factor dict returned by nfactors()
+        t_anchor : epoch seconds used as t_anchor (for logging)
+        """
+        try:
+            lines: List[str] = []
+            total_R_pre = 0.0
+            total_R_post = 0.0
+            A_pre = np.asarray(A_pre, dtype=float)
+            B_pre = np.asarray(B_pre, dtype=float)
+
+            for i, cname in enumerate(self._constituents):
+                a_pre = float(A_pre[i])
+                b_pre = float(B_pre[i])
+                R_pre = math.hypot(a_pre, b_pre)
+                phi_pre_deg = math.degrees(math.atan2(b_pre, a_pre)) if R_pre > 0 else 0.0
+                fval = float(nf.get(cname, {}).get("f", 1.0))
+                udeg = float(nf.get(cname, {}).get("u", 0.0))
+                R_post = R_pre * fval
+                phi_post_deg = phi_pre_deg + udeg
+                lines.append(
+                    f"{cname:4s}  A_pre={a_pre:+.6f} B_pre={b_pre:+.6f}  R_pre={R_pre:.6f}m phi_pre={phi_pre_deg:+.3f}°  "
+                    f"f={fval:.6f} u={udeg:+.3f}°  R_post={R_post:.6f}m phi_post={phi_post_deg:+.3f}°"
+                )
+                total_R_pre += R_pre
+                total_R_post += R_post
+
+            _LOGGER.debug("Constituent diagnostics (count=%d):", len(self._constituents))
+            for l in lines:
+                _LOGGER.debug(l)
+            _LOGGER.debug("Sum amplitude (simple sum of R): pre=%.6fm post=%.6fm", total_R_pre, total_R_post)
+
+            # sample 24-hour peak-to-peak starting at t_anchor with 5-min grid
+            sample_seconds = 24 * 3600
+            grid = np.linspace(0.0, sample_seconds, int(sample_seconds / 300) + 1)  # 5-min grid
+            omegas = {k: 2.0 * math.pi / (CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR) for k in self._constituents}
+            # build post-nodal A,B arrays:
+            A_post = np.zeros_like(A_pre)
+            B_post = np.zeros_like(B_pre)
+            for i, cname in enumerate(self._constituents):
+                fval = float(nf.get(cname, {}).get("f", 1.0))
+                udeg = float(nf.get(cname, {}).get("u", 0.0))
+                R = math.hypot(float(A_pre[i]), float(B_pre[i]))
+                phi = math.atan2(float(B_pre[i]), float(A_pre[i])) if R > 0 else 0.0
+                R2 = R * fval
+                phi2 = phi + math.radians(float(udeg))
+                A_post[i] = float(R2 * math.cos(phi2))
+                B_post[i] = float(R2 * math.sin(phi2))
+            # evaluate grid prediction
+            pred_grid = np.zeros_like(grid)
+            for j, c in enumerate(self._constituents):
+                w = omegas[c]
+                pred_grid += float(A_post[j]) * np.cos(w * grid) + float(B_post[j]) * np.sin(w * grid)
+            pp = float(np.max(pred_grid) - np.min(pred_grid))
+            _LOGGER.debug("Predicted peak-to-peak over 24h (5-min sampling): %.6fm", pp)
+            _LOGGER.debug("t_anchor epoch=%f coef_ref_epoch=%s", float(t_anchor), str(self._coef_ref_epoch))
+        except Exception:
+            _LOGGER.exception("Error in detailed constituent diagnostics")
+
     async def _ensure_loaded(self) -> None:
         if self._sf_eph is not None and self._sf_ts is not None:
             return
@@ -540,6 +603,14 @@ class TideProxy:
         except Exception as exc:
             _LOGGER.exception("Failed to compute nodal factors via UTide: %s", exc)
             raise
+
+        # Diagnostic: capture pre-nodal A/B and log detailed per-constituent info at DEBUG
+        A_pre = A.copy()
+        B_pre = B.copy()
+        try:
+            self._log_detailed_constituent_diagnostics(A_pre, B_pre, nf, t_anchor)
+        except Exception:
+            _LOGGER.exception("Failed to run detailed constituent diagnostics")
 
         # Diagnostics pre-nodal amplitude stats
         try:
