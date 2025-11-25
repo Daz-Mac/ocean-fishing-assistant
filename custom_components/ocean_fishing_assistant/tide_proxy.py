@@ -153,18 +153,21 @@ def _coerce_phase(phase: Any) -> Optional[float]:
 
 
 # ----
-# UTide nfactors helper (ported / wrapped)
+# UTide nfactors helper (strict: no fallback)
 # ----
 def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
     """
     Compute nodal amplitude factor (f) and phase correction (u) for the given
-    Julian date (jd) and constituent names using installed UTide helpers where available.
+    Julian date (jd) and constituent names using UTide internals.
+
+    This function is strict: it raises RuntimeError if UTide or required
+    helpers/constants are not present, or KeyError if a requested constituent
+    name is not found. No fallback default is returned.
 
     Parameters
     ----------
     jd : float
-        Time in days (Julian-like). UTide's astronomy code accepts jd in the
-        same convention used by UTide (see utide.astronomy.ut_astron doc).
+        Time in days (e.g. Julian days).
     names : sequence of str
         Constituent short names, e.g. ['M2', 'S2', ...]
     latitude : float
@@ -174,82 +177,58 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
     -------
     dict: {name: {"f": float, "u": float_in_degrees}}
     """
-    out: Dict[str, Dict[str, float]] = {}
-    # default fallback
-    for nm in names:
-        out[nm] = {"f": 1.0, "u": 0.0}
-
     try:
-        # Import UTide internals lazily so the integration doesn't fail if utide missing
         import utide  # type: ignore
-        # harmonics module provides FUV which returns (F, U, V) arrays
         from utide import harmonics  # type: ignore
-        # UTide top-level mapping from constituent name -> index (1-based or 0-based depending on version)
-        constit_index = getattr(utide, "constit_index_dict", None)
-        # utide.ut_constants is usually available as utide.ut_constants or utide._ut_constants.ut_constants
-        uc = getattr(utide, "ut_constants", None)
-        if constit_index is None or uc is None:
-            # can't proceed with UTide internals
-            return out
+    except Exception as exc:
+        raise RuntimeError(
+            "UTide is required for nodal factor calculation but is not available. "
+            "Install UTide in the environment so this integration can compute nodal corrections."
+        ) from exc
 
-        # Prepare indices list for requested names. Filter out unknown constituents.
-        known = []
-        name_idx_map = {}
-        for nm in names:
-            if nm in constit_index:
-                # utide.constit_index_dict values appear to be 1-based indices; convert to 0-based
-                idx = int(constit_index[nm]) - 1
-                if idx < 0:
-                    idx = 0
-                known.append(idx)
-                name_idx_map[nm] = idx
-            else:
-                # unknown -> keep default f=1,u=0
-                _LOGGER.debug("nfactors: constituent %s not found in utide.constit_index_dict", nm)
+    constit_index = getattr(utide, "constit_index_dict", None)
+    if constit_index is None:
+        raise RuntimeError("utide.constit_index_dict not found in installed UTide; cannot map constituent names.")
 
-        if not known:
-            return out
+    # Ensure FUV exists
+    if not hasattr(harmonics, "FUV"):
+        raise RuntimeError("utide.harmonics.FUV not found in installed UTide; cannot compute nodal corrections.")
 
-        # Prepare arrays expected by harmonics.FUV
-        # FUV signature in UTide repo: FUV(t, tref, lind, lat, ngflgs)
-        # where 'lind' are the internal indices used by UTide - the 'known' indices above map directly
-        lind = np.atleast_1d(known).astype(int)
+    # Map names to indices, raising if unknown
+    lind_list: List[int] = []
+    name_idx_map: Dict[str, int] = {}
+    for nm in names:
+        if nm not in constit_index:
+            raise KeyError(f"Constituent '{nm}' not known to utide.constit_index_dict.")
+        idx = int(constit_index[nm]) - 1
+        if idx < 0:
+            idx = 0
+        lind_list.append(int(idx))
+        name_idx_map[nm] = int(idx)
 
-        # call harmonics.FUV; use single time array [jd] (UTide expects days)
-        # build ngflgs to enable nodal/satellite corrections (conservative default):
-        # [nodsatlint, nodsatnone, gwchlint, gwchnone] -> choose to apply nodal correction: leave nodsatnone=False
-        ngflgs = [False, False, False, False]
-        # Prefer to call FUV directly if present
-        if hasattr(harmonics, "FUV"):
-            # F, U, V shapes: (nt, nc) or similar
-            t_arr = np.atleast_1d(jd)
-            try:
-                F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
-            except TypeError:
-                # Some UTide versions define FUV with signature (t, tref, lind, lat, ngflgs)
-                F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
-            # F and U are arrays shaped (nt, nc)
-            # we used nt=1, so pick first row
-            F_row = np.asarray(F).reshape((1, -1))[0]
-            U_row = np.asarray(U).reshape((1, -1))[0]
-            # U returned by UTide is in cycles (fraction of 2π). Convert to degrees (cycles * 360)
-            for nm, idx in name_idx_map.items():
-                try:
-                    pos = lind.tolist().index(int(idx))
-                except ValueError:
-                    # if not found, leave default
-                    continue
-                fval = float(F_row[pos])
-                uval_deg = float(U_row[pos]) * 360.0
-                out[nm] = {"f": fval if np.isfinite(fval) else 1.0, "u": uval_deg if np.isfinite(uval_deg) else 0.0}
-            return out
+    if not lind_list:
+        raise RuntimeError("No constituents provided to nfactors.")
 
-        # If harmonics.FUV not present, return defaults
-        return out
+    lind = np.atleast_1d(lind_list).astype(int)
 
-    except Exception:  # pragma: no cover - defensive fallback
-        _LOGGER.debug("nfactors: UTide not available or call failed; using fallback factors", exc_info=True)
-        return out
+    # call harmonics.FUV; pass a 1-element time array
+    t_arr = np.atleast_1d(jd)
+    # ngflgs defaults (use nodal corrections)
+    ngflgs = [False, False, False, False]
+    F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
+
+    F_row = np.asarray(F).reshape((1, -1))[0]
+    U_row = np.asarray(U).reshape((1, -1))[0]
+
+    out: Dict[str, Dict[str, float]] = {}
+    for nm, idx in name_idx_map.items():
+        pos = lind.tolist().index(int(idx))
+        fval = float(F_row[pos])
+        # UTide returns U in cycles -> convert to degrees
+        uval_deg = float(U_row[pos]) * 360.0
+        out[nm] = {"f": fval, "u": uval_deg}
+
+    return out
 
 
 # ----
@@ -512,34 +491,24 @@ class TideProxy:
         A = coef_arr[0::2].astype(float)
         B = coef_arr[1::2].astype(float)
 
-        # --- Apply UTide nodal corrections (if UTide present) to A,B ---
-        try:
-            # convert t_anchor (epoch seconds) to Julian-like days for UTide:
-            # UTide's ut_astron in package expects jd in days; common approach is to use Julian date:
-            jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
-            nf = nfactors(jd_anchor, self._constituents, latitude=self.latitude)
-            # convert A,B to amplitude/phase, apply f (multiplier) and u (degrees), then back
-            for i, cname in enumerate(self._constituents):
-                if cname in nf:
-                    fval = float(nf[cname].get("f", 1.0))
-                    udeg = float(nf[cname].get("u", 0.0))
-                    # current coefficients: A*cos(w t) + B*sin(w t) = R * cos(w t - phi)
-                    # where phi = atan2(B, A) with our sign convention; we will recompute A,B from R' and phi'
-                    R = math.hypot(float(A[i]), float(B[i]))
-                    if R <= 0.0 or not np.isfinite(R):
-                        # nothing to adjust
-                        continue
-                    phi = math.atan2(float(B[i]), float(A[i]))  # radians
-                    # apply nodal amplitude factor and phase correction
-                    R2 = R * float(fval)
-                    # UTide's U is in cycles -> degrees; convert to radians and add
-                    phi2 = phi + math.radians(float(udeg))
-                    # rebuild corrected A,B
-                    A[i] = float(R2 * math.cos(phi2))
-                    B[i] = float(R2 * math.sin(phi2))
-        except Exception:
-            # don't fail the whole prediction because nodal application failed
-            _LOGGER.debug("Applying nodal corrections failed; proceeding without them", exc_info=True)
+        # --- Apply UTide nodal corrections (STRICT: will raise if UTide missing or mismatch) ---
+        # convert t_anchor (epoch seconds) to Julian-like days for UTide:
+        jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
+        nf = nfactors(jd_anchor, self._constituents, latitude=self.latitude)
+        # convert A,B to amplitude/phase, apply f (multiplier) and u (degrees), then back
+        for i, cname in enumerate(self._constituents):
+            if cname not in nf:
+                raise KeyError(f"nfactors did not return entry for constituent '{cname}'")
+            fval = float(nf[cname].get("f", 1.0))
+            udeg = float(nf[cname].get("u", 0.0))
+            R = math.hypot(float(A[i]), float(B[i]))
+            if R <= 0.0 or not np.isfinite(R):
+                continue
+            phi = math.atan2(float(B[i]), float(A[i]))  # radians
+            R2 = R * float(fval)
+            phi2 = phi + math.radians(float(udeg))
+            A[i] = float(R2 * math.cos(phi2))
+            B[i] = float(R2 * math.sin(phi2))
 
         # compute prediction in original timestamp order
         t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
