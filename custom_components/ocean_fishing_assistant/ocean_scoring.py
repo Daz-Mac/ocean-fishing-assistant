@@ -267,15 +267,27 @@ def compute_score(
         else:
             moon_phase_val = _to_float_safe(mp)
 
+    # --- robust pressure delta calculation with backward-diff fallback ---
     pressure_delta = None
-    if not isinstance(pressure_arr, (list, tuple)) or len(pressure_arr) <= use_index + 1:
-        pressure_arr_ok = False
+    pressure_arr_ok = False
+    if isinstance(pressure_arr, (list, tuple)):
+        # ensure we have a current value at use_index
+        p_curr = _to_float_safe(pressure_arr[use_index]) if use_index < len(pressure_arr) else None
+        if p_curr is not None:
+            # prefer forward difference when next point exists
+            if use_index + 1 < len(pressure_arr):
+                p_next = _to_float_safe(pressure_arr[use_index + 1])
+                if p_next is not None:
+                    pressure_delta = float(p_next) - float(p_curr)
+                    pressure_arr_ok = True
+            # fallback to backward difference when forward not available
+            if not pressure_arr_ok and use_index - 1 >= 0:
+                p_prev = _to_float_safe(pressure_arr[use_index - 1])
+                if p_prev is not None:
+                    pressure_delta = float(p_curr) - float(p_prev)
+                    pressure_arr_ok = True
     else:
-        pressure_arr_ok = True
-        p_curr = _to_float_safe(pressure_arr[use_index])
-        p_next = _to_float_safe(pressure_arr[use_index + 1])
-        if p_curr is not None and p_next is not None:
-            pressure_delta = float(p_next) - float(p_curr)
+        pressure_arr_ok = False
 
     missing = []
     if wind is None:
@@ -286,8 +298,9 @@ def compute_score(
         missing.append("temperature_c")
     if moon_phase_val is None:
         missing.append("moon_phase")
+    # require at least a neighbor pressure point (forward OR backward)
     if not pressure_arr_ok:
-        missing.append("pressure_hpa_series_with_future_point")
+        missing.append("pressure_hpa_series_with_neighbor_point")
 
     if missing:
         msg = f"Missing required inputs for scoring at index={use_index} timestamp={timestamps[use_index]}: {', '.join(missing)}"
