@@ -791,17 +791,20 @@ class TideProxy:
                             cls = "ambiguous"
 
                     if len(classification_debug) < 12:
+                        # reuse cached 'sec' rather than calling the function again
+                        sec_val = sec if 'sec' in locals() else _second_derivative_at_epoch(rt)
                         classification_debug.append(
                             (
                                 datetime.fromtimestamp(rt, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
                                 float(d_before),
                                 float(d_after),
-                                float(_second_derivative_at_epoch(rt)),
+                                float(sec_val),
                                 cls,
                             )
                         )
-                except Exception:
-                    # skip any problematic candidate
+                except Exception as e:
+                    # log for debugging but continue processing other candidates
+                    _LOGGER.debug("candidate classification failed at %s: %s", rt, e, exc_info=True)
                     continue
 
             # debug dump: log first few candidates and classifications
@@ -814,6 +817,7 @@ class TideProxy:
                     classification_debug,
                 )
             except Exception:
+                # keep silent (best-effort logging)
                 pass
 
             # pick earliest future max/min
@@ -826,7 +830,7 @@ class TideProxy:
 
             # Extremely small local fallback: refine near first future sample interval if nothing found
             if next_high_tuple is None or next_low_tuple is None:
-                if first_future_idx_sorted < t_sorted.size - 0:
+                if first_future_idx_sorted < t_sorted.size:
                     # bracket small window around first future sample (one interval)
                     a_idx = max(0, first_future_idx_sorted - 1)
                     b_idx = min(n_sorted - 1, first_future_idx_sorted + 1)
@@ -894,33 +898,32 @@ class TideProxy:
         try:
             if sf_ts is not None and sf_eph is not None and len(dt_objs) > 0:
                 # try to compute a physical proxy using moon distance and alignment
-                try:
-                    t0 = sf_ts.from_datetime(dt_objs[0])
-                    earth = sf_eph["earth"]
-                    moon_obj = sf_eph["moon"]
-                    sun_obj = sf_eph["sun"]
-                    mpos = earth.at(t0).observe(moon_obj)
-                    spos = earth.at(t0).observe(sun_obj)
-                    d_moon_au = float(mpos.distance().au)
-                    moon_ecl = mpos.apparent().frame_latlon(ecliptic_frame)
-                    sun_ecl = spos.apparent().frame_latlon(ecliptic_frame)
-                    lon_moon = float(moon_ecl[1].radians)
-                    lon_sun = float(sun_ecl[1].radians)
-                    delta = (lon_moon - lon_sun)  # radians
-                    # heuristic physical proxy: alignment term * inverse-cube distance
-                    d_ref = 0.00257  # approx mean moon distance (AU)
-                    # compute raw strength (0..~1.2)
-                    raw = 0.5 * (1.0 + math.cos(delta)) * (d_ref / max(d_moon_au, 1e-9)) ** 3
-                    # normalize by plausible maximum (perigee spring)
-                    d_min_plausible = 0.0024
-                    max_raw = 0.5 * (1.0 + 1.0) * (d_ref / d_min_plausible) ** 3  # = (d_ref/d_min)^3
-                    strength = raw / max_raw if max_raw > 0 else raw
-                    tide_strength_value = float(max(0.0, min(1.0, strength)))
-                except Exception:
-                    tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
+                t0 = sf_ts.from_datetime(dt_objs[0])
+                earth = sf_eph["earth"]
+                moon_obj = sf_eph["moon"]
+                sun_obj = sf_eph["sun"]
+                mpos = earth.at(t0).observe(moon_obj)
+                spos = earth.at(t0).observe(sun_obj)
+                d_moon_au = float(mpos.distance().au)
+                moon_ecl = mpos.apparent().frame_latlon(ecliptic_frame)
+                sun_ecl = spos.apparent().frame_latlon(ecliptic_frame)
+                lon_moon = float(moon_ecl[1].radians)
+                lon_sun = float(sun_ecl[1].radians)
+                delta = (lon_moon - lon_sun)  # radians
+                # heuristic physical proxy: alignment term * inverse-cube distance
+                d_ref = 0.00257  # approx mean moon distance (AU)
+                # compute raw strength (0..~1.2)
+                raw = 0.5 * (1.0 + math.cos(delta)) * (d_ref / max(d_moon_au, 1e-9)) ** 3
+                # normalize by plausible maximum (perigee spring)
+                d_min_plausible = 0.0024
+                max_raw = 0.5 * (1.0 + 1.0) * (d_ref / d_min_plausible) ** 3  # = (d_ref/d_min)^3
+                strength = raw / max_raw if max_raw > 0 else raw
+                tide_strength_value = float(max(0.0, min(1.0, strength)))
             else:
                 tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
-        except Exception:
+        except Exception as e:
+            # Only fall back to phase heuristic when the physical proxy computation fails.
+            _LOGGER.debug("Physical tide_strength proxy failed, falling back to phase heuristic: %s", e, exc_info=True)
             tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
 
         # Build strict dicts for next_high/next_low (sensor expects dict shape)
