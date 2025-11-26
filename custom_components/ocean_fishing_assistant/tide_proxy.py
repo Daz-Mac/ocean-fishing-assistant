@@ -26,7 +26,10 @@ _SECONDS_PER_HOUR = 3600.0
 _ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
 
 # numeric tolerances
-EPS_DERIV = 1e-8
+# Reduced EPS_DERIV so analytic second-derivative checks are less likely to
+# treat legitimate curvature as "zero". Main classification now uses a
+# derivative sign test which is robust to small |second_derivative|.
+EPS_DERIV = 1e-10
 EPS_ROOT = 1e-9
 BISECT_TOL_SEC = 1e-3  # stopping tolerance for root bisection (seconds)
 GRID_SECONDS_DEFAULT = 300  # 5 minutes
@@ -744,36 +747,71 @@ class TideProxy:
             # Deduplicate & sort
             candidates = sorted(set([float(x) for x in candidates]))
 
-            # classify candidates into maxima/minima using second derivative
+            # --- classify candidates into maxima/minima robustly using derivative sign test ---
             maxima: List[Tuple[float, float]] = []
             minima: List[Tuple[float, float]] = []
+
+            # delta for finite-difference check: fraction of grid step (but at least 1s)
+            delta_sec = max(1.0, float(GRID_SECONDS_DEFAULT) / 8.0)
+
+            classification_debug: List[Tuple[str, float, float, float, str]] = []
+
             for rt in candidates:
                 try:
-                    h = _height_at_epoch(rt)
-                    sec = _second_derivative_at_epoch(rt)
-                    if sec < -EPS_DERIV:
-                        maxima.append((rt, h))
-                    elif sec > EPS_DERIV:
-                        minima.append((rt, h))
-                    # ignore near-inflection points
+                    # pick probe points safely inside the scan window
+                    t_before = rt - delta_sec
+                    t_after = rt + delta_sec
+
+                    # clamp probes to scan boundaries if needed
+                    t_before = max(t_before, scan_start)
+                    t_after = min(t_after, scan_end)
+
+                    d_before = _derivative_at_epoch(t_before)
+                    d_after = _derivative_at_epoch(t_after)
+
+                    cls = ""
+                    # classification by sign change: d_before > 0 && d_after < 0 => maximum
+                    #                            d_before < 0 && d_after > 0 => minimum
+                    if d_before > 0.0 and d_after < 0.0:
+                        maxima.append((rt, _height_at_epoch(rt)))
+                        cls = "max_sign"
+                    elif d_before < 0.0 and d_after > 0.0:
+                        minima.append((rt, _height_at_epoch(rt)))
+                        cls = "min_sign"
+                    else:
+                        # If sign test ambiguous (flat or numeric), fall back to analytic second derivative
+                        sec = _second_derivative_at_epoch(rt)
+                        if sec < -EPS_DERIV:
+                            maxima.append((rt, _height_at_epoch(rt)))
+                            cls = "max_sec"
+                        elif sec > EPS_DERIV:
+                            minima.append((rt, _height_at_epoch(rt)))
+                            cls = "min_sec"
+                        else:
+                            cls = "ambiguous"
+
+                    if len(classification_debug) < 12:
+                        classification_debug.append(
+                            (
+                                datetime.fromtimestamp(rt, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                                float(d_before),
+                                float(d_after),
+                                float(_second_derivative_at_epoch(rt)),
+                                cls,
+                            )
+                        )
                 except Exception:
+                    # skip any problematic candidate
                     continue
 
             # debug dump: log first few candidates and classifications
             try:
-                def _iso(ts):
-                    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-                cand_iso = [_iso(x) for x in candidates[:8]]
-                max_iso = [_iso(x[0]) for x in maxima[:6]]
-                min_iso = [_iso(x[0]) for x in minima[:6]]
                 _LOGGER.debug(
-                    "next-extrema debug: scan_start=%s scan_end=%s grid_step=%ss candidates(first8)=%s maxima(first6)=%s minima(first6)=%s",
+                    "next-extrema classify: scan_start=%s scan_end=%s grid_step=%ss classification_debug(sample)=%s",
                     datetime.fromtimestamp(scan_start, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
                     datetime.fromtimestamp(scan_end, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
                     GRID_SECONDS_DEFAULT,
-                    cand_iso,
-                    max_iso,
-                    min_iso,
+                    classification_debug,
                 )
             except Exception:
                 pass
