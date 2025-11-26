@@ -50,7 +50,7 @@ class DataFormatter:
         hourly = raw_payload["hourly"]
         if "time" not in hourly or not isinstance(hourly["time"], (list, tuple)):
             raise ValueError("'hourly' must include 'time' array (strict)")
-        
+
         raw_timestamps = list(hourly["time"])
         if not raw_timestamps:
             raise ValueError("'time' array is empty (strict)")
@@ -212,27 +212,11 @@ class DataFormatter:
                 len_t = len(timestamps)
                 if len_p < len_t:
                     missing_keys.append(f"pressure_hpa_series_too_short ({len_p} < {len_t})")
-                elif len_p == len_t:
-                    new_len = len_t - 1
-                    if new_len <= 0:
-                        missing_keys.append("pressure_hpa_series_needs_more_points")
-                    else:
-                        _LOGGER.info(
-                            "Pressure series length equals timestamps (%s); trimming final timestamp and aligned arrays to %s entries to satisfy strict future-point requirement",
-                            len_t,
-                            new_len,
-                        )
-                        timestamps = list(timestamps[:new_len])
-                        canonical["timestamps"] = timestamps
-                        for k, v in list(canonical.items()):
-                            if k == "pressure_hpa" or k == "timestamps":
-                                continue
-                            if isinstance(v, (list, tuple)):
-                                if len(v) >= len_t:
-                                    canonical[k] = list(v[:new_len])
-                                else:
-                                    raise ValueError(f"Unexpected array length mismatch while trimming '{k}': expected >= {len_t}, got {len(v)}")
+                # NOTE: previous versions trimmed timestamps when pressure length == timestamps.
+                # That is no longer necessary because scoring now accepts a neighbor (backward or forward)
+                # for pressure delta. So we intentionally do NOT trim when len_p == len_t.
                 else:
+                    # len_p >= len_t is acceptable; keep canonical as-is
                     pass
 
         if not any(k in canonical for k in ("moon_phase", "tide_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
