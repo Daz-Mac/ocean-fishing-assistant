@@ -4,7 +4,7 @@ Strict Ocean Fishing Scoring — no fallbacks, fail loudly.
 This module expects DataFormatter to normalize input into canonical keys:
   - payload["timestamps"] : list of ISO timestamps
   - payload["moon_phase"] : per-timestamp list OR scalar
-  - payload["tide_height_m"] : per-timestamp list OR payload["tide"]["tide_height_m"]
+  - payload["tide"] : optional dict with tide metadata (may include tide_phase)
   - payload["wind_m_s"] : per-timestamp list
   - payload["wave_height_m"] : per-timestamp list
   - payload["pressure_hpa"] : per-timestamp list (must have at least one future point)
@@ -40,8 +40,7 @@ DEFAULT_PROFILE = {
     "preferred_temp_c": [8.0, 18.0],
     "preferred_wind_m_s": [0.0, 6.0],
     "max_wave_height_m": 2.0,
-    "preferred_tide_m": [-1.0, 1.0],
-    "preferred_tide_phase": [],
+    "preferred_tide_phase": ["high"],
     "preferred_times": [],
     "preferred_months": [],
     "moon_preference": [],
@@ -271,7 +270,6 @@ def compute_score(
         return _to_float_safe(arr)
 
     # Strictly extract required canonical values
-    tide = _get_at("tide_height_m", use_index)
     wind = _get_at("wind_m_s", use_index)
     wave = _get_at("wave_height_m", use_index)
     temp = _get_at("temperature_c", use_index)
@@ -297,10 +295,8 @@ def compute_score(
         if p_curr is not None and p_next is not None:
             pressure_delta = float(p_next) - float(p_curr)
 
-    # Strict presence checks
+    # Strict presence checks (note: tide height NOT required; we use tide phase if present)
     missing = []
-    if tide is None:
-        missing.append("tide_height_m")
     if wind is None:
         missing.append("wind_m_s")
     if wave is None:
@@ -319,22 +315,42 @@ def compute_score(
     # compute component scores
     comp: Dict[str, Any] = {}
 
-    # TIDE component
+    # TIDE component — phase-based only (preferred_tide_m removed)
     try:
-        pref_tide = profile.get("preferred_tide_m", DEFAULT_PROFILE["preferred_tide_m"])
-        # allow scalar or list [min, max]
-        if isinstance(pref_tide, (list, tuple)) and len(pref_tide) >= 2:
-            pref_min, pref_max = float(pref_tide[0]), float(pref_tide[1])
+        pref_tide_phase = profile.get("preferred_tide_phase", []) or []
+        # obtain canonical tide_phase value from data (try top-level keys first)
+        tide_phase_val = None
+        if "tide_phase" in data:
+            tp = data.get("tide_phase")
+            if isinstance(tp, (list, tuple)):
+                tide_phase_val = tp[use_index] if use_index < len(tp) else None
+            else:
+                tide_phase_val = tp
+        elif "tide" in data and isinstance(data.get("tide"), dict):
+            tp = data.get("tide").get("tide_phase")
+            if isinstance(tp, (list, tuple)):
+                tide_phase_val = tp[use_index] if use_index < len(tp) else None
+            else:
+                tide_phase_val = tp
+
+        if not pref_tide_phase:
+            tide_score = 10.0
         else:
-            # treat scalar as exact preferred height with tolerance
-            val = float(pref_tide) if pref_tide is not None else 0.0
-            pref_min, pref_max = val, val
-        tide_tol = 1.0  # 1m tolerance by default
-        tide_score = _linear_within_score_10(float(tide), pref_min, pref_max, tide_tol)
+            matched = False
+            if tide_phase_val is not None:
+                tv = str(tide_phase_val).lower()
+                for pref in pref_tide_phase:
+                    try:
+                        if str(pref).lower() == tv:
+                            matched = True
+                            break
+                    except Exception:
+                        continue
+            tide_score = 10.0 if matched else 3.0  # match => good, mismatch => low-but-not-zero
         tide_score = _clamp_0_10(tide_score)
         comp["tide"] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
     except Exception:
-        _LOGGER.debug("Failed to compute tide component", exc_info=True)
+        _LOGGER.debug("Failed to compute tide component (phase-based)", exc_info=True)
 
     # WIND component
     try:
@@ -628,13 +644,167 @@ def compute_score(
     except Exception:
         safety["reason_strings"] = []
 
+    # Species-specific breach detection (separate from safety)
+    breaches: List[Dict[str, Any]] = []
+    try:
+        def _add_breach(variable: str, value: Any, unit: Optional[str] = None, expected_min: Any = None, expected_max: Any = None, severity: str = "caution", reason: Optional[str] = None, advice: Optional[str] = None):
+            breaches.append({
+                "variable": variable,
+                "value": value,
+                "unit": unit,
+                "expected_min": expected_min,
+                "expected_max": expected_max,
+                "severity": severity,
+                "reason": reason or f"{variable}_breach",
+                "advice": advice,
+                "category": "species",
+            })
+
+        # TEMPERATURE breach detection
+        try:
+            pref_temp = profile.get("preferred_temp_c")
+            if temp is not None and pref_temp is not None:
+                if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
+                    pmin, pmax = float(pref_temp[0]), float(pref_temp[1])
+                else:
+                    pmin = pmax = float(pref_temp)
+                tol = _to_float_safe(profile.get("preferred_temp_tol_c")) or 5.0
+                low = pmin - tol
+                high = pmax + tol
+                if temp < low:
+                    sev = "unsafe" if (low - temp) > (2 * tol) else "caution"
+                    _add_breach("temperature", temp, unit="°C", expected_min=low, expected_max=high, severity=sev, reason="temperature<preferred_min", advice=f"{profile.get('common_name','Species')} prefers warmer water")
+                elif temp > high:
+                    sev = "unsafe" if (temp - high) > (2 * tol) else "caution"
+                    _add_breach("temperature", temp, unit="°C", expected_min=low, expected_max=high, severity=sev, reason="temperature>preferred_max", advice=f"{profile.get('common_name','Species')} prefers cooler water")
+        except Exception:
+            pass
+
+        # WAVE breach detection against max_wave_height_m
+        try:
+            max_wave_pref = profile.get("max_wave_height_m")
+            if wave is not None and max_wave_pref is not None:
+                max_w = float(max_wave_pref)
+                if wave > max_w:
+                    _add_breach("wave", wave, unit="m", expected_min=None, expected_max=max_w, severity="unsafe", reason="wave>max_wave_height_m", advice=f"{profile.get('common_name','Species')} prefers lower waves")
+                elif wave > (0.9 * max_w):
+                    _add_breach("wave", wave, unit="m", expected_min=None, expected_max=max_w, severity="caution", reason="wave_near_max", advice="Wave height approaching species preferred maximum")
+        except Exception:
+            pass
+
+        # WIND breach detection (upper bound)
+        try:
+            pref_wind = profile.get("preferred_wind_m_s")
+            if wind is not None and pref_wind is not None:
+                if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
+                    _, pw_max = float(pref_wind[0]), float(pref_wind[1])
+                else:
+                    pw_max = float(pref_wind)
+                tol_w = _to_float_safe(profile.get("preferred_wind_tol_m_s")) or max(1.0, 0.2 * max(1.0, pw_max))
+                if wind > (pw_max + tol_w):
+                    _add_breach("wind", wind, unit="m/s", expected_min=None, expected_max=(pw_max + tol_w), severity="unsafe", reason="wind>preferred_max", advice=f"{profile.get('common_name','Species')} prefers lighter winds")
+                elif wind > (pw_max + 0.9 * tol_w):
+                    _add_breach("wind", wind, unit="m/s", expected_min=None, expected_max=(pw_max + tol_w), severity="caution", reason="wind_near_preferred_max", advice="Wind approaching species preferred maximum")
+        except Exception:
+            pass
+
+        # TIME breach detection (outside preferred_times)
+        try:
+            if profile.get("preferred_times"):
+                normalized_hours = []
+                for it in profile.get("preferred_times", []):
+                    if isinstance(it, dict):
+                        sh = it.get("start_hour") or it.get("start") or it.get("hour")
+                        eh = it.get("end_hour") or it.get("end")
+                        try:
+                            sh_i = int(sh)
+                        except Exception:
+                            continue
+                        if eh is None:
+                            normalized_hours.append(sh_i % 24)
+                        else:
+                            try:
+                                eh_i = int(eh)
+                            except Exception:
+                                normalized_hours.append(sh_i % 24)
+                                continue
+                            h = sh_i % 24
+                            normalized_hours.append(h)
+                            while h != (eh_i % 24):
+                                h = (h + 1) % 24
+                                normalized_hours.append(h)
+                    else:
+                        try:
+                            normalized_hours.append(int(it) % 24)
+                        except Exception:
+                            continue
+                normalized_hours = sorted(set(normalized_hours))
+                try:
+                    t_dt = _coerce_datetime(timestamps[use_index])
+                    hour = t_dt.hour if t_dt else None
+                except Exception:
+                    hour = None
+                if normalized_hours and hour is not None and hour not in normalized_hours:
+                    _add_breach("time", hour, unit="hour", expected_min=min(normalized_hours), expected_max=max(normalized_hours), severity="caution", reason="time_out_of_preference", advice=f"{profile.get('common_name','Species')} prefers different times of day")
+        except Exception:
+            pass
+
+        # TIDE PHASE breach detection
+        try:
+            pref_tide_phase = profile.get("preferred_tide_phase", []) or []
+            tide_phase_val = None
+            if "tide_phase" in data:
+                tp = data.get("tide_phase")
+                if isinstance(tp, (list, tuple)):
+                    tide_phase_val = tp[use_index] if use_index < len(tp) else None
+                else:
+                    tide_phase_val = tp
+            elif "tide" in data and isinstance(data.get("tide"), dict):
+                tp = data.get("tide").get("tide_phase")
+                if isinstance(tp, (list, tuple)):
+                    tide_phase_val = tp[use_index] if use_index < len(tp) else None
+                else:
+                    tide_phase_val = tp
+            if pref_tide_phase and tide_phase_val is not None:
+                desired = [str(p).lower() for p in pref_tide_phase]
+                if str(tide_phase_val).lower() not in desired:
+                    _add_breach("tide_phase", tide_phase_val, unit=None, expected_min=None, expected_max=None, severity="caution", reason="tide_phase_mismatch", advice=f"{profile.get('common_name','Species')} prefers tide phases {pref_tide_phase}; current phase differs")
+        except Exception:
+            pass
+
+        # MOON preference mismatch (if provided)
+        try:
+            moon_pref = profile.get("moon_preference", []) or []
+            if moon_pref and moon_phase_val is not None:
+                matched = False
+                for mpref in moon_pref:
+                    try:
+                        if isinstance(mpref, str):
+                            # simple textual match to friendly moon names is not attempted here;
+                            # leave client to interpret numeric moon_phase vs textual preference if they mix types.
+                            continue
+                        else:
+                            mpf = float(mpref)
+                            if abs(moon_phase_val - mpf) <= 0.05:
+                                matched = True
+                                break
+                    except Exception:
+                        continue
+                if not matched:
+                    _add_breach("moon_phase", moon_phase_val, unit=None, expected_min=None, expected_max=None, severity="caution", reason="moon_preference_mismatch", advice="Moon phase differs from species preference")
+        except Exception:
+            pass
+
+    except Exception:
+        _LOGGER.debug("Failed to compute species breaches", exc_info=True)
+
     # build result (components block built earlier)
     result = {
         "score_10": overall_10,
         "score_100": overall_100,
         "components": comp,
         "raw": {
-            "tide": tide,
+            "tide": _get_at("tide_height_m", use_index) if "tide_height_m" in data else None,
             "wind": wind,
             "wave": wave,
             "pressure_delta": pressure_delta,
@@ -647,6 +817,7 @@ def compute_score(
         },
         "profile_used": profile.get("common_name", "unknown"),
         "safety": safety,
+        "breaches": breaches,
     }
     return result
 
@@ -693,6 +864,7 @@ def compute_forecast(
                 "forecast_raw": forecast_raw,
                 "profile_used": res.get("profile_used"),
                 "safety": res.get("safety"),
+                "breaches": res.get("breaches", []),
             }
         except MissingDataError as mde:
             err_text = str(mde)
@@ -706,6 +878,7 @@ def compute_forecast(
                 "forecast_raw": {"error": "missing required data", "details": err_text},
                 "profile_used": None,
                 "safety": {"unsafe": False, "caution": False, "reasons": [], "reason_strings": []},
+                "breaches": [],
             }
         except Exception:
             _LOGGER.debug("Failed to compute forecast index %s", idx, exc_info=True)
@@ -718,6 +891,7 @@ def compute_forecast(
                 "forecast_raw": {"error": "unexpected error"},
                 "profile_used": None,
                 "safety": {"unsafe": False, "caution": False, "reasons": [], "reason_strings": []},
+                "breaches": [],
             }
         out.append(entry)
     return out

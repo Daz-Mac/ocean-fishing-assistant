@@ -250,12 +250,9 @@ class DataFormatter:
                 canonical["marine"] = marine_candidate_with_ts
 
         # STRICT PRECHECK: ensure canonical contains the essential arrays required by compute_score
-        # compute_score expects (per-index): tide_height_m, wind (wind_m_s), wave (wave_height_m), temperature_c,
+        # compute_score expects (per-index): wind (wind_m_s), wave (wave_height_m), temperature_c,
         # moon_phase/astro, and a pressure_hpa series with at least one future point (len > index+1).
         missing_keys = []
-        # tide
-        if "tide_height_m" not in canonical and "tide" not in canonical:
-            missing_keys.append("tide_height_m")
         # wind
         if "wind_m_s" not in canonical:
             missing_keys.append("wind_m_s")
@@ -368,6 +365,26 @@ class DataFormatter:
                     safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
                               "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
                               "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
+
+                    # Aggregate species breaches for the period
+                    breach_counts: Dict[str, Dict[str, Any]] = {}
+                    breach_examples: List[Dict[str, Any]] = []
+                    for e in per_ts_entries:
+                        for b in (e.get("breaches") or []):
+                            var = b.get("variable")
+                            if not var:
+                                continue
+                            entry_bc = breach_counts.setdefault(var, {"count": 0, "severity": "caution"})
+                            entry_bc["count"] += 1
+                            if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
+                                entry_bc["severity"] = "unsafe"
+                            if len(breach_examples) < 3:
+                                ex = dict(b)
+                                ex["timestamp"] = e.get("timestamp")
+                                breach_examples.append(ex)
+
+                    breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
+
                     summary = {
                         "score_10": round(score_10, 3) if score_10 is not None else None,
                         "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
@@ -378,6 +395,7 @@ class DataFormatter:
                         "start": pdata.get("start"),
                         "end": pdata.get("end"),
                         "indices": list(indices),
+                        "breaches": breaches_summary,
                     }
                     period_forecasts[date_key][pname] = summary
         else:
@@ -421,6 +439,26 @@ class DataFormatter:
                     safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
                               "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
                               "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
+
+                    # Aggregate species breaches for the period
+                    breach_counts: Dict[str, Dict[str, Any]] = {}
+                    breach_examples: List[Dict[str, Any]] = []
+                    for e in per_ts_entries:
+                        for b in (e.get("breaches") or []):
+                            var = b.get("variable")
+                            if not var:
+                                continue
+                            entry_bc = breach_counts.setdefault(var, {"count": 0, "severity": "caution"})
+                            entry_bc["count"] += 1
+                            if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
+                                entry_bc["severity"] = "unsafe"
+                            if len(breach_examples) < 3:
+                                ex = dict(b)
+                                ex["timestamp"] = e.get("timestamp")
+                                breach_examples.append(ex)
+
+                    breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
+
                     summary = dict(pdata)
                     summary.update({
                         "score_10": round(score_10, 3) if score_10 is not None else None,
@@ -428,6 +466,7 @@ class DataFormatter:
                         "components": components,
                         "profile_used": profile_used,
                         "safety": safety,
+                        "breaches": breaches_summary,
                     })
                     period_forecasts[date_key][pname] = summary
 
