@@ -704,52 +704,79 @@ class TideProxy:
                         fa_local = fm
                 return 0.5 * (lo + hi)
 
+            # --- Robust derivative scan (vectorized over a uniform grid) ---
             candidates: List[float] = []
 
-            # For each interval starting near the first future window, subdivide if necessary and detect derivative sign changes
-            start_idx = max(0, first_future_idx_sorted - 1)
-            for i in range(start_idx, n_sorted - 1):
-                a = float(t_sorted[i])
-                b = float(t_sorted[i + 1])
-                dt_interval = b - a
-                if dt_interval <= GRID_SECONDS_DEFAULT:
-                    d_a = _derivative_at_epoch(a)
-                    d_b = _derivative_at_epoch(b)
-                    if abs(d_a) < EPS_DERIV and a >= now_ts:
-                        candidates.append(a)
-                    if d_a * d_b < 0:
-                        root = _find_root_bisection(_derivative_at_epoch, a, b)
-                        if root is not None and root >= now_ts:
-                            candidates.append(root)
-                else:
-                    # subdivide the interval into smaller sub-intervals of ~GRID_SECONDS_DEFAULT
-                    n_sub = int(math.ceil(dt_interval / GRID_SECONDS_DEFAULT))
-                    pts = [a + i * dt_interval / n_sub for i in range(n_sub + 1)]
-                    prev_d = _derivative_at_epoch(pts[0])
-                    if abs(prev_d) < EPS_DERIV and pts[0] >= now_ts:
-                        candidates.append(pts[0])
-                    for k in range(1, len(pts)):
-                        cur_pt = pts[k]
-                        cur_d = _derivative_at_epoch(cur_pt)
-                        if abs(cur_d) < EPS_DERIV and cur_pt >= now_ts:
-                            candidates.append(cur_pt)
-                        if prev_d * cur_d < 0:
-                            root = _find_root_bisection(_derivative_at_epoch, pts[k - 1], pts[k])
-                            if root is not None and root >= now_ts:
-                                candidates.append(root)
-                        prev_d = cur_d
+            scan_start = max(now_ts, float(t_sorted[0])) if t_sorted.size > 0 else now_ts
+            scan_end = float(t_sorted[-1]) if t_sorted.size > 0 else now_ts
+
+            if scan_end > scan_start:
+                step = float(GRID_SECONDS_DEFAULT)
+                grid = np.arange(scan_start, scan_end + 0.5 * step, step, dtype=float)
+                # relative times
+                t_rel_grid = grid - t_anchor
+                # vectorized derivative evaluation
+                d_grid = np.zeros_like(t_rel_grid)
+                for j, c in enumerate(self._constituents):
+                    w = omegas[c]
+                    Aj = float(A[j])
+                    Bj = float(B[j])
+                    # vectorized contribution
+                    d_grid += -Aj * w * np.sin(w * t_rel_grid) + Bj * w * np.cos(w * t_rel_grid)
+
+                # near-zero derivative points as direct candidates
+                near_zero_idx = np.where(np.abs(d_grid) < EPS_DERIV)[0]
+                for idx in near_zero_idx:
+                    t_candidate = float(grid[idx])
+                    if t_candidate >= now_ts:
+                        candidates.append(t_candidate)
+
+                # sign-change brackets and bisection refinement
+                prod = d_grid[:-1] * d_grid[1:]
+                sign_change_idx = np.where(prod < 0)[0]
+                for idx in sign_change_idx:
+                    a = float(grid[idx])
+                    b = float(grid[idx + 1])
+                    root = _find_root_bisection(_derivative_at_epoch, a, b)
+                    if root is not None and root >= now_ts:
+                        candidates.append(root)
+
+            # Deduplicate & sort
+            candidates = sorted(set([float(x) for x in candidates]))
 
             # classify candidates into maxima/minima using second derivative
             maxima: List[Tuple[float, float]] = []
             minima: List[Tuple[float, float]] = []
             for rt in candidates:
-                h = _height_at_epoch(rt)
-                sec = _second_derivative_at_epoch(rt)
-                if sec < -EPS_DERIV:
-                    maxima.append((rt, h))
-                elif sec > EPS_DERIV:
-                    minima.append((rt, h))
-                # ignore near-inflection candidates
+                try:
+                    h = _height_at_epoch(rt)
+                    sec = _second_derivative_at_epoch(rt)
+                    if sec < -EPS_DERIV:
+                        maxima.append((rt, h))
+                    elif sec > EPS_DERIV:
+                        minima.append((rt, h))
+                    # ignore near-inflection points
+                except Exception:
+                    continue
+
+            # debug dump: log first few candidates and classifications
+            try:
+                def _iso(ts):
+                    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                cand_iso = [_iso(x) for x in candidates[:8]]
+                max_iso = [_iso(x[0]) for x in maxima[:6]]
+                min_iso = [_iso(x[0]) for x in minima[:6]]
+                _LOGGER.debug(
+                    "next-extrema debug: scan_start=%s scan_end=%s grid_step=%ss candidates(first8)=%s maxima(first6)=%s minima(first6)=%s",
+                    datetime.fromtimestamp(scan_start, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                    datetime.fromtimestamp(scan_end, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                    GRID_SECONDS_DEFAULT,
+                    cand_iso,
+                    max_iso,
+                    min_iso,
+                )
+            except Exception:
+                pass
 
             # pick earliest future max/min
             next_high_tuple: Optional[Tuple[float, float]] = None
@@ -759,7 +786,25 @@ class TideProxy:
             if minima:
                 next_low_tuple = min(minima, key=lambda x: x[0])
 
-            # fallback: use sampled argmax/argmin on sorted future samples
+            # Extremely small local fallback: refine near first future sample interval if nothing found
+            if next_high_tuple is None or next_low_tuple is None:
+                if first_future_idx_sorted < t_sorted.size - 0:
+                    # bracket small window around first future sample (one interval)
+                    a_idx = max(0, first_future_idx_sorted - 1)
+                    b_idx = min(n_sorted - 1, first_future_idx_sorted + 1)
+                    a = float(t_sorted[a_idx])
+                    b = float(t_sorted[b_idx])
+                    if b > a:
+                        root = _find_root_bisection(_derivative_at_epoch, a, b)
+                        if root is not None and root >= now_ts:
+                            h = _height_at_epoch(root)
+                            sec = _second_derivative_at_epoch(root)
+                            if sec < -EPS_DERIV and next_high_tuple is None:
+                                next_high_tuple = (root, h)
+                            elif sec > EPS_DERIV and next_low_tuple is None:
+                                next_low_tuple = (root, h)
+
+            # If still missing (very unlikely), fall back to sampled argmax/argmin on sorted future samples
             if next_high_tuple is None:
                 rel = pred_sorted[first_future_idx_sorted:] if first_future_idx_sorted < pred_sorted.size else np.array([])
                 if rel.size:
