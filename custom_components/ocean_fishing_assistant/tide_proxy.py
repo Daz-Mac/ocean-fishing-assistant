@@ -832,6 +832,28 @@ class TideProxy:
             _LOGGER.exception("Failed to compute tide_phase strings: %s", exc)
             raise
 
+        # map to friendly names (consistent UI)
+        PHASE_NAME_MAP = {
+            "rising": "Rising",
+            "falling": "Falling",
+            "high": "High Tide",
+            "low": "Low Tide",
+        }
+        tide_phase_name_list: List[str] = []
+        try:
+            for p in tide_phase_list:
+                if not isinstance(p, str):
+                    raise RuntimeError(f"Invalid tide_phase value (not a string): {p!r}")
+                key = p.lower()
+                if key not in PHASE_NAME_MAP:
+                    raise RuntimeError(f"Unexpected tide_phase value: {p!r}")
+                tide_phase_name_list.append(PHASE_NAME_MAP[key])
+            if len(tide_phase_name_list) != len(tide_phase_list):
+                raise RuntimeError("tide_phase_name length mismatch")
+        except Exception as exc:
+            _LOGGER.exception("Failed to map tide_phase -> tide_phase_name: %s", exc)
+            raise
+
         next_high_obj = None
         next_low_obj = None
         if next_high is not None:
@@ -851,6 +873,7 @@ class TideProxy:
             # Add explicit numeric moon_phase separate from tide_phase strings
             "moon_phase": moon_phases,
             "tide_phase": tide_phase_list,
+            "tide_phase_name": tide_phase_name_list,
             "tide_strength": float(round(tide_strength_value, 3)),
             "confidence": "in_memory_model",
             "source": "in_memory_harmonic_model",
