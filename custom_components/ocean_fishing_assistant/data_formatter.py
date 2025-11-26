@@ -1,3 +1,5 @@
+# (Full file content — replace your existing data_formatter.py with the contents below)
+
 # Strict DataFormatter (no fallbacks, fail loudly)
 from __future__ import annotations
 
@@ -19,15 +21,6 @@ def _ensure_list_length_equal(key: str, timestamps: List[Any], arr: List[Any]) -
 
 
 class DataFormatter:
-    """
-    Strict DataFormatter:
-
-    - Requires payload to contain 'hourly' dict with 'time' array and canonical keys.
-    - Requires hourly_units to exist and to provide units for wind arrays.
-    - No legacy aliases, no heuristics. Raises ValueError on any validation failure.
-    """
-
-    # mapping of Open-Meteo hourly keys -> canonical keys used by scoring/formatting
     HOURLY_KEY_MAP = {
         "time": "timestamps",
         "temperature_2m": "temperature_c",
@@ -36,8 +29,7 @@ class DataFormatter:
         "pressure_msl": "pressure_hpa",
         "cloudcover": "cloud_cover",
         "precipitation_probability": "precipitation_probability",
-        "visibility": "visibility_km",  # <-- new strict canonical mapping (convert to km)
-        # marine keys
+        "visibility": "visibility_km",
         "wave_height": "wave_height_m",
         "wave_direction": "wave_direction",
         "wave_period": "wave_period_s",
@@ -49,17 +41,6 @@ class DataFormatter:
         pass
 
     def validate(self, raw_payload: Dict[str, Any], species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None, precomputed_period_indices: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """
-        Validate and normalize raw_payload into strict canonical shape:
-        - 'timestamps' list
-        - canonical arrays using canonical keys
-        - compute per_timestamp_forecasts via ocean_scoring.compute_forecast (errors propagate)
-        - compute period_forecasts via strict aggregator (errors propagate)
-
-        If precomputed_period_indices is provided, it should be a mapping:
-          { date: { period_name: { "indices": [idx,...], "start": ISOZ, "end": ISOZ }, ... }, ... }
-        where indices reference positions into the canonical timestamps (0-based).
-        """
         if not isinstance(raw_payload, dict):
             raise ValueError("raw_payload must be a dict (strict)")
 
@@ -70,17 +51,14 @@ class DataFormatter:
         if "time" not in hourly or not isinstance(hourly["time"], (list, tuple)):
             raise ValueError("'hourly' must include 'time' array (strict)")
         
-        # Coerce and normalize timestamps to timezone-aware UTC ISO strings (ending with "Z")
         raw_timestamps = list(hourly["time"])
         if not raw_timestamps:
             raise ValueError("'time' array is empty (strict)")
 
         timestamps: List[str] = []
         for t in raw_timestamps:
-            # try parsing with HA utility (handles ISO, offsets)
             parsed = dt_util.parse_datetime(str(t)) if t is not None else None
             if parsed is None:
-                # fallback to numeric epoch (s or ms)
                 try:
                     v = float(t)
                     if v > 1e12:
@@ -88,17 +66,12 @@ class DataFormatter:
                     parsed = datetime.fromtimestamp(v, tz=timezone.utc)
                 except Exception as exc:
                     raise ValueError(f"Unable to parse timestamp '{t}': {exc}") from exc
-            # ensure aware UTC
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             else:
                 parsed = parsed.astimezone(timezone.utc)
-            # canonical ISOZ
             timestamps.append(parsed.isoformat().replace("+00:00", "Z"))
 
-        # Use normalized timestamps from here forward
-
-        # prepare hourly_units (required for wind conversion)
         hourly_units = raw_payload.get("hourly_units") or hourly.get("units")
         if not isinstance(hourly_units, dict):
             raise ValueError("Missing 'hourly_units' mapping in payload; wind unit hints are required (strict)")
@@ -106,7 +79,6 @@ class DataFormatter:
         canonical: Dict[str, Any] = {}
         canonical["timestamps"] = timestamps
 
-        # Map required numeric arrays: require temperature_2m and wind_speed_10m at minimum
         missing_required = []
         if "temperature_2m" not in hourly:
             missing_required.append("temperature_2m")
@@ -115,7 +87,6 @@ class DataFormatter:
         if missing_required:
             raise ValueError(f"Missing required hourly arrays: {missing_required} (strict)")
 
-        # map arrays and enforce equal lengths
         for om_key, canon_key in self.HOURLY_KEY_MAP.items():
             if om_key == "time":
                 continue
@@ -123,10 +94,8 @@ class DataFormatter:
                 arr = hourly[om_key]
                 if not isinstance(arr, (list, tuple)):
                     raise ValueError(f"Hourly key '{om_key}' must be a list/tuple (strict)")
-                # enforce same length as timestamps
                 _ensure_list_length_equal(om_key, timestamps, list(arr))
                 if om_key in ("wind_speed_10m", "windgusts_10m"):
-                    # require explicit unit hint for these
                     unit_hint = hourly_units.get(om_key) or hourly_units.get("windspeed") or hourly_units.get("wind_speed_10m")
                     if not unit_hint:
                         raise ValueError(f"Missing unit hint for hourly key '{om_key}' (strict)")
@@ -138,13 +107,11 @@ class DataFormatter:
                         converted.append(self._convert_wind_array_value(v, unit_hint))
                     canonical[canon_key] = converted
                 elif om_key == "visibility":
-                    # strict: require explicit unit hint for visibility
                     unit_hint = hourly_units.get(om_key) or hourly_units.get("visibility")
                     if not unit_hint:
                         raise ValueError("Missing unit hint for 'visibility' hourly key (strict)")
                     converted: List[Optional[float]] = []
                     uh = str(unit_hint).strip().lower()
-                    # Accept meters or kilometers explicitly; otherwise fail strictly
                     for v in arr:
                         if v is None:
                             converted.append(None)
@@ -156,28 +123,19 @@ class DataFormatter:
                         if "km" in uh:
                             converted.append(float(fv))
                         elif "m" in uh:
-                            # convert meters -> km
                             converted.append(float(fv) / 1000.0)
                         else:
-                            # Unknown unit hint — fail strictly
                             raise ValueError(f"Unknown visibility unit hint '{unit_hint}' (strict)")
                     canonical[canon_key] = converted
                 else:
-                    canonical[canon_key] = list(arr)  # shallow copy
+                    canonical[canon_key] = list(arr)
 
-        # --- Incorporate tide & astro if present in raw_payload so scoring can use them ---
         tide_obj = raw_payload.get("tide")
         if isinstance(tide_obj, dict):
-            # Preserve the original tide dict at top-level so downstream code that expects payload["tide"]
-            # can find the structured tide forecast/snapshot.
             canonical["tide"] = tide_obj
-
-            # If tide provides its own 'timestamps' align by index; otherwise require arrays to match
             tide_ts = tide_obj.get("timestamps")
             if tide_ts and isinstance(tide_ts, (list, tuple)):
-                # attempt to align by nearest index only if lengths match
                 if len(tide_ts) == len(timestamps):
-                    # copy tide arrays
                     for k, v in tide_obj.items():
                         if k == "timestamps":
                             continue
@@ -185,22 +143,15 @@ class DataFormatter:
                             _ensure_list_length_equal(k, timestamps, list(v))
                             canonical[k] = list(v)
                         else:
-                            # scalar tide metadata
                             canonical[k] = v
             else:
-                # tide_obj may provide arrays keyed to timestamps directly — include arrays that match length
                 for k, v in tide_obj.items():
                     if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
                         canonical[k] = list(v)
                     elif not isinstance(v, (list, tuple)):
                         canonical[k] = v
 
-        # --- NORMALIZE moon_phase from tide proxy or raw payload ---
-        # Prefer explicit top-level moon_phase if provided by raw_payload.
-        # Otherwise, if TideProxy returned 'tide_phase' under canonical["tide"], use that.
-        # Enforce strict alignment: arrays must match timestamps length; scalar values are replicated.
         moon_phase_set = False
-        # raw_payload top-level moon_phase (preferred)
         if "moon_phase" in raw_payload:
             mp = raw_payload.get("moon_phase")
             if isinstance(mp, (list, tuple)):
@@ -210,30 +161,26 @@ class DataFormatter:
                 canonical["moon_phase"] = [mp] * len(timestamps)
             moon_phase_set = True
 
-        # If not set yet, consider tide.tide_phase (TideProxy)
-        if not moon_phase_set and "tide" in canonical and isinstance(canonical["tide"], dict) and "tide_phase" in canonical["tide"]:
-            tp = canonical["tide"].get("tide_phase")
+        # IMPORTANT: Do NOT map tide.tide_phase (string) into numeric moon_phase.
+        # Use numeric tide['moon_phase'] if available.
+        if not moon_phase_set and "tide" in canonical and isinstance(canonical["tide"], dict) and "moon_phase" in canonical["tide"]:
+            tp = canonical["tide"].get("moon_phase")
             if tp is not None:
                 if isinstance(tp, (list, tuple)):
-                    _ensure_list_length_equal("tide_phase", timestamps, list(tp))
+                    _ensure_list_length_equal("tide.moon_phase", timestamps, list(tp))
                     canonical["moon_phase"] = list(tp)
                 else:
                     canonical["moon_phase"] = [tp] * len(timestamps)
                 moon_phase_set = True
 
-        # Copy top-level astro/astronomy/moon_phase into canonical so compute_score's _get_moon_phase_for_index() can find them.
-        # Note: we still copied raw_payload['moon_phase'] above (preferred), this loop will not overwrite canonical['moon_phase']
         for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "moon_phase"):
             if key in raw_payload and key not in canonical:
                 canonical[key] = raw_payload.get(key)
 
-        # Also accept 'marine' or 'marine_forecast' if caller attached it (we do not transform)
         for key in ("marine", "marine_forecast", "marine_current"):
             if key in raw_payload:
                 canonical[key] = raw_payload.get(key)
 
-        # If marine arrays were attached into hourly (coordinator may attach marine hourly fields under raw['hourly']),
-        # construct a conservative top-level 'marine' dict so scoring can match by timestamps. This is deterministic:
         marine_fields = ["wave_height", "wave_direction", "wave_period", "swell_wave_height", "swell_wave_period"]
         marine_candidate: Dict[str, Any] = {}
         for mf in marine_fields:
@@ -243,26 +190,17 @@ class DataFormatter:
                     _ensure_list_length_equal(mf, timestamps, list(arr))
                     marine_candidate[mf] = list(arr)
         if marine_candidate:
-            # include canonical timestamps for marine block
             marine_candidate_with_ts = {"timestamps": timestamps, **marine_candidate}
-            # avoid clobbering existing explicit marine key if present; prefer explicit
             if "marine" not in canonical:
                 canonical["marine"] = marine_candidate_with_ts
 
-        # STRICT PRECHECK: ensure canonical contains the essential arrays required by compute_score
-        # compute_score expects (per-index): wind (wind_m_s), wave (wave_height_m), temperature_c,
-        # moon_phase/astro, and a pressure_hpa series with at least one future point (len > index+1).
         missing_keys = []
-        # wind
         if "wind_m_s" not in canonical:
             missing_keys.append("wind_m_s")
-        # wave
         if "wave_height_m" not in canonical:
             missing_keys.append("wave_height_m")
-        # temperature
         if "temperature_c" not in canonical:
             missing_keys.append("temperature_c")
-        # pressure series check (STRICT):
         if "pressure_hpa" not in canonical:
             missing_keys.append("pressure_hpa")
         else:
@@ -303,19 +241,16 @@ class DataFormatter:
         if missing_keys:
             raise ValueError(f"Insufficient canonical keys to compute strict forecasts (missing {missing_keys})")
 
-        # compute per-timestamp forecasts (compute errors propagate)
         per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(
             canonical, species_profile=species_profile, safety_limits=safety_limits, units=units
         )
 
-        # STRICT POSTCHECK: fail if any per-timestamp forecast is incomplete (score_100 is None)
         for i, entry in enumerate(per_ts_forecasts):
             if entry.get("score_100") is None:
                 ts = entry.get("timestamp")
                 details = entry.get("forecast_raw") or {}
                 raise ValueError(f"Incomplete scoring at index={i} timestamp={ts}: missing required inputs or scoring failed; details={details}")
 
-        # Build hourly_like list expected by aggregator (strict)
         hourly_like: List[Dict[str, Any]] = []
         length = len(timestamps)
         for i, ts in enumerate(timestamps):
@@ -330,10 +265,8 @@ class DataFormatter:
                 row["_forecast_entry"] = per_ts_forecasts[i]
             hourly_like.append(row)
 
-        # If precomputed_period_indices provided, use that mapping to build period forecasts.
         period_forecasts: Dict[str, Dict[str, Any]] = {}
         if precomputed_period_indices is not None:
-            # iterate keys in sorted order, but limit to 7 days for compatibility with previous days param
             for date_key in sorted(precomputed_period_indices.keys())[:7]:
                 pmap = precomputed_period_indices.get(date_key) or {}
                 period_forecasts[date_key] = {}
@@ -366,7 +299,6 @@ class DataFormatter:
                               "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
                               "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
 
-                    # Aggregate species breaches for the period
                     breach_counts: Dict[str, Dict[str, Any]] = {}
                     breach_examples: List[Dict[str, Any]] = []
                     for e in per_ts_entries:
@@ -391,7 +323,6 @@ class DataFormatter:
                         "components": components,
                         "profile_used": profile_used,
                         "safety": safety,
-                        # include provided start/end if present
                         "start": pdata.get("start"),
                         "end": pdata.get("end"),
                         "indices": list(indices),
@@ -399,7 +330,6 @@ class DataFormatter:
                     }
                     period_forecasts[date_key][pname] = summary
         else:
-            # Fallback: compute using internal hourly->period aggregator (same behavior as before)
             default_periods = [
                 {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
                 {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
@@ -440,7 +370,6 @@ class DataFormatter:
                               "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
                               "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
 
-                    # Aggregate species breaches for the period
                     breach_counts: Dict[str, Dict[str, Any]] = {}
                     breach_examples: List[Dict[str, Any]] = []
                     for e in per_ts_entries:
@@ -479,14 +408,7 @@ class DataFormatter:
         }
         return final_out
 
-    # Aggregate hourly entries into named periods (implemented locally to avoid cross-class delegation)
     def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None, units: str = "metric") -> Dict[str, Dict[str, Any]]:
-        """
-        Local aggregator that accepts hourly-like rows produced earlier in validate().
-        Expects rows with keys: time, temperature_c, wind_m_s, wind_max_m_s, pressure_hpa, cloud_cover,
-        precipitation_probability, wave_height_m, wave_period_s, swell_height_m, swell_period_s
-        Returns mapping: date -> period_name -> {metrics..., indices: [hourly indices included]}
-        """
         if not aggregation_periods:
             aggregation_periods = [
                 {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
@@ -520,7 +442,6 @@ class DataFormatter:
             date_key = t.date().isoformat()
             hour = t.hour
 
-            # find matching period
             for p in aggregation_periods:
                 start = int(p["start_hour"])
                 end = int(p["end_hour"])
@@ -573,7 +494,6 @@ class DataFormatter:
                     if pop is not None:
                         agg["precip_max"] = max(agg["precip_max"], pop)
                     if gust_m_s is not None:
-                        # gust_max must be the maximum gust seen in the period (do not average)
                         if agg["gust_max"] is None:
                             agg["gust_max"] = gust_m_s
                         else:
@@ -582,10 +502,8 @@ class DataFormatter:
                     agg["indices"].append(idx)
                     break
 
-        # finalize
         final: Dict[str, Dict[str, Any]] = {}
 
-        # determine output wind unit
         out_wind_unit = "km/h" if units == "metric" else "mph" if units == "imperial" else units
 
         for date_key in sorted(per_date_periods.keys())[:days]:
@@ -593,7 +511,6 @@ class DataFormatter:
             for pname, agg in per_date_periods[date_key].items():
                 cnt = agg.get("count", 0) or 0
                 if cnt == 0:
-                    # Nothing to aggregate for this period
                     continue
                 try:
                     mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
@@ -606,7 +523,6 @@ class DataFormatter:
                     _LOGGER.debug("Failed to finalize aggregation for %s %s; skipping", date_key, pname)
                     continue
 
-                # convert wind to requested display unit
                 wind_out = None
                 gust_out = None
                 try:
@@ -642,7 +558,6 @@ class DataFormatter:
         return final
 
     def _convert_wind_array_value(self, v: Any, unit_hint: str) -> float:
-        """Convert single wind array value to m/s using local converters."""
         try:
             if v is None:
                 raise ValueError("None wind value")
@@ -655,7 +570,6 @@ class DataFormatter:
         elif u in ("mph", "mi/h", "miles/h"):
             out = unit_helpers.mph_to_m_s(val)
         else:
-            # assume m/s
             out = val
         if out is None:
             raise ValueError(f"Unable to convert wind value: {v!r} with hint {unit_hint!r}")
