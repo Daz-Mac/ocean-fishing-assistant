@@ -333,7 +333,7 @@ def compute_score(
         except Exception:
             pass
 
-        # include tide_phase string and friendly name when available
+        # include friendly tide phase name when available (do not emit duplicate `tide_phase`)
         PHASE_NAME_MAP = {
             "rising": "Rising",
             "falling": "Falling",
@@ -342,9 +342,7 @@ def compute_score(
         }
         try:
             if tide_phase_val is not None and isinstance(tide_phase_val, str):
-                comp_tide["tide_phase"] = tide_phase_val
-                key = tide_phase_val.lower()
-                comp_tide["tide_phase_name"] = PHASE_NAME_MAP.get(key, tide_phase_val)
+                comp_tide["tide_phase_name"] = PHASE_NAME_MAP.get(tide_phase_val.lower(), tide_phase_val)
         except Exception:
             pass
 
@@ -754,7 +752,7 @@ def compute_score(
 
         # MOON preference mismatch
         try:
-            moon_pref = profile.get("moon_preference", []) or []
+            moon_pref = profile.get("moon_preference", []) or profile.get("moon_preference", []) or []
             if moon_pref and moon_phase_val is not None:
                 matched = False
                 for mpref in moon_pref:
@@ -782,7 +780,6 @@ def compute_score(
         "components": comp,
         "raw": {
             "tide": _get_at("tide_height_m", use_index) if "tide_height_m" in data else None,
-            "tide_phase": (data.get("tide_phase")[use_index] if isinstance(data.get("tide_phase"), (list, tuple)) and use_index < len(data.get("tide_phase")) else (data.get("tide_phase") if "tide_phase" in data else None)),
             "tide_phase_name": (data.get("tide_phase_name")[use_index] if isinstance(data.get("tide_phase_name"), (list, tuple)) and use_index < len(data.get("tide_phase_name")) else (data.get("tide_phase_name") if "tide_phase_name" in data else None)),
             "wind": wind,
             "wave": wave,
@@ -816,7 +813,6 @@ def compute_forecast(
             res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units)
             # add tide fields into formatted_weather if available
             tide_height = payload.get("tide_height_m")[idx] if isinstance(payload.get("tide_height_m"), (list, tuple)) and idx < len(payload.get("tide_height_m")) else (payload.get("tide_height_m") if "tide_height_m" in payload else None)
-            tide_phase = (payload.get("tide_phase")[idx] if isinstance(payload.get("tide_phase"), (list, tuple)) and idx < len(payload.get("tide_phase")) else (payload.get("tide_phase") if "tide_phase" in payload else None))
             tide_phase_name = (payload.get("tide_phase_name")[idx] if isinstance(payload.get("tide_phase_name"), (list, tuple)) and idx < len(payload.get("tide_phase_name")) else (payload.get("tide_phase_name") if "tide_phase_name" in payload else None))
 
             forecast_raw = {
@@ -829,7 +825,6 @@ def compute_forecast(
                     "wave_height_m": payload.get("wave_height_m")[idx] if isinstance(payload.get("wave_height_m"), (list, tuple)) else payload.get("wave_height_m"),
                     "wave_period_s": payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) else payload.get("wave_period_s"),
                     "tide_height_m": tide_height,
-                    "tide_phase": tide_phase,
                     "tide_phase_name": tide_phase_name,
                 },
                 "astro_used": {"moon_phase": (payload.get("moon_phase")[idx] if isinstance(payload.get("moon_phase"), (list, tuple)) and idx < len(payload.get("moon_phase")) else payload.get("moon_phase"))} if "moon_phase" in payload else None,

@@ -28,7 +28,7 @@
       "moon_preference": []
     },
     "shad": {
-      "common_name": "Shad (Elf)",
+      "common_name": "Shad / Elf",
       "emoji": "🐟",
       "habitat": "ocean",
       "regions": ["global"],
@@ -56,7 +56,7 @@
     "natal_stumpnose": {
       "common_name": "Natal Stumpnose",
       "emoji": "🐠",
-      "habitat": "ocean/estuaries",
+      "habitat": "ocean",
       "regions": ["global"],
       "preferred_months": [5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [18, 24],
@@ -67,9 +67,9 @@
       "moon_preference": []
     },
     "blacktail": {
-      "common_name": "Blacktail (rock bream / 'blacktail')",
+      "common_name": "Blacktail / Rock Bream",
       "emoji": "🪸",
-      "habitat": "rocky shore / reef",
+      "habitat": "ocean",
       "regions": ["global"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [18, 24],
@@ -82,7 +82,7 @@
     "galjoen": {
       "common_name": "Galjoen",
       "emoji": "🐡",
-      "habitat": "rocky shore / reef",
+      "habitat": "ocean",
       "regions": ["global"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [16, 22],
@@ -90,6 +90,71 @@
       "max_wave_height_m": 2.0,
       "preferred_tide_phase": ["high"],
       "preferred_times": [{"start_hour":5, "end_hour":9}, {"start_hour":16, "end_hour":20}],
+      "moon_preference": []
+    },
+    "mahi_mahi": {
+      "common_name": "Mahi Mahi / Dorado",
+      "emoji": "🐬",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "preferred_months": [11, 12, 1, 2, 3, 4, 5],
+      "preferred_temp_c": [22, 29],
+      "preferred_wind_m_s": [0, 10],
+      "max_wave_height_m": 2.5,
+      "preferred_tide_phase": ["any"],
+      "preferred_times": [{"start_hour":5, "end_hour":11}, {"start_hour":15, "end_hour":19}],
+      "moon_preference": []
+    },
+    "yellowfin_tuna": {
+      "common_name": "Yellowfin Tuna",
+      "emoji": "🐟",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "preferred_months": [10, 11, 12, 1, 2, 3, 4],
+      "preferred_temp_c": [20, 28],
+      "preferred_wind_m_s": [0, 12],
+      "max_wave_height_m": 3.0,
+      "preferred_tide_phase": ["any"],
+      "preferred_times": [{"start_hour":6, "end_hour":12}, {"start_hour":13, "end_hour":17}],
+      "moon_preference": []
+    },
+    "king_mackerel": {
+      "common_name": "King Mackerel",
+      "emoji": "🐠",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "preferred_months": [10, 11, 12, 1, 2, 3],
+      "preferred_temp_c": [21, 27],
+      "preferred_wind_m_s": [0, 10],
+      "max_wave_height_m": 2.0,
+      "preferred_tide_phase": ["rising", "falling"],
+      "preferred_times": [{"start_hour":5, "end_hour":10}, {"start_hour":16, "end_hour":20}],
+      "moon_preference": []
+    },
+    "wahoo": {
+      "common_name": "Wahoo / Bonito",
+      "emoji": "⚡️",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "preferred_months": [11, 12, 1, 2, 3, 4],
+      "preferred_temp_c": [22, 29],
+      "preferred_wind_m_s": [0, 12],
+      "max_wave_height_m": 3.0,
+      "preferred_tide_phase": ["any"],
+      "preferred_times": [{"start_hour":6, "end_hour":12}, {"start_hour":14, "end_hour":18}],
+      "moon_preference": []
+    },
+    "white_musselcracker": {
+      "common_name": "White Musselcracker",
+      "emoji": "🦀",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "preferred_months": [11, 12, 1, 2, 3],
+      "preferred_temp_c": [18, 25],
+      "preferred_wind_m_s": [0, 8],
+      "max_wave_height_m": 1.5,
+      "preferred_tide_phase": ["rising", "high"],
+      "preferred_times": [{"start_hour":6, "end_hour":10}, {"start_hour":15, "end_hour":19}],
       "moon_preference": []
     }
   },

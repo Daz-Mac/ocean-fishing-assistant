@@ -317,12 +317,24 @@ class DataFormatter:
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
 
+                    # determine tide_phase_name for the period (most-common non-empty value)
+                    tide_names = [
+                        (e.get("forecast_raw") or {}).get("formatted_weather", {}).get("tide_phase_name")
+                        for e in per_ts_entries
+                    ]
+                    tide_names = [tn for tn in tide_names if tn]
+                    tide_phase_name = None
+                    if tide_names:
+                        from collections import Counter
+                        tide_phase_name = Counter(tide_names).most_common(1)[0][0]
+
                     summary = {
                         "score_10": round(score_10, 3) if score_10 is not None else None,
                         "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
                         "components": components,
                         "profile_used": profile_used,
                         "safety": safety,
+                        "tide_phase_name": tide_phase_name,
                         "start": pdata.get("start"),
                         "end": pdata.get("end"),
                         "indices": list(indices),
@@ -388,6 +400,17 @@ class DataFormatter:
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
 
+                    # determine tide_phase_name for the period (most-common non-empty value)
+                    tide_names = [
+                        (e.get("forecast_raw") or {}).get("formatted_weather", {}).get("tide_phase_name")
+                        for e in per_ts_entries
+                    ]
+                    tide_names = [tn for tn in tide_names if tn]
+                    tide_phase_name = None
+                    if tide_names:
+                        from collections import Counter
+                        tide_phase_name = Counter(tide_names).most_common(1)[0][0]
+
                     summary = dict(pdata)
                     summary.update({
                         "score_10": round(score_10, 3) if score_10 is not None else None,
@@ -395,6 +418,7 @@ class DataFormatter:
                         "components": components,
                         "profile_used": profile_used,
                         "safety": safety,
+                        "tide_phase_name": tide_phase_name,
                         "breaches": breaches_summary,
                     })
                     period_forecasts[date_key][pname] = summary
