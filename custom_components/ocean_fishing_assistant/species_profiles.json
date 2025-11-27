@@ -1,6 +1,19 @@
 {
   "version": "1",
   "species": {
+    "general_mixed": {
+      "common_name": "General Mixed",
+      "emoji": "🐟",
+      "habitat": "ocean",
+      "regions": ["global"],
+      "preferred_months": [],
+      "preferred_temp_c": [],
+      "preferred_wind_m_s": [],
+      "max_wave_height_m": [],
+      "preferred_tide_phase": ["high"],
+      "preferred_times": [],
+      "moon_preference": ["full"]
+    },    
     "sea_bass": {
       "common_name": "Sea Bass | Gibraltar Strait",
       "emoji": "🐟",

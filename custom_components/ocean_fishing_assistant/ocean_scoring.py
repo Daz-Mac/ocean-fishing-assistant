@@ -1,5 +1,3 @@
-# (Full file content — replace your existing ocean_scoring.py with the contents below)
-
 """
 Strict Ocean Fishing Scoring — no fallbacks, fail loudly.
 
@@ -34,18 +32,6 @@ FACTOR_WEIGHTS = {
     "season": 0.10,
     "moon": 0.05,
     "temperature": 0.03,
-}
-
-DEFAULT_PROFILE = {
-    "common_name": "Generic",
-    "preferred_temp_c": [8.0, 18.0],
-    "preferred_wind_m_s": [0.0, 6.0],
-    "max_wave_height_m": 2.0,
-    "preferred_tide_phase": ["high"],
-    "preferred_times": [],
-    "preferred_months": [],
-    "moon_preference": [],
-    "weights": FACTOR_WEIGHTS,
 }
 
 
@@ -225,26 +211,23 @@ def compute_score(
     if use_index < 0 or use_index >= len(timestamps):
         raise MissingDataError(f"use_index {use_index} out of range")
 
-    if isinstance(species_profile, str):
-        try:
-            from .ocean_scoring import _load_species_profile_by_name  # type: ignore
-        except Exception:
-            _load = None
-        else:
-            _load = _load_species_profile_by_name if "_load_species_profile_by_name" in globals() else None
-        profile = _load(species_profile) if _load else DEFAULT_PROFILE
-    elif isinstance(species_profile, dict):
-        profile = species_profile
-    else:
-        profile = DEFAULT_PROFILE
+    # Enforce a resolved species profile dict (no fallback)
+    if not isinstance(species_profile, dict):
+        raise MissingDataError(f"species_profile must be a resolved dict (species metadata). Received: {species_profile!r}")
+    profile = species_profile
 
-    weights = FACTOR_WEIGHTS.copy()
-    for k, v in (profile.get("weights") or {}).items():
-        if k in weights:
-            try:
-                weights[k] = float(v)
-            except Exception:
-                pass
+    # Require weights from the profile (no fallback)
+    weights_raw = profile.get("weights")
+    if not isinstance(weights_raw, dict):
+        raise MissingDataError("species_profile missing required 'weights' mapping")
+    weights = {}
+    for k in FACTOR_WEIGHTS.keys():
+        if k not in weights_raw:
+            raise MissingDataError(f"species_profile.weights missing required factor '{k}'")
+        try:
+            weights[k] = float(weights_raw[k])
+        except Exception:
+            raise MissingDataError(f"species_profile.weights.{k} must be numeric")
     total = sum(weights.values()) or 1.0
     weights = {k: float(v) / total for k, v in weights.items()}
 
@@ -315,7 +298,7 @@ def compute_score(
 
     comp: Dict[str, Any] = {}
 
-    # TIDE component — phase-based only (preferred_tide_m removed)
+    # TIDE component — phase-based only
     try:
         pref_tide_phase = profile.get("preferred_tide_phase", []) or []
         tide_phase_val = None
@@ -373,9 +356,11 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute tide component (phase-based)", exc_info=True)
 
-    # WIND component
+    # WIND component — require preferred_wind_m_s in profile
     try:
-        pref_wind = profile.get("preferred_wind_m_s", DEFAULT_PROFILE["preferred_wind_m_s"])
+        pref_wind = profile.get("preferred_wind_m_s")
+        if pref_wind is None:
+            raise MissingDataError("species_profile missing required 'preferred_wind_m_s'")
         if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
             pw_min, pw_max = float(pref_wind[0]), float(pref_wind[1])
         else:
@@ -385,13 +370,17 @@ def compute_score(
         wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
         wind_score = _clamp_0_10(wind_score)
         comp["wind"] = {"score_10": round(wind_score, 3), "score_100": int(round(wind_score * 10))}
+    except MissingDataError:
+        raise
     except Exception:
         _LOGGER.debug("Failed to compute wind component", exc_info=True)
 
-    # WAVES component
+    # WAVES component — require max_wave_height_m in profile
     try:
-        max_wave_pref = profile.get("max_wave_height_m", DEFAULT_PROFILE["max_wave_height_m"])
-        max_wave = float(max_wave_pref) if max_wave_pref is not None else DEFAULT_PROFILE["max_wave_height_m"]
+        max_wave_pref = profile.get("max_wave_height_m")
+        if max_wave_pref is None:
+            raise MissingDataError("species_profile missing required 'max_wave_height_m'")
+        max_wave = float(max_wave_pref)
         if wave is None:
             wave_score = 0.0
         else:
@@ -403,6 +392,8 @@ def compute_score(
                 wave_score = 10.0 * (1.0 - (wave / max_wave))
         wave_score = _clamp_0_10(wave_score)
         comp["waves"] = {"score_10": round(wave_score, 3), "score_100": int(round(wave_score * 10))}
+    except MissingDataError:
+        raise
     except Exception:
         _LOGGER.debug("Failed to compute waves component", exc_info=True)
 
@@ -541,7 +532,9 @@ def compute_score(
         _LOGGER.debug("Failed to compute moon component", exc_info=True)
 
     try:
-        pref_temp = profile.get("preferred_temp_c", DEFAULT_PROFILE["preferred_temp_c"])
+        pref_temp = profile.get("preferred_temp_c")
+        if pref_temp is None:
+            raise MissingDataError("species_profile missing required 'preferred_temp_c'")
         if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
             pt_min, pt_max = float(pref_temp[0]), float(pref_temp[1])
         else:
@@ -551,6 +544,8 @@ def compute_score(
         temp_score = _linear_within_score_10(float(temp), pt_min, pt_max, temp_tol)
         temp_score = _clamp_0_10(temp_score)
         comp["temperature"] = {"score_10": round(temp_score, 3), "score_100": int(round(temp_score * 10))}
+    except MissingDataError:
+        raise
     except Exception:
         _LOGGER.debug("Failed to compute temperature component", exc_info=True)
 
