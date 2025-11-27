@@ -2,7 +2,7 @@
   "version": "1",
   "species": {
     "sea_bass": {
-      "common_name": "Sea Bass",
+      "common_name": "Sea Bass | Gibraltar Strait",
       "emoji": "🐟",
       "habitat": "ocean",
       "regions": ["global"],
@@ -15,7 +15,7 @@
       "moon_preference": ["full"]
     },
     "mackerel": {
-      "common_name": "Mackerel",
+      "common_name": "Mackerel | Gibraltar Strait",
       "emoji": "🐠",
       "habitat": "ocean",
       "regions": ["global"],
@@ -28,7 +28,7 @@
       "moon_preference": []
     },
     "shad": {
-      "common_name": "Shad / Elf",
+      "common_name": "Shad / Elf | South Africa KZN",
       "emoji": "🐟",
       "habitat": "ocean",
       "regions": ["global"],
@@ -41,7 +41,7 @@
       "moon_preference": []
     },
     "kob": {
-      "common_name": "Kob / Kabeljou",
+      "common_name": "Kob / Kabeljou | South Africa KZN",
       "emoji": "🪝",
       "habitat": "ocean",
       "regions": ["global"],
@@ -54,7 +54,7 @@
       "moon_preference": []
     },
     "natal_stumpnose": {
-      "common_name": "Natal Stumpnose",
+      "common_name": "Natal Stumpnose | South Africa KZN",
       "emoji": "🐠",
       "habitat": "ocean",
       "regions": ["global"],
@@ -67,7 +67,7 @@
       "moon_preference": []
     },
     "blacktail": {
-      "common_name": "Blacktail / Rock Bream",
+      "common_name": "Blacktail / Rock Bream | South Africa KZN",
       "emoji": "🪸",
       "habitat": "ocean",
       "regions": ["global"],
@@ -80,7 +80,7 @@
       "moon_preference": []
     },
     "galjoen": {
-      "common_name": "Galjoen",
+      "common_name": "Galjoen | South Africa KZN",
       "emoji": "🐡",
       "habitat": "ocean",
       "regions": ["global"],
@@ -93,7 +93,7 @@
       "moon_preference": []
     },
     "mahi_mahi": {
-      "common_name": "Mahi Mahi / Dorado",
+      "common_name": "Mahi Mahi / Dorado | South Africa KZN",
       "emoji": "🐬",
       "habitat": "ocean",
       "regions": ["global"],
@@ -106,7 +106,7 @@
       "moon_preference": []
     },
     "yellowfin_tuna": {
-      "common_name": "Yellowfin Tuna",
+      "common_name": "Yellowfin Tuna | South Africa KZN",
       "emoji": "🐟",
       "habitat": "ocean",
       "regions": ["global"],
@@ -119,7 +119,7 @@
       "moon_preference": []
     },
     "king_mackerel": {
-      "common_name": "King Mackerel",
+      "common_name": "King Mackerel | South Africa KZN",
       "emoji": "🐠",
       "habitat": "ocean",
       "regions": ["global"],
@@ -132,7 +132,7 @@
       "moon_preference": []
     },
     "wahoo": {
-      "common_name": "Wahoo / Bonito",
+      "common_name": "Wahoo / Bonito | South Africa KZN",
       "emoji": "⚡️",
       "habitat": "ocean",
       "regions": ["global"],
@@ -145,7 +145,7 @@
       "moon_preference": []
     },
     "white_musselcracker": {
-      "common_name": "White Musselcracker",
+      "common_name": "White Musselcracker / Musselcracker Seabream | South Africa KZN",
       "emoji": "🦀",
       "habitat": "ocean",
       "regions": ["global"],

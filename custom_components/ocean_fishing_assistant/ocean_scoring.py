@@ -136,17 +136,24 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], un
     if ">" in code:
         k, v = code.split(">", 1)
         k = k.strip()
+        v = v.strip()
+        is_str_threshold = False
         try:
             val = float(v)
         except Exception:
             val = v
+            is_str_threshold = True
         if k in ("wind", "wind_m_s"):
+            if is_str_threshold:
+                return f"Wind exceeds safe limit ({val})"
             return f"Wind exceeds safe limit ({_format_wind_val(val)})"
         if k in ("wave", "wave_height"):
             return f"Wave height exceeds safe limit ({val} m)"
         if k in ("swell", "swell_period"):
             return f"Swell period below safe minimum ({val} s)"
         if k in ("gust", "wind_gust"):
+            if is_str_threshold:
+                return f"Gust exceeds safe limit ({val})"
             return f"Gust exceeds safe limit ({_format_wind_val(val)})"
         if k in ("vis", "visibility"):
             return f"Visibility below safe minimum ({val} km)"
@@ -560,7 +567,20 @@ def compute_score(
             if max_wind is not None and wind is not None:
                 if wind > max_wind:
                     safety["unsafe"] = True
-                    safety["reasons"].append(f"wind>{max_wind}")
+                    # include the threshold formatted into user's preferred units for clarity
+                    try:
+                        if units == "metric":
+                            thr_val = round(unit_helpers.m_s_to_kmh(max_wind), 1)
+                            thr_unit = "km/h"
+                        elif units == "imperial":
+                            thr_val = round(unit_helpers.m_s_to_mph(max_wind), 1)
+                            thr_unit = "mph"
+                        else:
+                            thr_val = round(max_wind, 2)
+                            thr_unit = "m/s"
+                        safety["reasons"].append(f"wind>{thr_val} {thr_unit}")
+                    except Exception:
+                        safety["reasons"].append(f"wind>{max_wind}")
                 elif wind > (0.9 * max_wind):
                     safety["caution"] = True
                     safety["reasons"].append("wind_near_limit")
@@ -579,7 +599,19 @@ def compute_score(
             if max_gust is not None and gust is not None:
                 if gust > max_gust:
                     safety["unsafe"] = True
-                    safety["reasons"].append(f"gust>{max_gust}")
+                    try:
+                        if units == "metric":
+                            thr_val = round(unit_helpers.m_s_to_kmh(max_gust), 1)
+                            thr_unit = "km/h"
+                        elif units == "imperial":
+                            thr_val = round(unit_helpers.m_s_to_mph(max_gust), 1)
+                            thr_unit = "mph"
+                        else:
+                            thr_val = round(max_gust, 2)
+                            thr_unit = "m/s"
+                        safety["reasons"].append(f"gust>{thr_val} {thr_unit}")
+                    except Exception:
+                        safety["reasons"].append(f"gust>{max_gust}")
                 elif gust > (0.9 * max_gust):
                     safety["caution"] = True
                     safety["reasons"].append("gust_near_limit")
@@ -694,40 +726,13 @@ def compute_score(
         # TIME breach detection
         try:
             if profile.get("preferred_times"):
-                normalized_hours = []
-                for it in profile.get("preferred_times", []):
-                    if isinstance(it, dict):
-                        sh = it.get("start_hour") or it.get("start") or it.get("hour")
-                        eh = it.get("end_hour") or it.get("end")
-                        try:
-                            sh_i = int(sh)
-                        except Exception:
-                            continue
-                        if eh is None:
-                            normalized_hours.append(sh_i % 24)
-                        else:
-                            try:
-                                eh_i = int(eh)
-                            except Exception:
-                                normalized_hours.append(sh_i % 24)
-                                continue
-                            h = sh_i % 24
-                            normalized_hours.append(h)
-                            while h != (eh_i % 24):
-                                h = (h + 1) % 24
-                                normalized_hours.append(h)
-                    else:
-                        try:
-                            normalized_hours.append(int(it) % 24)
-                        except Exception:
-                            continue
-                normalized_hours = sorted(set(normalized_hours))
                 try:
                     t_dt = _coerce_datetime(timestamps[use_index])
                     hour = t_dt.hour if t_dt else None
                 except Exception:
                     hour = None
-                if normalized_hours and hour is not None and hour not in normalized_hours:
+                # use normalized_hours calculated in the TIME component above to ensure consistency
+                if 'normalized_hours' in locals() and normalized_hours and hour is not None and hour not in normalized_hours:
                     _add_breach("time", hour, unit="hour", expected_min=min(normalized_hours), expected_max=max(normalized_hours), expected_pref_min=min(normalized_hours), expected_pref_max=max(normalized_hours), severity="caution", reason="time_out_of_preference", advice=f"{profile.get('common_name','Species')} prefers different times of day")
         except Exception:
             pass
@@ -785,6 +790,19 @@ def compute_score(
 
     except Exception:
         _LOGGER.debug("Failed to compute species breaches", exc_info=True)
+
+    # deduplicate breaches (preserve order)
+    try:
+        unique_breaches: List[Dict[str, Any]] = []
+        seen_keys = set()
+        for b in breaches:
+            key = (b.get("variable"), b.get("reason"), str(b.get("value")), b.get("severity"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_breaches.append(b)
+        breaches = unique_breaches
+    except Exception:
+        pass
 
     result = {
         "score_10": overall_10,
