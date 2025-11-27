@@ -216,20 +216,9 @@ def compute_score(
         raise MissingDataError(f"species_profile must be a resolved dict (species metadata). Received: {species_profile!r}")
     profile = species_profile
 
-    # Require weights from the profile (no fallback)
-    weights_raw = profile.get("weights")
-    if not isinstance(weights_raw, dict):
-        raise MissingDataError("species_profile missing required 'weights' mapping")
-    weights = {}
-    for k in FACTOR_WEIGHTS.keys():
-        if k not in weights_raw:
-            raise MissingDataError(f"species_profile.weights missing required factor '{k}'")
-        try:
-            weights[k] = float(weights_raw[k])
-        except Exception:
-            raise MissingDataError(f"species_profile.weights.{k} must be numeric")
-    total = sum(weights.values()) or 1.0
-    weights = {k: float(v) / total for k, v in weights.items()}
+    # Use global FACTOR_WEIGHTS only (no per-species weights)
+    total = sum(FACTOR_WEIGHTS.values()) or 1.0
+    weights = {k: float(v) / total for k, v in FACTOR_WEIGHTS.items()}
 
     def _get_at(key: str, index: int = 0) -> Optional[float]:
         if key not in data:
