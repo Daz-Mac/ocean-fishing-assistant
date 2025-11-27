@@ -732,8 +732,25 @@ def compute_score(
                 except Exception:
                     hour = None
                 # use normalized_hours calculated in the TIME component above to ensure consistency
-                if 'normalized_hours' in locals() and normalized_hours and hour is not None and hour not in normalized_hours:
-                    _add_breach("time", hour, unit="hour", expected_min=min(normalized_hours), expected_max=max(normalized_hours), expected_pref_min=min(normalized_hours), expected_pref_max=max(normalized_hours), severity="caution", reason="time_out_of_preference", advice=f"{profile.get('common_name','Species')} prefers different times of day")
+                if 'normalized_hours' in locals() and normalized_hours and hour is not None:
+                    # reuse the same distance logic as used when computing the time score (3-hour tolerance)
+                    def hour_distance(a: int, b: int) -> int:
+                        d = abs(a - b) % 24
+                        return min(d, 24 - d)
+                    min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
+                    if min_dist > 3:
+                        _add_breach(
+                            "time",
+                            hour,
+                            unit="hour",
+                            expected_min=min(normalized_hours),
+                            expected_max=max(normalized_hours),
+                            expected_pref_min=min(normalized_hours),
+                            expected_pref_max=max(normalized_hours),
+                            severity="caution",
+                            reason="time_out_of_preference",
+                            advice=f"{profile.get('common_name','Species')} prefers different times of day",
+                        )
         except Exception:
             pass
 
