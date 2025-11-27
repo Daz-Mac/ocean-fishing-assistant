@@ -626,21 +626,20 @@ def compute_score(
     breaches: List[Dict[str, Any]] = []
     try:
         def _add_breach(variable: str, value: Any, unit: Optional[str] = None, expected_min: Any = None, expected_max: Any = None, expected_pref_min: Any = None, expected_pref_max: Any = None, severity: str = "caution", reason: Optional[str] = None, advice: Optional[str] = None):
-            item: Dict[str, Any] = {
-                "variable": variable,
-                "value": value,
-                "unit": unit,
-                "expected_min": expected_min,
-                "expected_max": expected_max,
-                "severity": severity,
-                "reason": reason or f"{variable}_breach",
-                "advice": advice,
-                "category": "species",
-            }
+            # Build item but omit keys where value is None to avoid emitting nulls in the output
+            item: Dict[str, Any] = {"variable": variable, "value": value, "severity": severity, "reason": reason or f"{variable}_breach", "category": "species"}
+            if unit is not None:
+                item["unit"] = unit
+            if expected_min is not None:
+                item["expected_min"] = expected_min
+            if expected_max is not None:
+                item["expected_max"] = expected_max
             if expected_pref_min is not None:
                 item["expected_pref_min"] = expected_pref_min
             if expected_pref_max is not None:
                 item["expected_pref_max"] = expected_pref_max
+            if advice is not None:
+                item["advice"] = advice
             breaches.append(item)
 
         # TEMPERATURE breach detection (include both pref bounds and allowed bounds used)
