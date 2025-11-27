@@ -1,8 +1,8 @@
 {
   "version": "1",
   "species": {
-    "general_mixed": {
-      "common_name": "General Mixed",
+    "general_mixed_global": {
+      "common_name": "General Mixed Global",
       "emoji": "🐟",
       "habitat": "ocean",
       "regions": ["global"],
