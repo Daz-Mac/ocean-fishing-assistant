@@ -104,18 +104,10 @@ async def async_setup_entry(hass, entry):
     resolved_species = None
     if selected_species:
         try:
-            # First, try to resolve as a general profile (top-level "general_profiles")
+            # Resolve either a general profile (top-level "general_profiles") or a specific species id.
             general_profile = loader.get_general_profile(selected_species)
             if general_profile:
-                # ensure the general profile applies to an ocean region
-                gp_regions = general_profile.get("regions", [])
-                if not gp_regions:
-                    raise ValueError(f"Selected general profile '{selected_species}' missing regions (strict)")
-                region_info = loader.get_region_info(gp_regions[0])
-                if not region_info or region_info.get("habitat") != "ocean":
-                    raise ValueError(f"Selected general profile '{selected_species}' is not an ocean profile (strict)")
-
-                # resolved_species should be a dict for downstream consumers (not an id string)
+                # No habitat checks — accept the general profile as-is.
                 resolved_species = dict(general_profile)
                 _LOGGER.debug("Resolved selected general profile '%s' to dict for entry %s", selected_species, entry.entry_id)
             else:
@@ -125,10 +117,7 @@ async def async_setup_entry(hass, entry):
                     raise ValueError(
                         f"Selected species '{selected_species}' not found in packaged species_profiles.json (strict)"
                     )
-                if sp.get("habitat") != "ocean":
-                    raise ValueError(
-                        f"Selected species '{selected_species}' is not an ocean species (strict)"
-                    )
+                # No habitat checks — accept the species profile.
                 resolved_species = sp
                 _LOGGER.debug("Resolved selected species id '%s' to species dict for entry %s", selected_species, entry.entry_id)
         except Exception as exc:
