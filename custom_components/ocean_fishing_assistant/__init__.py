@@ -104,34 +104,20 @@ async def async_setup_entry(hass, entry):
     resolved_species = None
     if selected_species:
         try:
-            if isinstance(selected_species, str) and selected_species.startswith("general_mixed_"):
-                region = selected_species.replace("general_mixed_", "")
-                region_info = loader.get_region_info(region)
-                if not region_info:
-                    raise ValueError(
-                        f"Selected synthetic region '{region}' not found in species_profiles.json (strict)"
-                    )
-                if region_info.get("habitat") != "ocean":
-                    raise ValueError(
-                        f"Selected synthetic region '{region}' is not an ocean region (strict)"
-                    )
-                resolved_species = selected_species
-            elif selected_species == "general_mixed":
-                if not selected_region:
-                    raise ValueError(
-                        "Selected species 'general_mixed' requires 'species_region' in entry.data (strict)"
-                    )
-                region_info = loader.get_region_info(selected_region)
-                if not region_info:
-                    raise ValueError(
-                        f"Selected species_region '{selected_region}' not found in species_profiles.json (strict)"
-                    )
-                if region_info.get("habitat") != "ocean":
-                    raise ValueError(
-                        f"Selected species_region '{selected_region}' is not an ocean region (strict)"
-                    )
-                resolved_species = "general_mixed"
+            # First check if it's a general profile (top-level general_profiles in species_profiles.json)
+            general_profile = loader.get_general_profile(selected_species)
+            if general_profile:
+                # ensure the general profile applies to an ocean region
+                gp_regions = general_profile.get("regions", [])
+                gp_region = gp_regions[0] if gp_regions else None
+                if not gp_region:
+                    raise ValueError(f"Selected general profile '{selected_species}' missing regions (strict)")
+                region_info = loader.get_region_info(gp_region)
+                if not region_info or region_info.get("habitat") != "ocean":
+                    raise ValueError(f"Selected general profile '{selected_species}' is not an ocean profile (strict)")
+                resolved_species = selected_species  # store id for general profiles
             else:
+                # Not a general profile, treat as a species id
                 sp = loader.get_species(selected_species)
                 if not sp:
                     raise ValueError(

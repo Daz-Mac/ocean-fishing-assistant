@@ -101,11 +101,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             species_id = user_input[CONF_SPECIES_ID]
-            # handle the 'general_mixed_<region>' synthetic selection
-            if isinstance(species_id, str) and species_id.startswith("general_mixed_"):
-                species_region = species_id.replace("general_mixed_", "")
-                species_id = "general_mixed"
+
+            # If the user picked a general profile id, resolve its region(s)
+            general_profile = self.species_loader.get_general_profile(species_id)
+            if general_profile:
+                # use the first available region for the selected general profile
+                available_regions = general_profile.get("regions", ["global"])
+                species_region = available_regions[0] if available_regions else "global"
             else:
+                # otherwise treat as a specific species id and resolve its first region
                 species_profile = self.species_loader.get_species(species_id)
                 if species_profile:
                     available_regions = species_profile.get("regions", ["global"])
@@ -130,12 +134,37 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         species_options: list[dict[str, str]] = []
 
-        # SECTION: General regional mixed profiles
+        # SECTION: General regional mixed profiles (sourced from general_profiles)
         species_options.append({"value": "separator_regions", "label": "━━━━ 🎣 GENERAL REGION PROFILES ━━━━"})
-        for region in regions:
-            region_id = region["id"]
-            region_name = region.get("name", region_id)
-            species_options.append({"value": f"general_mixed_{region_id}", "label": f"🎣 {region_name} - General Mixed Species"})
+        # get all general profiles and include only those whose region is ocean
+        general_profiles = self.species_loader.get_general_profiles()
+        # present general profiles in order by friendly name (common_name or id)
+        general_profiles.sort(key=lambda g: g.get("common_name", g.get("id", "")))
+        for gp in general_profiles:
+            # ensure it belongs to an ocean region (or has habitat ocean)
+            gp_habitat = gp.get("habitat")
+            # fallback to checking the first region's habitat via region metadata
+            if gp_habitat != "ocean":
+                # attempt to detect via region info if available
+                gp_regions = gp.get("regions", []) or []
+                if gp_regions:
+                    # if any region is ocean include it
+                    include = False
+                    for r in gp_regions:
+                        rinfo = self.species_loader.get_region_info(r)
+                        if rinfo and rinfo.get("habitat") == "ocean":
+                            include = True
+                            break
+                    if not include:
+                        continue
+                else:
+                    # no explicit habitat/regions — skip
+                    continue
+            gid = gp.get("id")
+            gname = gp.get("common_name", gid)
+            emoji = gp.get("emoji", "🎣")
+            label = f"{emoji} {gname}"
+            species_options.append({"value": gid, "label": label})
 
         # SECTION: Specific species
         species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━"})
@@ -152,10 +181,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not any(x["id"] == sid for x in all_species):
                     all_species.append(s)
 
-        all_species.sort(key=lambda s: s.get("name", s["id"]))
+        all_species.sort(key=lambda s: s.get("common_name", s.get("id")))
         for species in all_species:
             emoji = species.get("emoji", "🐟")
-            name = species.get("name", species["id"])
+            name = species.get("common_name", species["id"])
             species_id = species["id"]
             active_months = species.get("active_months", []) or species.get("preferred_months", [])
             if len(active_months) == 12:
@@ -375,7 +404,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
                     CONF_LATITUDE: latitude,
                     CONF_LONGITUDE: longitude,
-                    CONF_SPECIES_ID: self.ocean_config.get(CONF_SPECIES_ID, "general_mixed"),
+                    CONF_SPECIES_ID: self.ocean_config.get(CONF_SPECIES_ID, "general_mixed_global"),
                     CONF_SPECIES_REGION: self.ocean_config.get(CONF_SPECIES_REGION, "global"),
                     CONF_HABITAT_PRESET: habitat_preset,
                     CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
