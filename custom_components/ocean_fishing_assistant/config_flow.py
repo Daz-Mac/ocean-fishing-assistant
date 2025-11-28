@@ -69,6 +69,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except (ValueError, KeyError):
                 errors["base"] = "invalid_coordinates"
 
+            # If coordinates valid, check for duplicate human-visible title immediately
+            if not errors:
+                submitted_title = str(user_input.get(CONF_NAME, "")).strip()
+                if submitted_title:
+                    existing_entries = self.hass.config_entries.async_entries(DOMAIN)
+                    for e in existing_entries:
+                        if e.title == submitted_title:
+                            _LOGGER.debug("Attempt to create entry with duplicate title '%s' rejected at location step", submitted_title)
+                            errors["base"] = "title_exists"
+                            break
+
             if not errors:
                 self.ocean_config.update(user_input)
                 return await self.async_step_ocean_species()
