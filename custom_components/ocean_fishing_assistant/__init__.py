@@ -104,20 +104,22 @@ async def async_setup_entry(hass, entry):
     resolved_species = None
     if selected_species:
         try:
-            # First check if it's a general profile (top-level general_profiles in species_profiles.json)
+            # First, try to resolve as a general profile (top-level "general_profiles")
             general_profile = loader.get_general_profile(selected_species)
             if general_profile:
                 # ensure the general profile applies to an ocean region
                 gp_regions = general_profile.get("regions", [])
-                gp_region = gp_regions[0] if gp_regions else None
-                if not gp_region:
+                if not gp_regions:
                     raise ValueError(f"Selected general profile '{selected_species}' missing regions (strict)")
-                region_info = loader.get_region_info(gp_region)
+                region_info = loader.get_region_info(gp_regions[0])
                 if not region_info or region_info.get("habitat") != "ocean":
                     raise ValueError(f"Selected general profile '{selected_species}' is not an ocean profile (strict)")
-                resolved_species = selected_species  # store id for general profiles
+
+                # resolved_species should be a dict for downstream consumers (not an id string)
+                resolved_species = dict(general_profile)
+                _LOGGER.debug("Resolved selected general profile '%s' to dict for entry %s", selected_species, entry.entry_id)
             else:
-                # Not a general profile, treat as a species id
+                # Not a general profile — resolve as a specific species id
                 sp = loader.get_species(selected_species)
                 if not sp:
                     raise ValueError(
@@ -128,6 +130,7 @@ async def async_setup_entry(hass, entry):
                         f"Selected species '{selected_species}' is not an ocean species (strict)"
                     )
                 resolved_species = sp
+                _LOGGER.debug("Resolved selected species id '%s' to species dict for entry %s", selected_species, entry.entry_id)
         except Exception as exc:
             _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
             return False
