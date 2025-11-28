@@ -138,17 +138,18 @@ class SpeciesLoader:
         return results
 
     def get_species_by_type(self, species_type: str) -> List[Dict[str, Any]]:
-        """Return species by habitat type (e.g. 'ocean' or 'freshwater')."""
+        """Return species by type.
+
+        NOTE: 'habitat' field is no longer used in profiles; this returns all species.
+        """
         self._ensure_loaded()
         results: List[Dict[str, Any]] = []
         for sid, sdata in self._profiles["species"].items():
             if not isinstance(sdata, dict):
                 continue
-            habitat = sdata.get("habitat")
-            if habitat == species_type:
-                profile = dict(sdata)
-                profile["id"] = sid
-                results.append(profile)
+            profile = dict(sdata)
+            profile["id"] = sid
+            results.append(profile)
         return results
 
     def get_all_species(self) -> List[Dict[str, Any]]:
@@ -174,9 +175,8 @@ class SpeciesLoader:
         return regions
 
     def get_regions_by_type(self, region_type: str) -> List[Dict[str, Any]]:
-        """Filter regions by habitat type (ocean/freshwater/mixed)."""
-        regions = self.get_regions()
-        return [r for r in regions if r.get("habitat") == region_type]
+        """Return all regions (habitat key no longer used)."""
+        return self.get_regions()
 
     def get_regions_for_species(self, species_id: str) -> List[str]:
         """Return list of region IDs for the given species."""

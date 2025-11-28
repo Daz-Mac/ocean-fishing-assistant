@@ -138,10 +138,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.error("Species profiles missing when building ocean species list; aborting flow.")
             raise RuntimeError("Missing species profiles for ocean species selection")
 
-        regions = self.species_loader.get_regions_by_type("ocean")
+        regions = self.species_loader.get_regions()
         if not regions:
-            _LOGGER.error("No ocean regions found in species_profiles.json; aborting flow.")
-            raise RuntimeError("No ocean regions available")
+            _LOGGER.error("No regions found in species_profiles.json; aborting flow.")
+            raise RuntimeError("No regions available")
 
         species_options: list[dict[str, str]] = []
 
@@ -152,25 +152,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # present general profiles in order by friendly name (common_name or id)
         general_profiles.sort(key=lambda g: g.get("common_name", g.get("id", "")))
         for gp in general_profiles:
-            # ensure it belongs to an ocean region (or has habitat ocean)
-            gp_habitat = gp.get("habitat")
-            # fallback to checking the first region's habitat via region metadata
-            if gp_habitat != "ocean":
-                # attempt to detect via region info if available
-                gp_regions = gp.get("regions", []) or []
-                if gp_regions:
-                    # if any region is ocean include it
-                    include = False
-                    for r in gp_regions:
-                        rinfo = self.species_loader.get_region_info(r)
-                        if rinfo and rinfo.get("habitat") == "ocean":
-                            include = True
-                            break
-                    if not include:
-                        continue
-                else:
-                    # no explicit habitat/regions — skip
-                    continue
             gid = gp.get("id")
             gname = gp.get("common_name", gid)
             emoji = gp.get("emoji", "🎣")
@@ -186,8 +167,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             region_id = region["id"]
             region_species = self.species_loader.get_species_by_region(region_id)
             for s in region_species:
-                if s.get("habitat") != "ocean":
-                    continue
                 sid = s["id"]
                 if not any(x["id"] == sid for x in all_species):
                     all_species.append(s)
