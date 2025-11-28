@@ -434,7 +434,28 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
 
-                _LOGGER.debug("Creating ocean config entry with data keys: %s", list(final_config.keys()))
+                # ---- DUPLICATE CHECKS / UNIQUE ID HANDLING ----
+                # 1) Warn user if an existing entry already has the same human-visible title.
+                existing_entries = self.hass.config_entries.async_entries(DOMAIN)
+                title = final_config[CONF_NAME]
+                for e in existing_entries:
+                    if e.title == title:
+                        # show the thresholds form again with a visible warning
+                        _LOGGER.debug("User attempted to create entry with duplicate title '%s'", title)
+                        return self._show_ocean_thresholds_form(errors={"base": "title_exists"})
+
+                # 2) Use the same title as unique_id and register it with HA.
+                # This preserves your existing title generation while enabling HA's duplicate protection.
+                unique_id = title.strip() if isinstance(title, str) else str(title)
+                try:
+                    await self.async_set_unique_id(unique_id)
+                    self._abort_if_unique_id_configured()
+                except Exception as exc:
+                    _LOGGER.debug("Unique-id registration/abort check raised: %s", exc)
+                    raise
+
+                _LOGGER.debug("Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id)
+
                 return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
             except KeyError as ke:
                 _LOGGER.exception("Missing expected key when building final ocean config: %s", ke)
