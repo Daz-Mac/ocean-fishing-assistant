@@ -51,8 +51,52 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.species_loader: SpeciesLoader | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Start the ocean-only flow; forward to ocean_location step."""
-        return await self.async_step_ocean_location(user_input)
+        """Start the flow by showing the location form directly from async_step_user.
+
+        Rendering the location form here (instead of forwarding) ensures the frontend
+        records the first step in its history so the native Back button appears on
+        subsequent steps.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                lat = float(user_input[CONF_LATITUDE])
+                lon = float(user_input[CONF_LONGITUDE])
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    errors["base"] = "invalid_coordinates"
+            except (ValueError, KeyError):
+                errors["base"] = "invalid_coordinates"
+
+            # If coordinates valid, check for duplicate human-visible title immediately
+            if not errors:
+                submitted_title = str(user_input.get(CONF_NAME, "")).strip()
+                if submitted_title:
+                    existing_entries = self.hass.config_entries.async_entries(DOMAIN)
+                    for e in existing_entries:
+                        if e.title == submitted_title:
+                            _LOGGER.debug("Attempt to create entry with duplicate title '%s' rejected at location step", submitted_title)
+                            errors["base"] = "title_exists"
+                            break
+
+            if not errors:
+                self.ocean_config.update(user_input)
+                return await self.async_step_ocean_species()
+
+        default_name = user_input.get(CONF_NAME, "") if user_input else ""
+        default_lat = user_input.get(CONF_LATITUDE, "") if user_input else ""
+        default_lon = user_input.get(CONF_LONGITUDE, "") if user_input else ""
+
+        return self.async_show_form(
+            step_id="ocean_location",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_NAME, default=default_name): str,
+                    vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
+                    vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
+                }
+            ),
+            errors=errors,
+        )
 
     # ----
     # Ocean location
@@ -101,203 +145,107 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Species selection flow: first choose profile type (general vs species)
+    # Ocean species/region selection
     # ----
     async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Ask whether the user wants a general profile or a specific species."""
-        # Ensure loader is available and loaded for listings
+        """Choose species/region for ocean mode (strict)."""
+        # Ensure loader is available and loaded for species lists
         if self.species_loader is None:
             self.species_loader = SpeciesLoader(self.hass)
             await self.species_loader.async_load_profiles()
 
         if user_input is not None:
-            choice = user_input.get("profile_type")
-            if choice == "general":
-                return await self.async_step_select_general_profile()
-            elif choice == "species":
-                return await self.async_step_select_region()
+            species_id = user_input[CONF_SPECIES_ID]
+
+            # If the user picked a general profile id, resolve its region(s)
+            general_profile = self.species_loader.get_general_profile(species_id)
+            if general_profile:
+                # use the first available region for the selected general profile
+                available_regions = general_profile.get("regions", ["global"])
+                species_region = available_regions[0] if available_regions else "global"
             else:
-                # defensive fallback: re-show form with error
-                return self.async_show_form(
-                    step_id="ocean_species",
-                    data_schema=vol.Schema(
-                        {vol.Required("profile_type"): selector.SelectSelector(
-                            selector.SelectSelectorConfig(
-                                options=[
-                                    {"value": "general", "label": "General region profile (mixed)"},
-                                    {"value": "species", "label": "Target a specific species (region-filtered)"},
-                                ],
-                                mode="list",
-                            )
-                        )}
-                    ),
-                    errors={"base": "invalid_selection"},
-                )
+                # otherwise treat as a specific species id and resolve its first region
+                species_profile = self.species_loader.get_species(species_id)
+                if species_profile:
+                    available_regions = species_profile.get("regions", ["global"])
+                    species_region = available_regions[0]
+                else:
+                    _LOGGER.error("Selected species_id %s not found in profiles", species_id)
+                    raise RuntimeError("Selected species_id not found")
 
-        return self.async_show_form(
-            step_id="ocean_species",
-            data_schema=vol.Schema(
-                {vol.Required("profile_type"): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": "general", "label": "General region profile (mixed)"},
-                            {"value": "species", "label": "Target a specific species (region-filtered)"},
-                        ],
-                        mode="list",
-                    )
-                )}
-            ),
-            description_placeholders={"info": "Choose whether to use a general regional profile or target a specific species."},
-        )
-
-    # ----
-    # Select a general profile
-    # ----
-    async def async_step_select_general_profile(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Show list of general profiles for the user to choose from."""
-        if self.species_loader is None:
-            self.species_loader = SpeciesLoader(self.hass)
-            await self.species_loader.async_load_profiles()
-
-        if user_input is not None:
-            profile_id = user_input.get(CONF_SPECIES_ID)
-            gp = self.species_loader.get_general_profile(profile_id)
-            if not gp:
-                _LOGGER.error("Selected general profile id %s not found", profile_id)
-                return self.async_abort(reason="profile_not_found")
-            # store selected general profile and its primary region (first region if present)
-            regions = gp.get("regions", ["global"]) or ["global"]
-            region = regions[0]
-            self.ocean_config[CONF_SPECIES_ID] = profile_id
-            self.ocean_config[CONF_SPECIES_REGION] = region
+            self.ocean_config[CONF_SPECIES_ID] = species_id
+            self.ocean_config[CONF_SPECIES_REGION] = species_region
             return await self.async_step_ocean_habitat()
 
-        # Build options
-        general_profiles = self.species_loader.get_general_profiles()
-        if not general_profiles:
-            _LOGGER.error("No general profiles available in species_profiles.json")
-            return self.async_abort(reason="no_general_profiles")
+        # Build options strictly; abort if missing
+        if not getattr(self.species_loader, "_profiles", None):
+            _LOGGER.error("Species profiles missing when building ocean species list; aborting flow.")
+            raise RuntimeError("Missing species profiles for ocean species selection")
 
+        regions = self.species_loader.get_regions()
+        if not regions:
+            _LOGGER.error("No regions found in species_profiles.json; aborting flow.")
+            raise RuntimeError("No regions available")
+
+        species_options: list[dict[str, str]] = []
+
+        # SECTION: General regional mixed profiles (sourced from general_profiles)
+        species_options.append({"value": "separator_regions", "label": "━━━━ 🎣 GENERAL REGION PROFILES ━━━━"})
+        # get all general profiles and include only those whose region is ocean
+        general_profiles = self.species_loader.get_general_profiles()
+        # present general profiles in order by friendly name (common_name or id)
         general_profiles.sort(key=lambda g: g.get("common_name", g.get("id", "")))
-        options = []
         for gp in general_profiles:
             gid = gp.get("id")
             gname = gp.get("common_name", gid)
             emoji = gp.get("emoji", "🎣")
-            options.append({"value": gid, "label": f"{emoji} {gname}"})
+            label = f"{emoji} {gname}"
+            species_options.append({"value": gid, "label": label})
+
+        # SECTION: Specific species
+        species_options.append({"value": "separator_species", "label": "━━━━ 🐟 TARGET SPECIFIC SPECIES ━━━━"})
+
+        # Collect all ocean-specific species across regions (dedupe, include 'global')
+        all_species: list[dict[str, Any]] = []
+        for region in regions:
+            region_id = region["id"]
+            region_species = self.species_loader.get_species_by_region(region_id)
+            for s in region_species:
+                sid = s["id"]
+                if not any(x["id"] == sid for x in all_species):
+                    all_species.append(s)
+
+        all_species.sort(key=lambda s: s.get("common_name", s.get("id")))
+        for species in all_species:
+            emoji = species.get("emoji", "🐟")
+            name = species.get("common_name", species["id"])
+            species_id = species["id"]
+            active_months = species.get("active_months", []) or species.get("preferred_months", [])
+            if len(active_months) == 12:
+                season_info = "Year-round"
+            elif len(active_months) > 0:
+                season_info = f"Active: {len(active_months)} months"
+            else:
+                season_info = ""
+            label = f"{emoji} {name}"
+            if season_info:
+                label += f" ({season_info})"
+            species_options.append({"value": species_id, "label": label})
 
         return self.async_show_form(
-            step_id="select_general_profile",
+            step_id="ocean_species",
             data_schema=vol.Schema(
-                {vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=options, mode="dropdown")
-                )}
+                {
+                    vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=species_options, mode="dropdown")
+                    )
+                }
             ),
-            description_placeholders={"info": "Choose a mixed/general regional profile."},
+            description_placeholders={"info": "Choose a general region profile for mixed species, or target a specific species."},
         )
 
     # ----
-    # Select a region (for targeted species)
-    # ----
-    async def async_step_select_region(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Let the user pick a region first, then show species available in that region."""
-        if self.species_loader is None:
-            self.species_loader = SpeciesLoader(self.hass)
-            await self.species_loader.async_load_profiles()
-
-        regions = self.species_loader.get_regions()
-        if not regions:
-            _LOGGER.error("No regions present in species_profiles.json")
-            return self.async_abort(reason="no_regions")
-
-        if user_input is not None:
-            region_id = user_input.get(CONF_SPECIES_REGION)
-            # verify region exists
-            if not any(r.get("id") == region_id for r in regions):
-                _LOGGER.error("Selected region %s not valid", region_id)
-                return self.async_show_form(
-                    step_id="select_region",
-                    data_schema=vol.Schema(
-                        {vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
-                            selector.SelectSelectorConfig(options=[{"value": r["id"], "label": r.get("name", r["id"])} for r in regions], mode="dropdown")
-                        )}
-                    ),
-                    errors={"base": "invalid_region"},
-                )
-
-            # Save region and advance to species-for-region step
-            self.ocean_config[CONF_SPECIES_REGION] = region_id
-            return await self.async_step_select_species_for_region()
-
-        # Build region options
-        region_options = [{"value": r["id"], "label": r.get("name", r["id"])} for r in regions]
-
-        return self.async_show_form(
-            step_id="select_region",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=region_options, mode="dropdown")
-                )}
-            ),
-            description_placeholders={"info": "Choose the region you will fish in — species list will be filtered by this region."},
-        )
-
-    # ----
-    # Show species available for the previously selected region
-    # ----
-    async def async_step_select_species_for_region(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Show species filtered by the chosen region."""
-        if self.species_loader is None:
-            self.species_loader = SpeciesLoader(self.hass)
-            await self.species_loader.async_load_profiles()
-
-        region_id = self.ocean_config.get(CONF_SPECIES_REGION)
-        if not region_id:
-            _LOGGER.error("Region not selected before species-for-region step")
-            return self.async_abort(reason="region_missing")
-
-        if user_input is not None:
-            species_id = user_input.get(CONF_SPECIES_ID)
-            # verify species belongs to region
-            species_list = self.species_loader.get_species_by_region(region_id)
-            if not any(s.get("id") == species_id for s in species_list):
-                _LOGGER.error("Species %s not available in region %s", species_id, region_id)
-                return self.async_show_form(
-                    step_id="select_species_for_region",
-                    data_schema=vol.Schema(
-                        {vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                            selector.SelectSelectorConfig(options=[{"value": s["id"], "label": f'{s.get("emoji","🐟")} {s.get("common_name", s["id"])}'} for s in species_list], mode="dropdown")
-                        )}
-                    ),
-                    errors={"base": "invalid_species_for_region"},
-                )
-
-            self.ocean_config[CONF_SPECIES_ID] = species_id
-            return await self.async_step_ocean_habitat()
-
-        # Build species options for region
-        species_list = self.species_loader.get_species_by_region(region_id)
-        if not species_list:
-            _LOGGER.error("No species defined for region %s", region_id)
-            return self.async_abort(reason="no_species_for_region")
-
-        species_list.sort(key=lambda s: s.get("common_name", s.get("id")))
-        options = []
-        for s in species_list:
-            options.append({"value": s["id"], "label": f'{s.get("emoji","🐟")} {s.get("common_name", s["id"])}'})
-
-        return self.async_show_form(
-            step_id="select_species_for_region",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=options, mode="dropdown")
-                )}
-            ),
-            description_placeholders={"info": "Choose the specific species you want to target in this region."},
-        )
-
-    # ----
-    # Habitat selection (unchanged)
+    # Habitat selection
     # ----
     async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose habitat preset for ocean mode."""
@@ -352,7 +300,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Time periods (unchanged)
+    # Time periods
     # ----
     async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose time periods for ocean monitoring."""
@@ -405,7 +353,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Units selection (unchanged)
+    # Units selection (NEW) - must be chosen before thresholds are rendered
     # ----
     async def async_step_ocean_units(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Ask user which display units they want (metric/imperial)."""
@@ -446,7 +394,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Thresholds & finish (unchanged)
+    # Thresholds & finish
     # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
@@ -531,6 +479,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         return self._show_ocean_thresholds_form(errors={"base": "title_exists"})
 
                 # 2) Use the same title as unique_id and register it with HA.
+                # This preserves your existing title generation while enabling HA's duplicate protection.
                 unique_id = title.strip() if isinstance(title, str) else str(title)
                 try:
                     await self.async_set_unique_id(unique_id)
