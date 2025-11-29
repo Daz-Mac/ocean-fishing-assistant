@@ -10,7 +10,7 @@
       "preferred_wind_m_s": [],
       "max_wave_height_m": [],
       "preferred_tide_phase": ["high"],
-      "preferred_times": [],
+      "preferred_times": [{"start_hour": 5, "end_hour": 9}, {"start_hour": 17, "end_hour": 19}],
       "moon_preference": ["full"]
     }
   },
@@ -18,13 +18,21 @@
     "global": {
       "id": "global",
       "name": "Global"
-    }
+    },
+    "gibraltar_strait": {
+      "id": "gibraltar_strait",
+      "name": "Gibraltar Strait"
+    },
+    "south_africa_kzn": {
+      "id": "south_africa_kzn",
+      "name": "South Africa KZN"
+    }  
   },
   "species": {
     "sea_bass": {
-      "common_name": "Sea Bass | Gibraltar Strait",
+      "common_name": "Sea Bass",
       "emoji": "🐟",
-      "regions": ["global"],
+      "regions": ["Gibraltar Strait"],
       "preferred_months": [4, 5, 6, 7, 8, 9],
       "preferred_temp_c": [10, 20],
       "preferred_wind_m_s": [0, 6],
@@ -34,9 +42,9 @@
       "moon_preference": ["full"]
     },
     "mackerel": {
-      "common_name": "Mackerel | Gibraltar Strait",
+      "common_name": "Mackerel",
       "emoji": "🐠",
-      "regions": ["global"],
+      "regions": ["Gibraltar Strait"],
       "preferred_months": [5, 6, 7, 8, 9],
       "preferred_temp_c": [12, 22],
       "preferred_wind_m_s": [0, 8],
@@ -46,9 +54,9 @@
       "moon_preference": []
     },
     "shad": {
-      "common_name": "Shad / Elf | South Africa KZN",
+      "common_name": "Shad / Elf",
       "emoji": "🐟",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [5, 6, 7, 8],
       "preferred_temp_c": [16, 24],
       "preferred_wind_m_s": [0, 6],
@@ -58,9 +66,9 @@
       "moon_preference": []
     },
     "kob": {
-      "common_name": "Kob / Kabeljou | South Africa KZN",
+      "common_name": "Kob / Kabeljou",
       "emoji": "🪝",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [8, 9, 10, 11],
       "preferred_temp_c": [13, 16],
       "preferred_wind_m_s": [0, 6],
@@ -70,9 +78,9 @@
       "moon_preference": []
     },
     "natal_stumpnose": {
-      "common_name": "Natal Stumpnose | South Africa KZN",
+      "common_name": "Natal Stumpnose",
       "emoji": "🐠",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [18, 24],
       "preferred_wind_m_s": [0, 6],
@@ -82,9 +90,9 @@
       "moon_preference": []
     },
     "blacktail": {
-      "common_name": "Blacktail / Rock Bream | South Africa KZN",
+      "common_name": "Blacktail / Rock Bream",
       "emoji": "🪸",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [18, 24],
       "preferred_wind_m_s": [0, 8],
@@ -94,9 +102,9 @@
       "moon_preference": []
     },
     "galjoen": {
-      "common_name": "Galjoen | South Africa KZN",
+      "common_name": "Galjoen",
       "emoji": "🐡",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [16, 22],
       "preferred_wind_m_s": [0, 6],
@@ -106,9 +114,9 @@
       "moon_preference": []
     },
     "mahi_mahi": {
-      "common_name": "Mahi Mahi / Dorado | South Africa KZN",
+      "common_name": "Mahi Mahi / Dorado",
       "emoji": "🐬",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [11, 12, 1, 2, 3, 4, 5],
       "preferred_temp_c": [22, 29],
       "preferred_wind_m_s": [0, 10],
@@ -118,9 +126,9 @@
       "moon_preference": []
     },
     "yellowfin_tuna": {
-      "common_name": "Yellowfin Tuna | South Africa KZN",
+      "common_name": "Yellowfin Tuna",
       "emoji": "🐟",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [10, 11, 12, 1, 2, 3, 4],
       "preferred_temp_c": [20, 28],
       "preferred_wind_m_s": [0, 12],
@@ -130,9 +138,9 @@
       "moon_preference": []
     },
     "king_mackerel": {
-      "common_name": "King Mackerel | South Africa KZN",
+      "common_name": "King Mackerel",
       "emoji": "🐠",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [10, 11, 12, 1, 2, 3],
       "preferred_temp_c": [21, 27],
       "preferred_wind_m_s": [0, 10],
@@ -142,9 +150,9 @@
       "moon_preference": []
     },
     "wahoo": {
-      "common_name": "Wahoo / Bonito | South Africa KZN",
+      "common_name": "Wahoo / Bonito",
       "emoji": "⚡️",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [11, 12, 1, 2, 3, 4],
       "preferred_temp_c": [22, 29],
       "preferred_wind_m_s": [0, 12],
@@ -154,9 +162,9 @@
       "moon_preference": []
     },
     "white_musselcracker": {
-      "common_name": "White Musselcracker / Musselcracker Seabream | South Africa KZN",
+      "common_name": "White Musselcracker / Musselcracker Seabream",
       "emoji": "🦀",
-      "regions": ["global"],
+      "regions": ["South Africa KZN"],
       "preferred_months": [11, 12, 1, 2, 3],
       "preferred_temp_c": [18, 25],
       "preferred_wind_m_s": [0, 8],
