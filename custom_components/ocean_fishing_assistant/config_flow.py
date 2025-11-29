@@ -40,6 +40,15 @@ from .unit_helpers import convert_safety_display_to_metric, validate_and_normali
 
 _LOGGER = logging.getLogger(__name__)
 
+# Nav selector config reused across forms
+_NAV_SELECTOR = selector.SelectSelectorConfig(
+    options=[
+        {"value": "back", "label": "‹ Back"},
+        {"value": "next", "label": "Continue"},
+    ],
+    mode="list",
+)
+
 
 class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Ocean Fishing Assistant."""
@@ -55,7 +64,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Rendering the location form here (instead of forwarding) ensures the frontend
         records the first step in its history so the native Back button appears on
-        subsequent steps.
+        subsequent steps. The explicit "Back" control is not needed on the initial step.
         """
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -74,7 +83,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     existing_entries = self.hass.config_entries.async_entries(DOMAIN)
                     for e in existing_entries:
                         if e.title == submitted_title:
-                            _LOGGER.debug("Attempt to create entry with duplicate title '%s' rejected at location step", submitted_title)
+                            _LOGGER.debug(
+                                "Attempt to create entry with duplicate title '%s' rejected at location step",
+                                submitted_title,
+                            )
                             errors["base"] = "title_exists"
                             break
 
@@ -105,6 +117,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Configure ocean location (name and coordinates)."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            # nav_action support: go back to initial user step
+            if user_input.get("nav_action") == "back":
+                return await self.async_step_user(None)
+
             try:
                 lat = float(user_input[CONF_LATITUDE])
                 lon = float(user_input[CONF_LONGITUDE])
@@ -120,7 +136,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     existing_entries = self.hass.config_entries.async_entries(DOMAIN)
                     for e in existing_entries:
                         if e.title == submitted_title:
-                            _LOGGER.debug("Attempt to create entry with duplicate title '%s' rejected at location step", submitted_title)
+                            _LOGGER.debug(
+                                "Attempt to create entry with duplicate title '%s' rejected at location step",
+                                submitted_title,
+                            )
                             errors["base"] = "title_exists"
                             break
 
@@ -132,15 +151,16 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         default_lat = user_input.get(CONF_LATITUDE, "") if user_input else ""
         default_lon = user_input.get(CONF_LONGITUDE, "") if user_input else ""
 
+        schema = {
+            vol.Required(CONF_NAME, default=default_name): str,
+            vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
+            vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
         return self.async_show_form(
             step_id="ocean_location",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_NAME, default=default_name): str,
-                    vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
-                    vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
-                }
-            ),
+            data_schema=vol.Schema(schema),
             errors=errors,
         )
 
@@ -155,7 +175,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.species_loader.async_load_profiles()
 
         if user_input is not None:
-            species_id = user_input[CONF_SPECIES_ID]
+            # nav_action: back -> return to location step
+            if user_input.get("nav_action") == "back":
+                return await self.async_step_ocean_location(None)
+
+            species_id = user_input.get(CONF_SPECIES_ID)
 
             # If the user picked a general profile id, resolve its region(s)
             general_profile = self.species_loader.get_general_profile(species_id)
@@ -232,15 +256,16 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 label += f" ({season_info})"
             species_options.append({"value": species_id, "label": label})
 
+        schema = {
+            vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=species_options, mode="dropdown")
+            ),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
         return self.async_show_form(
             step_id="ocean_species",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=species_options, mode="dropdown")
-                    )
-                }
-            ),
+            data_schema=vol.Schema(schema),
             description_placeholders={"info": "Choose a general region profile for mixed species, or target a specific species."},
         )
 
@@ -250,6 +275,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose habitat preset for ocean mode."""
         if user_input is not None:
+            # nav_action: back -> go return to species step
+            if user_input.get("nav_action") == "back":
+                return await self.async_step_ocean_species(None)
             try:
                 raw_hp = user_input.get(CONF_HABITAT_PRESET, "")
                 habitat_preset = str(raw_hp).strip() if raw_hp is not None else ""
@@ -260,30 +288,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_ocean_time_periods()
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in async_step_ocean_habitat: %s", exc)
-                return self.async_show_form(
-                    step_id="ocean_habitat",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
-                                selector.SelectSelectorConfig(
-                                    options=[
-                                        {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
-                                        {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
-                                        {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                        {"value": "reef", "label": "🪸 Offshore Reef"},
-                                    ],
-                                    mode="list",
-                                )
-                            )
-                        }
-                    ),
-                    errors={"base": "unknown"},
-                )
-
-        return self.async_show_form(
-            step_id="ocean_habitat",
-            data_schema=vol.Schema(
-                {
+                schema = {
                     vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
@@ -294,10 +299,27 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             ],
                             mode="list",
                         )
-                    )
+                    ),
+                    vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
                 }
+                return self.async_show_form(step_id="ocean_habitat", data_schema=vol.Schema(schema), errors={"base": "unknown"})
+
+        schema = {
+            vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
+                        {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
+                        {"value": "harbour", "label": "⚓ Harbour/Pier"},
+                        {"value": "reef", "label": "🪸 Offshore Reef"},
+                    ],
+                    mode="list",
+                )
             ),
-        )
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
+        return self.async_show_form(step_id="ocean_habitat", data_schema=vol.Schema(schema))
 
     # ----
     # Time periods
@@ -305,27 +327,31 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose time periods for ocean monitoring."""
         if user_input is not None:
+            # nav_action: back -> go back to habitat step
+            if user_input.get("nav_action") == "back":
+                return await self.async_step_ocean_habitat(None)
+
             errors: dict[str, str] = {}
             tp = user_input.get(CONF_TIME_PERIODS)
             valid = {TIME_PERIODS_FULL_DAY, TIME_PERIODS_DAWN_DUSK}
             if tp is None or tp not in valid:
                 errors["base"] = "invalid_time_periods"
             if errors:
+                schema = {
+                    vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                            ],
+                            mode="list",
+                        )
+                    ),
+                    vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+                }
                 return self.async_show_form(
                     step_id="ocean_time_periods",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
-                                selector.SelectSelectorConfig(
-                                    options=[
-                                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
-                                    ],
-                                    mode="list",
-                                )
-                            )
-                        }
-                    ),
+                    data_schema=vol.Schema(schema),
                     errors=errors,
                     description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
                 )
@@ -334,21 +360,22 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Ask units next so that thresholds form can render correct unit labels.
             return await self.async_step_ocean_units()
 
+        schema = {
+            vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                    ],
+                    mode="list",
+                )
+            ),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
         return self.async_show_form(
             step_id="ocean_time_periods",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
-                            ],
-                            mode="list",
-                        )
-                    )
-                }
-            ),
+            data_schema=vol.Schema(schema),
             description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
         )
 
@@ -358,28 +385,13 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_units(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Ask user which display units they want (metric/imperial)."""
         if user_input is not None:
+            # nav_action: back -> go back to time_periods
+            if user_input.get("nav_action") == "back":
+                return await self.async_step_ocean_time_periods(None)
+
             units = user_input.get("units")
             if units not in ("metric", "imperial"):
-                return self.async_show_form(
-                    step_id="ocean_units",
-                    data_schema=vol.Schema({vol.Required("units", default="metric"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
-                            ],
-                            mode="dropdown",
-                        )
-                    )}),
-                    errors={"base": "invalid_units"},
-                )
-            self.ocean_config["units"] = units
-            return await self.async_step_ocean_thresholds()
-
-        return self.async_show_form(
-            step_id="ocean_units",
-            data_schema=vol.Schema(
-                {
+                schema = {
                     vol.Required("units", default="metric"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
@@ -388,9 +400,33 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             ],
                             mode="dropdown",
                         )
-                    )
+                    ),
+                    vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
                 }
+                return self.async_show_form(
+                    step_id="ocean_units",
+                    data_schema=vol.Schema(schema),
+                    errors={"base": "invalid_units"},
+                )
+            self.ocean_config["units"] = units
+            return await self.async_step_ocean_thresholds()
+
+        schema = {
+            vol.Required("units", default="metric"): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                        {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                    ],
+                    mode="dropdown",
+                )
             ),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
+        return self.async_show_form(
+            step_id="ocean_units",
+            data_schema=vol.Schema(schema),
         )
 
     # ----
@@ -399,6 +435,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
         if user_input is not None:
+            # nav_action: back -> go back to units step
+            if user_input.get("nav_action") == "back":
+                return await self.async_step_ocean_units(None)
+
             try:
                 # Ensure coordinates are present and valid
                 if CONF_LATITUDE not in self.ocean_config or CONF_LONGITUDE not in self.ocean_config:
@@ -488,7 +528,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.debug("Unique-id registration/abort check raised: %s", exc)
                     raise
 
-                _LOGGER.debug("Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id)
+                _LOGGER.debug(
+                    "Creating ocean config entry with data keys: %s (unique_id=%s)",
+                    list(final_config.keys()),
+                    unique_id,
+                )
 
                 return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
             except KeyError as ke:
@@ -501,7 +545,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self._show_ocean_thresholds_form()
 
     def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
-        habitat = HABITAT_PRESETS.get(self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT), HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}))
+        habitat = HABITAT_PRESETS.get(
+            self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT),
+            HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}),
+        )
         units = self.ocean_config.get("units", "metric")
         # map display units for selector labels
         wind_unit_label = "km/h" if units == "metric" else "mph"
@@ -509,40 +556,41 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         temp_unit_label = "°C" if units == "metric" else "°F"
         vis_unit_label = "km" if units == "metric" else "miles"
 
+        schema = {
+            vol.Required("max_wind_speed", default=habitat.get("max_wind_speed", 25)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+            ),
+            vol.Required("max_gust_speed", default=habitat.get("max_gust_speed", 40)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+            ),
+            vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+            ),
+            # NEW: maximum precipitation chance (percentage)
+            vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 80)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
+            ),
+            vol.Required("min_swell_period", default=3): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
+            ),
+            vol.Required("min_visibility", default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label)
+            ),
+            vol.Required("min_temperature", default=5): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=-30, max=50, step=1, unit_of_measurement=temp_unit_label)
+            ),
+            vol.Required("max_temperature", default=35): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=-10, max=122, step=1, unit_of_measurement=temp_unit_label)
+            ),
+            # RESTORE: expose_raw option at setup time
+            vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(),
+            # nav action
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
         return self.async_show_form(
             step_id="ocean_thresholds",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("max_wind_speed", default=habitat.get("max_wind_speed", 25)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_gust_speed", default=habitat.get("max_gust_speed", 40)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
-                    ),
-                    # NEW: maximum precipitation chance (percentage)
-                    vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 80)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
-                    ),
-                    vol.Required("min_swell_period", default=3): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
-                    ),
-                    vol.Required("min_visibility", default=1): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label)
-                    ),
-                    vol.Required("min_temperature", default=5): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=-30, max=50, step=1, unit_of_measurement=temp_unit_label)
-                    ),
-                    vol.Required("max_temperature", default=35): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=-10, max=122, step=1, unit_of_measurement=temp_unit_label)
-                    ),
-                    # RESTORE: expose_raw option at setup time
-                    vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(
-                    ),                    
-                }
-            ),
+            data_schema=vol.Schema(schema),
             errors=errors or {},
             description_placeholders={"info": "Set safe fishing limits based on your habitat and comfort level."},
         )
@@ -562,11 +610,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        # In options, init is the first step; no back button here.
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
         return await self.async_step_ocean_options()
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        # nav_action support: back -> return to init step
+        if user_input is not None and user_input.get("nav_action") == "back":
+            return await self.async_step_init(None)
+
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
@@ -577,41 +630,39 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
 
-        return self.async_show_form(
-            step_id="ocean_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
-                            ],
-                            mode="dropdown",
-                        )
-                    ),
-                    vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_gust_speed", default=thresholds.get("max_gust_speed", 40)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
-                    ),
-                    # NEW: options flow exposure for precipitation chance
-                    vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 80)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
-                    ),
-                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 3)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
-                    ),
-                    vol.Required("min_visibility", default=thresholds.get("min_visibility", 1)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
-                    ),
-                    # RESTORE: expose_raw option in Options flow
-                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(
-                    ),                    
-                }
+        schema = {
+            vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                    ],
+                    mode="dropdown",
+                )
             ),
-        )
+            vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+            ),
+            vol.Required("max_gust_speed", default=thresholds.get("max_gust_speed", 40)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+            ),
+            vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+            ),
+            # NEW: options flow exposure for precipitation chance
+            vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 80)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
+            ),
+            vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 3)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
+            ),
+            vol.Required("min_visibility", default=thresholds.get("min_visibility", 1)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
+            ),
+            # RESTORE: expose_raw option in Options flow
+            vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
+            # nav action (allow returning to init)
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+        }
+
+        return self.async_show_form(step_id="ocean_options", data_schema=vol.Schema(schema))
