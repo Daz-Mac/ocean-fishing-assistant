@@ -32,7 +32,7 @@
     "sea_bass": {
       "common_name": "Sea Bass",
       "emoji": "🐟",
-      "regions": ["Gibraltar Strait"],
+      "regions": ["gibraltar_strait"],
       "preferred_months": [4, 5, 6, 7, 8, 9],
       "preferred_temp_c": [10, 20],
       "preferred_wind_m_s": [0, 6],
@@ -44,7 +44,7 @@
     "mackerel": {
       "common_name": "Mackerel",
       "emoji": "🐠",
-      "regions": ["Gibraltar Strait"],
+      "regions": ["gibraltar_strait"],
       "preferred_months": [5, 6, 7, 8, 9],
       "preferred_temp_c": [12, 22],
       "preferred_wind_m_s": [0, 8],
@@ -56,7 +56,7 @@
     "shad": {
       "common_name": "Shad / Elf",
       "emoji": "🐟",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [5, 6, 7, 8],
       "preferred_temp_c": [16, 24],
       "preferred_wind_m_s": [0, 6],
@@ -68,7 +68,7 @@
     "kob": {
       "common_name": "Kob / Kabeljou",
       "emoji": "🪝",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [8, 9, 10, 11],
       "preferred_temp_c": [13, 16],
       "preferred_wind_m_s": [0, 6],
@@ -80,7 +80,7 @@
     "natal_stumpnose": {
       "common_name": "Natal Stumpnose",
       "emoji": "🐠",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [18, 24],
       "preferred_wind_m_s": [0, 6],
@@ -92,7 +92,7 @@
     "blacktail": {
       "common_name": "Blacktail / Rock Bream",
       "emoji": "🪸",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [18, 24],
       "preferred_wind_m_s": [0, 8],
@@ -104,7 +104,7 @@
     "galjoen": {
       "common_name": "Galjoen",
       "emoji": "🐡",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
       "preferred_temp_c": [16, 22],
       "preferred_wind_m_s": [0, 6],
@@ -116,7 +116,7 @@
     "mahi_mahi": {
       "common_name": "Mahi Mahi / Dorado",
       "emoji": "🐬",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [11, 12, 1, 2, 3, 4, 5],
       "preferred_temp_c": [22, 29],
       "preferred_wind_m_s": [0, 10],
@@ -128,7 +128,7 @@
     "yellowfin_tuna": {
       "common_name": "Yellowfin Tuna",
       "emoji": "🐟",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [10, 11, 12, 1, 2, 3, 4],
       "preferred_temp_c": [20, 28],
       "preferred_wind_m_s": [0, 12],
@@ -140,7 +140,7 @@
     "king_mackerel": {
       "common_name": "King Mackerel",
       "emoji": "🐠",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [10, 11, 12, 1, 2, 3],
       "preferred_temp_c": [21, 27],
       "preferred_wind_m_s": [0, 10],
@@ -152,7 +152,7 @@
     "wahoo": {
       "common_name": "Wahoo / Bonito",
       "emoji": "⚡️",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [11, 12, 1, 2, 3, 4],
       "preferred_temp_c": [22, 29],
       "preferred_wind_m_s": [0, 12],
@@ -164,7 +164,7 @@
     "white_musselcracker": {
       "common_name": "White Musselcracker / Musselcracker Seabream",
       "emoji": "🦀",
-      "regions": ["South Africa KZN"],
+      "regions": ["south_africa_kzn"],
       "preferred_months": [11, 12, 1, 2, 3],
       "preferred_temp_c": [18, 25],
       "preferred_wind_m_s": [0, 8],
