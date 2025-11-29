@@ -155,7 +155,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_NAME, default=default_name): str,
             vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
             vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -260,7 +260,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=species_options, mode="dropdown")
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -300,7 +300,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode="list",
                         )
                     ),
-                    vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+                    vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
                 }
                 return self.async_show_form(step_id="ocean_habitat", data_schema=vol.Schema(schema), errors={"base": "unknown"})
 
@@ -316,7 +316,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode="list",
                 )
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(step_id="ocean_habitat", data_schema=vol.Schema(schema))
@@ -347,7 +347,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode="list",
                         )
                     ),
-                    vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+                    vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
                 }
                 return self.async_show_form(
                     step_id="ocean_time_periods",
@@ -370,7 +370,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode="list",
                 )
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -401,7 +401,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode="dropdown",
                         )
                     ),
-                    vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+                    vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
                 }
                 return self.async_show_form(
                     step_id="ocean_units",
@@ -421,7 +421,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode="dropdown",
                 )
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -585,7 +585,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # RESTORE: expose_raw option at setup time
             vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(),
             # nav action
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -662,7 +662,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # RESTORE: expose_raw option in Options flow
             vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
             # nav action (allow returning to init)
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(selector_config=_NAV_SELECTOR),
+            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(step_id="ocean_options", data_schema=vol.Schema(schema))
