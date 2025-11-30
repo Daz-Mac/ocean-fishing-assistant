@@ -28,6 +28,7 @@ from .const import (
     TIME_PERIODS_DAWN_DUSK,
     DEFAULT_NAME,
     HABITAT_ROCKY_POINT,
+    DEFAULT_UPDATE_INTERVAL,
 )
 
 from .species_loader import SpeciesLoader
@@ -50,12 +51,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_ocean_location(user_input)
 
     # ----
-    # Ocean location
+    # Ocean location (now includes Normal / Advanced mode selector as first field)
     # ----
     async def async_step_ocean_location(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Configure ocean location (name and coordinates)."""
+        """Configure ocean location (mode, name and coordinates)."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            # Save the selected setup mode first (normal/advanced)
+            setup_mode = str(user_input.get("setup_mode", "normal"))
+            if setup_mode not in ("normal", "advanced"):
+                errors["base"] = "invalid_setup_mode"
+
+            # Validate coordinates and title
             try:
                 lat = float(user_input[CONF_LATITUDE])
                 lon = float(user_input[CONF_LONGITUDE])
@@ -76,23 +83,104 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             break
 
             if not errors:
+                # Store the basic values
                 self.ocean_config.update(user_input)
+                # ensure setup_mode stored explicitly
+                self.ocean_config["setup_mode"] = setup_mode
+                # If advanced mode requested, show advanced config step first
+                if setup_mode == "advanced":
+                    return await self.async_step_advanced_config()
+                # Otherwise continue normal flow
                 return await self.async_step_ocean_species()
 
         default_name = user_input.get(CONF_NAME, "") if user_input else ""
         default_lat = user_input.get(CONF_LATITUDE, "") if user_input else ""
         default_lon = user_input.get(CONF_LONGITUDE, "") if user_input else ""
+        default_mode = user_input.get("setup_mode", "normal") if user_input else "normal"
 
         return self.async_show_form(
             step_id="ocean_location",
             data_schema=vol.Schema(
                 {
+                    vol.Required("setup_mode", default=default_mode): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "normal", "label": "Normal Mode"},
+                                {"value": "advanced", "label": "Advanced Mode"},
+                            ],
+                            mode="list",
+                        )
+                    ),
                     vol.Required(CONF_NAME, default=default_name): str,
                     vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
                     vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
                 }
             ),
             errors=errors,
+        )
+
+    # ----
+    # Advanced configuration step (only shown when user selected Advanced Mode)
+    # ----
+    async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Advanced options: update_interval, persist_last_fetch, persist_ttl."""
+        # Defaults: use current integration/coordinator defaults
+        default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
+        default_persist_last_fetch = self.ocean_config.get("persist_last_fetch", False)
+        default_persist_ttl = self.ocean_config.get("persist_ttl", 3600)
+
+        if user_input is not None:
+            errors: dict[str, str] = {}
+            try:
+                ui_update_interval = int(user_input.get("update_interval", default_update_interval))
+                if ui_update_interval < 30:
+                    errors["base"] = "update_interval_too_small"
+                ui_persist_last_fetch = bool(user_input.get("persist_last_fetch", default_persist_last_fetch))
+                ui_persist_ttl = int(user_input.get("persist_ttl", default_persist_ttl))
+                if ui_persist_ttl < 60:
+                    errors["base"] = "persist_ttl_too_small"
+            except Exception:
+                errors["base"] = "invalid_advanced_values"
+
+            if errors:
+                return self.async_show_form(
+                    step_id="advanced_config",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required("update_interval", default=default_update_interval): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                            ),
+                            vol.Required("persist_last_fetch", default=default_persist_last_fetch): selector.BooleanSelector(),
+                            vol.Required("persist_ttl", default=default_persist_ttl): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=60, max=86400, step=60, unit_of_measurement="s")
+                            ),
+                        }
+                    ),
+                    errors=errors,
+                    description_placeholders={"info": "Configure advanced options: how often to fetch and whether to persist the last successful fetch."},
+                )
+
+            # Save advanced options and continue flow
+            self.ocean_config["update_interval"] = ui_update_interval
+            self.ocean_config["persist_last_fetch"] = ui_persist_last_fetch
+            self.ocean_config["persist_ttl"] = ui_persist_ttl
+
+            return await self.async_step_ocean_species()
+
+        return self.async_show_form(
+            step_id="advanced_config",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("update_interval", default=default_update_interval): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                    ),
+                    vol.Required("persist_last_fetch", default=default_persist_last_fetch): selector.BooleanSelector(),
+                    vol.Required("persist_ttl", default=default_persist_ttl): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=60, max=86400, step=60, unit_of_measurement="s")
+                    ),
+                }
+            ),
+            description_placeholders={"info": "Configure advanced options: how often to fetch and whether to persist the last successful fetch."},
         )
 
     # ----
@@ -441,7 +529,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Thresholds & finish (unchanged)
+    # Thresholds & finish (unchanged except storing advanced keys if present)
     # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
@@ -509,6 +597,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "wind_unit": wind_unit,
                     "safety_limits": safety_limits,
                 }
+
+                # If advanced options were provided earlier, include them in final_config (otherwise async_setup_entry will use defaults).
+                if "update_interval" in self.ocean_config:
+                    final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
+                if "persist_last_fetch" in self.ocean_config:
+                    final_config["persist_last_fetch"] = bool(self.ocean_config.get("persist_last_fetch"))
+                if "persist_ttl" in self.ocean_config:
+                    final_config["persist_ttl"] = int(self.ocean_config.get("persist_ttl"))
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
