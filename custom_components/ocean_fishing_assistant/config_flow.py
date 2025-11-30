@@ -40,15 +40,6 @@ from .unit_helpers import convert_safety_display_to_metric, validate_and_normali
 
 _LOGGER = logging.getLogger(__name__)
 
-# Nav selector config reused across forms
-_NAV_SELECTOR = selector.SelectSelectorConfig(
-    options=[
-        {"value": "back", "label": "‹ Back"},
-        {"value": "next", "label": "Continue"},
-    ],
-    mode="list",
-)
-
 
 class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Ocean Fishing Assistant."""
@@ -64,7 +55,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Rendering the location form here (instead of forwarding) ensures the frontend
         records the first step in its history so the native Back button appears on
-        subsequent steps. The explicit "Back" control is not needed on the initial step.
+        subsequent steps.
         """
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -117,10 +108,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Configure ocean location (name and coordinates)."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            # nav_action support: go back to initial user step
-            if user_input.get("nav_action") == "back":
-                return await self.async_step_user(None)
-
             try:
                 lat = float(user_input[CONF_LATITUDE])
                 lon = float(user_input[CONF_LONGITUDE])
@@ -155,7 +142,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_NAME, default=default_name): str,
             vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
             vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -175,10 +161,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.species_loader.async_load_profiles()
 
         if user_input is not None:
-            # nav_action: back -> return to location step
-            if user_input.get("nav_action") == "back":
-                return await self.async_step_ocean_location(None)
-
             species_id = user_input.get(CONF_SPECIES_ID)
 
             # If the user picked a general profile id, resolve its region(s)
@@ -260,7 +242,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=species_options, mode="dropdown")
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -275,9 +256,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose habitat preset for ocean mode."""
         if user_input is not None:
-            # nav_action: back -> go return to species step
-            if user_input.get("nav_action") == "back":
-                return await self.async_step_ocean_species(None)
             try:
                 raw_hp = user_input.get(CONF_HABITAT_PRESET, "")
                 habitat_preset = str(raw_hp).strip() if raw_hp is not None else ""
@@ -300,7 +278,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode="list",
                         )
                     ),
-                    vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
                 }
                 return self.async_show_form(step_id="ocean_habitat", data_schema=vol.Schema(schema), errors={"base": "unknown"})
 
@@ -316,7 +293,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode="list",
                 )
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(step_id="ocean_habitat", data_schema=vol.Schema(schema))
@@ -327,10 +303,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose time periods for ocean monitoring."""
         if user_input is not None:
-            # nav_action: back -> go back to habitat step
-            if user_input.get("nav_action") == "back":
-                return await self.async_step_ocean_habitat(None)
-
             errors: dict[str, str] = {}
             tp = user_input.get(CONF_TIME_PERIODS)
             valid = {TIME_PERIODS_FULL_DAY, TIME_PERIODS_DAWN_DUSK}
@@ -347,7 +319,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode="list",
                         )
                     ),
-                    vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
                 }
                 return self.async_show_form(
                     step_id="ocean_time_periods",
@@ -370,7 +341,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode="list",
                 )
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -385,10 +355,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_units(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Ask user which display units they want (metric/imperial)."""
         if user_input is not None:
-            # nav_action: back -> go back to time_periods
-            if user_input.get("nav_action") == "back":
-                return await self.async_step_ocean_time_periods(None)
-
             units = user_input.get("units")
             if units not in ("metric", "imperial"):
                 schema = {
@@ -401,7 +367,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode="dropdown",
                         )
                     ),
-                    vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
                 }
                 return self.async_show_form(
                     step_id="ocean_units",
@@ -421,7 +386,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode="dropdown",
                 )
             ),
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -435,10 +399,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
         if user_input is not None:
-            # nav_action: back -> go back to units step
-            if user_input.get("nav_action") == "back":
-                return await self.async_step_ocean_units(None)
-
             try:
                 # Ensure coordinates are present and valid
                 if CONF_LATITUDE not in self.ocean_config or CONF_LONGITUDE not in self.ocean_config:
@@ -584,8 +544,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             # RESTORE: expose_raw option at setup time
             vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(),
-            # nav action
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(
@@ -616,10 +574,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_ocean_options()
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        # nav_action support: back -> return to init step
-        if user_input is not None and user_input.get("nav_action") == "back":
-            return await self.async_step_init(None)
-
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
@@ -661,8 +615,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             ),
             # RESTORE: expose_raw option in Options flow
             vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
-            # nav action (allow returning to init)
-            vol.Optional("nav_action", default="next"): selector.SelectSelector(_NAV_SELECTOR),
         }
 
         return self.async_show_form(step_id="ocean_options", data_schema=vol.Schema(schema))
