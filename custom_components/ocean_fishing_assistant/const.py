@@ -32,7 +32,7 @@ DEFAULT_SAFETY_LIMITS = {
 
 # Coordinator shared in-memory fetch cache TTL (seconds)
 # This is used by OFACoordinator to decide when to reuse a cached Open-Meteo payload keyed per-location.
-FETCH_CACHE_TTL = 900  # seconds (default 15 minutes)
+FETCH_CACHE_TTL = DEFAULT_UPDATE_INTERVAL  # seconds (align with DEFAULT_UPDATE_INTERVAL)
 
 # Separate defaults for the three TTLs (Option B)
 TIDE_PROXY_TTL_DEFAULT = 30 * 60       # seconds (default 30 minutes)
