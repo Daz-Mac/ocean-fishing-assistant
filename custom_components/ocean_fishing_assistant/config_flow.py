@@ -106,7 +106,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": "normal", "label": "Normal Mode"},
-                                {"value": "advanced", "label": "Advanced Mode"},
+                                {"value": "advanced", "label": "Advanced Mode (show persistence & interval options)"},
                             ],
                             mode="list",
                         )
@@ -123,11 +123,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Advanced configuration step (only shown when user selected Advanced Mode)
     # ----
     async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced options: update_interval, persist_last_fetch, persist_ttl."""
-        # Defaults: use current integration/coordinator defaults
+        """Advanced options: update_interval, persist_last_fetch, persist_ttl, expose_raw."""
+        # Defaults: use current integration/coordinator defaults or previously chosen advanced values
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
         default_persist_last_fetch = self.ocean_config.get("persist_last_fetch", False)
         default_persist_ttl = self.ocean_config.get("persist_ttl", 3600)
+        default_expose_raw = self.ocean_config.get("expose_raw", False)
 
         if user_input is not None:
             errors: dict[str, str] = {}
@@ -139,6 +140,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ui_persist_ttl = int(user_input.get("persist_ttl", default_persist_ttl))
                 if ui_persist_ttl < 60:
                     errors["base"] = "persist_ttl_too_small"
+                ui_expose_raw = bool(user_input.get("expose_raw", default_expose_raw))
             except Exception:
                 errors["base"] = "invalid_advanced_values"
 
@@ -154,6 +156,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("persist_ttl", default=default_persist_ttl): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=60, max=86400, step=60, unit_of_measurement="s")
                             ),
+                            vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
                         }
                     ),
                     errors=errors,
@@ -164,6 +167,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.ocean_config["update_interval"] = ui_update_interval
             self.ocean_config["persist_last_fetch"] = ui_persist_last_fetch
             self.ocean_config["persist_ttl"] = ui_persist_ttl
+            self.ocean_config["expose_raw"] = ui_expose_raw
 
             return await self.async_step_ocean_species()
 
@@ -178,6 +182,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("persist_ttl", default=default_persist_ttl): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=60, max=86400, step=60, unit_of_measurement="s")
                     ),
+                    vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
                 }
             ),
             description_placeholders={"info": "Configure advanced options: how often to fetch and whether to persist the last successful fetch."},
@@ -529,7 +534,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Thresholds & finish (unchanged except storing advanced keys if present)
+    # Thresholds & finish (unchanged except expose_raw moved to Advanced Mode)
     # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
@@ -589,8 +594,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "min_swell_period": user_input.get("min_swell_period"),
                         # NEW: include precip chance in stored thresholds for options/UI
                         "max_precip_chance": user_input.get("max_precip_chance"),
-                        # Preserve user selection here for visibility; async_setup_entry will populate entry.options
-                        "expose_raw": bool(user_input.get("expose_raw", False)),
+                        # Preserve expose_raw from advanced config (moved there)
+                        "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
                     },
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
@@ -678,9 +683,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_temperature", default=35): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-10, max=122, step=1, unit_of_measurement=temp_unit_label)
                     ),
-                    # RESTORE: expose_raw option at setup time
-                    vol.Required("expose_raw", default=habitat.get("expose_raw", False)): selector.BooleanSelector(
-                    ),                    
                 }
             ),
             errors=errors or {},
@@ -749,9 +751,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Required("min_visibility", default=thresholds.get("min_visibility", 1)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                     ),
-                    # RESTORE: expose_raw option in Options flow
-                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(
-                    ),                    
+                    # RESTORE: expose_raw option in Options flow (left here so users can toggle later)
+                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
                 }
             ),
         )
