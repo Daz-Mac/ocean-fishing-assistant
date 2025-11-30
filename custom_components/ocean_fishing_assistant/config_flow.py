@@ -23,9 +23,6 @@ from .const import (
     CONF_TIMEZONE,
     CONF_ELEVATION,
     CONF_AUTO_APPLY_THRESHOLDS,
-    CONF_TIDE_MODE,
-    CONF_MARINE_ENABLED,
-    TIDE_MODE_PROXY,
     HABITAT_PRESETS,
     TIME_PERIODS_FULL_DAY,
     TIME_PERIODS_DAWN_DUSK,
@@ -493,8 +490,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_HABITAT_PRESET: habitat_preset,
                     CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
                     CONF_AUTO_APPLY_THRESHOLDS: False,
-                    CONF_TIDE_MODE: TIDE_MODE_PROXY,
-                    CONF_MARINE_ENABLED: True,
                     # store both user thresholds (for UI/options) and canonical safety_limits (for runtime)
                     CONF_THRESHOLDS: {
                         "max_wind_speed": user_input["max_wind_speed"],

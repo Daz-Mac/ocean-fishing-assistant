@@ -48,12 +48,6 @@ CONF_THRESHOLDS = "thresholds"
 CONF_TIMEZONE = "timezone"
 CONF_ELEVATION = "elevation"
 CONF_AUTO_APPLY_THRESHOLDS = "auto_apply_thresholds"
-CONF_TIDE_MODE = "tide_mode"
-CONF_MARINE_ENABLED = "marine_enabled"
-
-# Tide mode constants
-TIDE_MODE_PROXY = "proxy"
-TIDE_MODE_SENSOR = "sensor"
 
 # Time period options
 TIME_PERIODS_FULL_DAY = "full_day"
