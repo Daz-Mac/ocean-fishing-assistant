@@ -30,7 +30,13 @@ DEFAULT_SAFETY_LIMITS = {
     "max_precip_chance_pct": None,
 }
 
-FETCH_CACHE_TTL = 600  # seconds for shared in-memory Open-Meteo fetch cache
+# Coordinator shared in-memory fetch cache TTL (seconds)
+# This is used by OFACoordinator to decide when to reuse a cached Open-Meteo payload keyed per-location.
+FETCH_CACHE_TTL = 900  # seconds (default 15 minutes)
+
+# Separate defaults for the three TTLs (Option B)
+TIDE_PROXY_TTL_DEFAULT = 30 * 60       # seconds (default 30 minutes)
+WEATHER_FETCHER_CACHE_TTL_DEFAULT = 30 * 60  # seconds (default 30 minutes)
 
 # ----- Config keys used by the flow and entry options -----
 CONF_NAME = "name"
@@ -44,6 +50,11 @@ CONF_THRESHOLDS = "thresholds"
 CONF_TIMEZONE = "timezone"
 CONF_ELEVATION = "elevation"
 CONF_AUTO_APPLY_THRESHOLDS = "auto_apply_thresholds"
+
+# TTL config keys (Option B)
+CONF_FETCH_CACHE_TTL = "fetch_cache_ttl"       # coordinator shared fetch cache TTL (seconds)
+CONF_TIDE_TTL = "tide_ttl"                     # tide proxy ttl (seconds)
+CONF_WEATHER_CACHE_TTL = "weather_cache_ttl"   # weather_fetcher internal cache duration (seconds)
 
 # Time period options
 TIME_PERIODS_FULL_DAY = "full_day"

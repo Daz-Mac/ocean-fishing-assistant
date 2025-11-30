@@ -17,7 +17,7 @@ import aiohttp
 from homeassistant.util import dt as dt_util
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import OM_BASE, OM_MARINE_BASE
+from .const import OM_BASE, OM_MARINE_BASE, WEATHER_FETCHER_CACHE_TTL_DEFAULT
 
 from . import unit_helpers
 
@@ -73,9 +73,10 @@ class WeatherFetcher:
     Strict fetcher for Open-Meteo REST endpoints.
 
     speed_unit: required output unit for wind values, must be one of "km/h", "mph", "m/s".
+    cache_ttl_seconds: controls in-memory cache duration for get_weather_data()/get_forecast() (seconds).
     """
 
-    def __init__(self, hass, latitude: float, longitude: float, speed_unit: str) -> None:
+    def __init__(self, hass, latitude: float, longitude: float, speed_unit: str, cache_ttl_seconds: Optional[int] = None) -> None:
         self.hass = hass
         self.latitude = round(float(latitude), 6)
         self.longitude = round(float(longitude), 6)
@@ -93,7 +94,14 @@ class WeatherFetcher:
             self.speed_unit = "m/s"
 
         self._cache_key = f"{self.latitude}_{self.longitude}_om"
-        self._cache_duration = timedelta(minutes=30)
+        # Allow external override via constructor; otherwise use integration default
+        if cache_ttl_seconds is None:
+            self._cache_duration = timedelta(seconds=WEATHER_FETCHER_CACHE_TTL_DEFAULT)
+        else:
+            try:
+                self._cache_duration = timedelta(seconds=int(cache_ttl_seconds))
+            except Exception:
+                self._cache_duration = timedelta(seconds=WEATHER_FETCHER_CACHE_TTL_DEFAULT)
 
     # -----------------------
     # Convenience async fetch wrapper used by coordinator
@@ -565,11 +573,11 @@ class WeatherFetcher:
             if gust_m_s is not None:
                 entry["wind_gust"] = self._m_s_to_output(gust_m_s)
             if item.get("cloud_cover") is not None:
-                entry["cloud_cover"] = _to_int_strict(item.get("cloud_cover"), "cloud_cover")
+                entry["cloud_cover"] = _to_int_strict(item.get("cloud_cover") or item.get("clouds") or item.get("cloudcover"), "cloud_cover")
             if item.get("precipitation_probability") is not None:
-                entry["precipitation_probability"] = _to_int_strict(item.get("precipitation_probability"), "precipitation_probability")
+                entry["precipitation_probability"] = _to_int_strict(item.get("precipitation_probability") or item.get("pop") or item.get("precipitation"), "precipitation_probability")
             if item.get("pressure") is not None:
-                entry["pressure"] = _to_float_strict(item.get("pressure"), "pressure")
+                entry["pressure"] = _to_float_strict(item.get("pressure") or item.get("pressure_msl"), "pressure")
             final[date_key] = entry
             if len(final) >= days:
                 break
@@ -600,6 +608,8 @@ class WeatherFetcher:
                     continue
             if t.tzinfo is None:
                 t = t.replace(tzinfo=timezone.utc)
+            if t is None:
+                continue
             date_key = t.date().isoformat()
 
             # require temperature and wind for strict aggregation

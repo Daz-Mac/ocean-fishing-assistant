@@ -10,7 +10,21 @@ import logging
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.helpers import aiohttp_client
 
-from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL, DEFAULT_SAFETY_LIMITS, CONF_SPECIES_ID, CONF_SPECIES_REGION, CONF_THRESHOLDS, CONF_TIME_PERIODS
+from .const import (
+    DOMAIN,
+    DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_SAFETY_LIMITS,
+    CONF_SPECIES_ID,
+    CONF_SPECIES_REGION,
+    CONF_THRESHOLDS,
+    CONF_TIME_PERIODS,
+    CONF_FETCH_CACHE_TTL,
+    CONF_TIDE_TTL,
+    CONF_WEATHER_CACHE_TTL,
+    FETCH_CACHE_TTL,
+    TIDE_PROXY_TTL_DEFAULT,
+    WEATHER_FETCHER_CACHE_TTL_DEFAULT,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,9 +131,14 @@ async def async_setup_entry(hass, entry):
             _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
             return False
 
+    # Read TTL overrides from entry.data (Option B). Fall back to sensible defaults in const.py
+    fetch_cache_ttl = int(entry.data.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL))
+    tide_ttl = int(entry.data.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
+    weather_cache_ttl = int(entry.data.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
+
     # Create WeatherFetcher and coordinator using values from entry.data
-    fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit)
-    _LOGGER.debug("WeatherFetcher instantiated for entry %s", entry.entry_id)
+    fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit, cache_ttl_seconds=weather_cache_ttl)
+    _LOGGER.debug("WeatherFetcher instantiated for entry %s (cache_ttl=%s)", entry.entry_id, weather_cache_ttl)
 
     time_periods_mode = entry.data.get(CONF_TIME_PERIODS, "full_day")
 
@@ -135,8 +154,10 @@ async def async_setup_entry(hass, entry):
         units=units,
         safety_limits=safety_limits,
         time_periods_mode=time_periods_mode,
+        fetch_cache_ttl=fetch_cache_ttl,
+        tide_ttl=tide_ttl,
     )
-    _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
+    _LOGGER.debug("OFACoordinator created for entry %s (fetch_cache_ttl=%s tide_ttl=%s)", entry.entry_id, fetch_cache_ttl, tide_ttl)
 
     # Request a fresh update (will run after any restored data is available)
     _LOGGER.debug("Requesting initial data refresh for entry %s", entry.entry_id)

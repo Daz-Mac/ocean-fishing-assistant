@@ -32,11 +32,16 @@ class OFACoordinator(DataUpdateCoordinator):
         units: str = "metric",
         safety_limits: Optional[dict] = None,
         time_periods_mode: str = "full_day",
+        *,
+        fetch_cache_ttl: Optional[int] = None,
+        tide_ttl: Optional[int] = None,
     ):
         """
         - fetcher must be constructed with the user-selected wind unit (strict).
         - coordinator validates fetcher.speed_unit matches options.
         - time_periods_mode: one of the CONF_TIME_PERIODS values (full_day/dawn_dusk)
+        - fetch_cache_ttl: per-entry override for the shared in-memory fetch cache TTL (seconds)
+        - tide_ttl: TTL (seconds) to pass into TideProxy instance
         """
         super().__init__(
             hass,
@@ -70,8 +75,15 @@ class OFACoordinator(DataUpdateCoordinator):
             # Fail fast in strict mode — do not allow coordinator to start with ambiguous thresholds
             raise
 
-        # NOTE: on-disk persistence removed — no self._store, no ttl
-        self._tide_proxy = TideProxy(hass, self.lat, self.lon)
+        # Instance-level TTLs (allow override from entry.data)
+        self._fetch_cache_ttl = int(fetch_cache_ttl) if fetch_cache_ttl is not None else int(FETCH_CACHE_TTL)
+
+        # create TideProxy using provided tide_ttl (falls back to TideProxy default if None)
+        if tide_ttl is not None:
+            self._tide_proxy = TideProxy(hass, self.lat, self.lon, ttl=int(tide_ttl))
+        else:
+            self._tide_proxy = TideProxy(hass, self.lat, self.lon)
+
         self.time_periods_mode = time_periods_mode or "full_day"
 
         # Validate fetcher speed unit matches the configured units selection (strict enforcement)
@@ -96,7 +108,7 @@ class OFACoordinator(DataUpdateCoordinator):
             cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
             cached = cache_dict.get(cache_key)
             raw = None
-            if cached and (time.time() - float(cached.get("fetched_at", 0))) < FETCH_CACHE_TTL:
+            if cached and (time.time() - float(cached.get("fetched_at", 0))) < self._fetch_cache_ttl:
                 raw = cached.get("data")
             else:
                 # fetch raw Open-Meteo payload strictly (may raise)

@@ -29,6 +29,12 @@ from .const import (
     DEFAULT_NAME,
     HABITAT_ROCKY_POINT,
     DEFAULT_UPDATE_INTERVAL,
+    FETCH_CACHE_TTL,
+    CONF_FETCH_CACHE_TTL,
+    CONF_TIDE_TTL,
+    CONF_WEATHER_CACHE_TTL,
+    TIDE_PROXY_TTL_DEFAULT,
+    WEATHER_FETCHER_CACHE_TTL_DEFAULT,
 )
 
 from .species_loader import SpeciesLoader
@@ -127,6 +133,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Defaults: use current integration/coordinator defaults or previously chosen advanced values
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
         default_expose_raw = self.ocean_config.get("expose_raw", False)
+        default_fetch_cache_ttl = self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL)
+        default_tide_ttl = self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
+        default_weather_cache_ttl = self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
 
         if user_input is not None:
             errors: dict[str, str] = {}
@@ -135,6 +144,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if ui_update_interval < 30:
                     errors["base"] = "update_interval_too_small"
                 ui_expose_raw = bool(user_input.get("expose_raw", default_expose_raw))
+                ui_fetch_ttl = int(user_input.get(CONF_FETCH_CACHE_TTL, default_fetch_cache_ttl))
+                ui_tide_ttl = int(user_input.get(CONF_TIDE_TTL, default_tide_ttl))
+                ui_weather_ttl = int(user_input.get(CONF_WEATHER_CACHE_TTL, default_weather_cache_ttl))
+                # sanity checks
+                if ui_fetch_ttl < 30 or ui_tide_ttl < 10 or ui_weather_ttl < 30:
+                    errors["base"] = "ttl_too_small"
             except Exception:
                 errors["base"] = "invalid_advanced_values"
 
@@ -147,15 +162,27 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                             ),
                             vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
+                            vol.Required(CONF_FETCH_CACHE_TTL, default=default_fetch_cache_ttl): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                            ),
+                            vol.Required(CONF_TIDE_TTL, default=default_tide_ttl): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=10, max=86400, step=10, unit_of_measurement="s")
+                            ),
+                            vol.Required(CONF_WEATHER_CACHE_TTL, default=default_weather_cache_ttl): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                            ),
                         }
                     ),
                     errors=errors,
-                    description_placeholders={"info": "Configure advanced options: how often to fetch."},
+                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
                 )
 
             # Save advanced options and continue flow
             self.ocean_config["update_interval"] = ui_update_interval
             self.ocean_config["expose_raw"] = ui_expose_raw
+            self.ocean_config[CONF_FETCH_CACHE_TTL] = ui_fetch_ttl
+            self.ocean_config[CONF_TIDE_TTL] = ui_tide_ttl
+            self.ocean_config[CONF_WEATHER_CACHE_TTL] = ui_weather_ttl
 
             return await self.async_step_ocean_species()
 
@@ -167,9 +194,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                     ),
                     vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
+                    vol.Required(CONF_FETCH_CACHE_TTL, default=default_fetch_cache_ttl): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                    ),
+                    vol.Required(CONF_TIDE_TTL, default=default_tide_ttl): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=10, max=86400, step=10, unit_of_measurement="s")
+                    ),
+                    vol.Required(CONF_WEATHER_CACHE_TTL, default=default_weather_cache_ttl): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                    ),
                 }
             ),
-            description_placeholders={"info": "Configure advanced options: how often to fetch."},
+            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
         )
 
     # ----
@@ -394,7 +430,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
                                         {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
                                         {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                        {"value": "reef", "label": "🪸 Offshore Reef"},
+                                        {"value": "reef", "label": "\U0001fab8 Offshore Reef"},
                                     ],
                                     mode="list",
                                 )
@@ -414,7 +450,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
                                 {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
                                 {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                {"value": "reef", "label": "🪸 Offshore Reef"},
+                                {"value": "reef", "label": "\U0001fab8 Offshore Reef"},
                             ],
                             mode="list",
                         )
@@ -590,6 +626,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # If advanced options were provided earlier, include them in final_config (otherwise async_setup_entry will use defaults).
                 if "update_interval" in self.ocean_config:
                     final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
+
+                # include TTL overrides from advanced config (Option B)
+                final_config[CONF_FETCH_CACHE_TTL] = int(self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL))
+                final_config[CONF_TIDE_TTL] = int(self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
+                final_config[CONF_WEATHER_CACHE_TTL] = int(self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
