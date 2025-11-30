@@ -90,13 +90,6 @@ async def async_setup_entry(hass, entry):
         )
         raise ValueError("Entry data 'wind_unit' missing or mismatched (strict)")
 
-    # Validate allowed wind unit values
-    if wind_unit not in ("km/h", "mph", "m/s"):
-        _LOGGER.error("Config entry %s has invalid wind_unit=%r (strict)", entry.entry_id, wind_unit)
-        raise ValueError(f"Invalid entry.data['wind_unit']: {wind_unit!r} (strict)")
-
-    _LOGGER.debug("Chosen speed_unit for entry %s: %s", entry.entry_id, wind_unit)
-
     # Validate selected species (if set) exists in the packaged profiles
     selected_species = entry.data.get(CONF_SPECIES_ID)
     selected_region = entry.data.get(CONF_SPECIES_REGION)
@@ -138,8 +131,6 @@ async def async_setup_entry(hass, entry):
         lat=lat,
         lon=lon,
         update_interval=entry.data.get("update_interval", DEFAULT_UPDATE_INTERVAL),
-        store_enabled=entry.data.get("persist_last_fetch", False),
-        ttl=entry.data.get("persist_ttl", 3600),
         species=resolved_species,
         units=units,
         safety_limits=safety_limits,
@@ -147,7 +138,6 @@ async def async_setup_entry(hass, entry):
     )
     _LOGGER.debug("OFACoordinator created for entry %s", entry.entry_id)
 
-    # NOTE: persistence removed — TideProxy now uses deterministic in-memory coefficients by default.
     # Request a fresh update (will run after any restored data is available)
     _LOGGER.debug("Requesting initial data refresh for entry %s", entry.entry_id)
     await coord.async_request_refresh()

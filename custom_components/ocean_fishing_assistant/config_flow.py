@@ -106,7 +106,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": "normal", "label": "Normal Mode"},
-                                {"value": "advanced", "label": "Advanced Mode (show persistence & interval options)"},
+                                {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
                             ],
                             mode="list",
                         )
@@ -123,11 +123,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Advanced configuration step (only shown when user selected Advanced Mode)
     # ----
     async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced options: update_interval, persist_last_fetch, persist_ttl, expose_raw."""
+        """Advanced options: update_interval and expose_raw (persistence removed)."""
         # Defaults: use current integration/coordinator defaults or previously chosen advanced values
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
-        default_persist_last_fetch = self.ocean_config.get("persist_last_fetch", False)
-        default_persist_ttl = self.ocean_config.get("persist_ttl", 3600)
         default_expose_raw = self.ocean_config.get("expose_raw", False)
 
         if user_input is not None:
@@ -136,10 +134,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ui_update_interval = int(user_input.get("update_interval", default_update_interval))
                 if ui_update_interval < 30:
                     errors["base"] = "update_interval_too_small"
-                ui_persist_last_fetch = bool(user_input.get("persist_last_fetch", default_persist_last_fetch))
-                ui_persist_ttl = int(user_input.get("persist_ttl", default_persist_ttl))
-                if ui_persist_ttl < 60:
-                    errors["base"] = "persist_ttl_too_small"
                 ui_expose_raw = bool(user_input.get("expose_raw", default_expose_raw))
             except Exception:
                 errors["base"] = "invalid_advanced_values"
@@ -152,21 +146,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("update_interval", default=default_update_interval): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                             ),
-                            vol.Required("persist_last_fetch", default=default_persist_last_fetch): selector.BooleanSelector(),
-                            vol.Required("persist_ttl", default=default_persist_ttl): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=60, max=86400, step=60, unit_of_measurement="s")
-                            ),
                             vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
                         }
                     ),
                     errors=errors,
-                    description_placeholders={"info": "Configure advanced options: how often to fetch and whether to persist the last successful fetch."},
+                    description_placeholders={"info": "Configure advanced options: how often to fetch."},
                 )
 
             # Save advanced options and continue flow
             self.ocean_config["update_interval"] = ui_update_interval
-            self.ocean_config["persist_last_fetch"] = ui_persist_last_fetch
-            self.ocean_config["persist_ttl"] = ui_persist_ttl
             self.ocean_config["expose_raw"] = ui_expose_raw
 
             return await self.async_step_ocean_species()
@@ -178,21 +166,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("update_interval", default=default_update_interval): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                     ),
-                    vol.Required("persist_last_fetch", default=default_persist_last_fetch): selector.BooleanSelector(),
-                    vol.Required("persist_ttl", default=default_persist_ttl): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=60, max=86400, step=60, unit_of_measurement="s")
-                    ),
                     vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
                 }
             ),
-            description_placeholders={"info": "Configure advanced options: how often to fetch and whether to persist the last successful fetch."},
+            description_placeholders={"info": "Configure advanced options: how often to fetch."},
         )
 
     # ----
     # Species selection flow: first choose profile type (general vs species)
     # ----
     async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Ask whether the user wants a general profile or a specific species."""
+        """Ask whether the user wants a general profile or a species profile."""
         # Ensure loader is available and loaded for listings
         if self.species_loader is None:
             self.species_loader = SpeciesLoader(self.hass)
@@ -534,7 +518,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Thresholds & finish (unchanged except expose_raw moved to Advanced Mode)
+    # Thresholds & finish (unchanged except persistence removed)
     # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
@@ -606,10 +590,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # If advanced options were provided earlier, include them in final_config (otherwise async_setup_entry will use defaults).
                 if "update_interval" in self.ocean_config:
                     final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
-                if "persist_last_fetch" in self.ocean_config:
-                    final_config["persist_last_fetch"] = bool(self.ocean_config.get("persist_last_fetch"))
-                if "persist_ttl" in self.ocean_config:
-                    final_config["persist_ttl"] = int(self.ocean_config.get("persist_ttl"))
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation

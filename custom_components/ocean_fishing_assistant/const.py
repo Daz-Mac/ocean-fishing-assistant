@@ -13,10 +13,6 @@ DEFAULT_UPDATE_INTERVAL = 15 * 60  # seconds
 OM_BASE = "https://api.open-meteo.com/v1/forecast"
 OM_MARINE_BASE = "https://marine-api.open-meteo.com/v1/marine"
 
-# Storage keys
-STORE_VERSION = 1
-STORE_KEY = f"{DOMAIN}_store"
-
 # Default forecast mode (used where appropriate)
 DEFAULT_FORECAST_MODE = "hourly"
 

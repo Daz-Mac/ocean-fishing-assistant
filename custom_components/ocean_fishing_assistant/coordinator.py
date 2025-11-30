@@ -10,10 +10,8 @@ import time
 from typing import Optional
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers.storage import Store
-from homeassistant.util import dt as dt_util
 
-from .const import STORE_KEY, STORE_VERSION, FETCH_CACHE_TTL, DOMAIN, CONF_TIME_PERIODS
+from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIME_PERIODS
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
@@ -30,8 +28,6 @@ class OFACoordinator(DataUpdateCoordinator):
         lat: float,
         lon: float,
         update_interval: int,
-        store_enabled: bool = False,
-        ttl: int = 3600,
         species: Optional[str] = None,
         units: str = "metric",
         safety_limits: Optional[dict] = None,
@@ -73,8 +69,8 @@ class OFACoordinator(DataUpdateCoordinator):
             _LOGGER.exception("Failed to normalize/validate safety_limits: %s", exc)
             # Fail fast in strict mode — do not allow coordinator to start with ambiguous thresholds
             raise
-        self._store = Store(hass, STORE_VERSION, f"{STORE_KEY}_{entry_id}") if store_enabled else None
-        self._ttl = int(ttl)
+
+        # NOTE: on-disk persistence removed — no self._store, no ttl
         self._tide_proxy = TideProxy(hass, self.lat, self.lon)
         self.time_periods_mode = time_periods_mode or "full_day"
 
@@ -92,39 +88,6 @@ class OFACoordinator(DataUpdateCoordinator):
             raise ValueError("Fetcher instance missing 'speed_unit' attribute; fetcher must be created with explicit units (strict)")
         if fetcher_speed != expected_speed_unit:
             raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
-
-    async def async_load_from_store(self):
-        """
-        Load a previously persisted successful fetch from storage and set the coordinator's data.
-
-        Non-fatal: if store contains nothing (first run) return False.
-        Raises on invalid shape or other store errors (strict).
-        Returns True if persisted data was loaded and applied.
-        """
-        if not self._store:
-            raise RuntimeError("Persistence store not configured for this coordinator (cannot load)")
-
-        stored = await self._store.async_load()
-        # If nothing persisted yet, treat as normal (not an error)
-        if not stored:
-            # No persisted fetch available — caller can continue normally
-            return False
-
-        if not isinstance(stored, dict) or "data" not in stored:
-            raise RuntimeError("Persisted store payload invalid (strict)")
-
-        data = stored.get("data")
-        if data is None:
-            raise RuntimeError("Persisted fetch contains no data (strict)")
-
-        # Use DataUpdateCoordinator helper to set the last known data so sensors start with it.
-        try:
-            self.async_set_updated_data(data)
-            _LOGGER.debug("Loaded persisted fetch for coordinator %s", self.entry_id)
-            return True
-        except Exception:
-            _LOGGER.exception("Failed to set persisted data into coordinator (strict)")
-            raise
 
     async def _async_update_data(self):
         """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
@@ -171,12 +134,6 @@ class OFACoordinator(DataUpdateCoordinator):
                 raise ValueError("TideProxy returned invalid shape (strict)")
 
             # --- Normalization for strict canonical shape ---
-            # Sensor + other code expect:
-            #   tide["next_high"] = {"timestamp": ISOZ, "height_m": float}  (or None)
-            #   tide["next_low"]  = {"timestamp": ISOZ, "height_m": float}  (or None)
-            # But older tide_proxy versions returned:
-            #   tide["next_high"] = ISOZ (string) and separate tide["next_high_height_m"] = float
-            # To surface clear errors but remain operational, normalize legacy shapes into canonical dicts here.
             try:
                 nh = tide.get("next_high")
                 nl = tide.get("next_low")
@@ -272,8 +229,5 @@ class OFACoordinator(DataUpdateCoordinator):
                 precomputed_period_indices=period_indices,
             )
 
-            # persist
-            if self._store:
-                await self._store.async_save({"fetched_at": time.time(), "data": data})
-
+            # No disk persistence anymore
             return data
