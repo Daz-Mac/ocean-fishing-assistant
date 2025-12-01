@@ -16,7 +16,7 @@ from .const import (
     DEFAULT_SAFETY_LIMITS,
     CONF_SPECIES_ID,
     CONF_SPECIES_REGION,
-    CONF_THRESHOLDS,
+    # CONF_THRESHOLDS intentionally not used (no legacy)
     CONF_TIME_PERIODS,
     CONF_FETCH_CACHE_TTL,
     CONF_TIDE_TTL,
@@ -25,6 +25,9 @@ from .const import (
     TIDE_PROXY_TTL_DEFAULT,
     WEATHER_FETCHER_CACHE_TTL_DEFAULT,
 )
+
+# import unit helpers to validate/convert options on updates
+from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,7 +134,7 @@ async def async_setup_entry(hass, entry):
             _LOGGER.exception("Species validation failed for entry %s: %s", entry.entry_id, exc)
             return False
 
-    # Read TTL overrides from entry.data (Option B). Fall back to sensible defaults in const.py
+    # Read TTL overrides from entry.data (strict)
     fetch_cache_ttl = int(entry.data.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL))
     tide_ttl = int(entry.data.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
     weather_cache_ttl = int(entry.data.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
@@ -168,7 +171,47 @@ async def async_setup_entry(hass, entry):
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
     _LOGGER.debug("Stored coordinator in hass.data[%s][%s]", DOMAIN, entry.entry_id)
 
-    # forward entry to sensors
+    # Register an options update listener (strict application of updated options)
+    async def _async_entry_options_updated(hass_inner, entry_inner):
+        """Apply updated options into the running coordinator (strict)."""
+        _LOGGER.debug("Applying updated options for entry %s", entry_inner.entry_id)
+        coord_inner = hass_inner.data.get(DOMAIN, {}).get(entry_inner.entry_id)
+        if coord_inner is None:
+            _LOGGER.debug("Coordinator for entry %s not found when applying options", entry_inner.entry_id)
+            return
+
+        opts = entry_inner.options or {}
+        # Expect top-level option keys (strict). Build safety_display from option keys.
+        safety_display = {
+            "safety_max_wind": opts.get("max_wind_speed"),
+            "safety_max_gust": opts.get("max_gust_speed"),
+            "safety_max_wave_height": opts.get("max_wave_height"),
+            "safety_min_visibility": opts.get("min_visibility"),
+            "safety_min_swell_period": opts.get("min_swell_period"),
+            "safety_max_precip_chance": opts.get("max_precip_chance"),
+        }
+
+        # Validate/convert strictly (no fallbacks). If validation fails, raise to surface the error.
+        try:
+            canonical = convert_safety_display_to_metric(safety_display, entry_units=entry_inner.data.get("units", "metric"))
+            normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
+            coord_inner.safety_limits = normalized_limits or {}
+            _LOGGER.debug("Applied new safety_limits to coordinator for entry %s: %s (warnings=%s)", entry_inner.entry_id, normalized_limits, warnings)
+            # Apply expose_raw top-level option into stored data/options if present (no migration)
+            # (Note: options are already saved by HA; we just apply runtime effect)
+            await coord_inner.async_request_refresh()
+        except Exception:
+            _LOGGER.exception("Failed to apply/validate updated options for entry %s; raising (strict)", entry_inner.entry_id)
+            # Fail loudly as per strict policy
+            raise
+
+    # Register the listener (this will cause a strict apply when options change)
+    try:
+        entry.add_update_listener(_async_entry_options_updated)
+    except Exception:
+        _LOGGER.debug("Failed to register entry update listener for entry %s", entry.entry_id)
+
+    # forward entry to platforms
     try:
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
         _LOGGER.debug("Forwarded entry setups for entry %s to platforms", entry.entry_id)

@@ -19,7 +19,7 @@ from .const import (
     CONF_SPECIES_REGION,
     CONF_HABITAT_PRESET,
     CONF_TIME_PERIODS,
-    CONF_THRESHOLDS,
+    # CONF_THRESHOLDS removed on purpose (no legacy)
     CONF_TIMEZONE,
     CONF_ELEVATION,
     CONF_AUTO_APPLY_THRESHOLDS,
@@ -84,7 +84,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     existing_entries = self.hass.config_entries.async_entries(DOMAIN)
                     for e in existing_entries:
                         if e.title == submitted_title:
-                            _LOGGER.debug("Attempt to create entry with duplicate title '%s' rejected at location step", submitted_title)
+                            _LOGGER.debug(
+                                "Attempt to create entry with duplicate title '%s' rejected at location step",
+                                submitted_title,
+                            )
                             errors["base"] = "title_exists"
                             break
 
@@ -112,7 +115,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": "normal", "label": "Normal Mode"},
-                                {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
+                                {
+                                    "value": "advanced",
+                                    "label": "Advanced Mode (show interval & extra options)",
+                                },
                             ],
                             mode="list",
                         )
@@ -129,13 +135,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Advanced configuration step (only shown when user selected Advanced Mode)
     # ----
     async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced options: update_interval and expose_raw (persistence removed)."""
-        # Defaults: use current integration/coordinator defaults or previously chosen advanced values
+        """Advanced options: update_interval and expose_raw (persistence as top-level keys)."""
+        # Defaults: use previously chosen advanced values if present
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
         default_expose_raw = self.ocean_config.get("expose_raw", False)
         default_fetch_cache_ttl = self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL)
         default_tide_ttl = self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
-        default_weather_cache_ttl = self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
+        default_weather_cache_ttl = self.ocean_config.get(
+            CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT
+        )
 
         if user_input is not None:
             errors: dict[str, str] = {}
@@ -146,7 +154,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ui_expose_raw = bool(user_input.get("expose_raw", default_expose_raw))
                 ui_fetch_ttl = int(user_input.get(CONF_FETCH_CACHE_TTL, default_fetch_cache_ttl))
                 ui_tide_ttl = int(user_input.get(CONF_TIDE_TTL, default_tide_ttl))
-                ui_weather_ttl = int(user_input.get(CONF_WEATHER_CACHE_TTL, default_weather_cache_ttl))
+                ui_weather_ttl = int(
+                    user_input.get(CONF_WEATHER_CACHE_TTL, default_weather_cache_ttl)
+                )
                 # sanity checks
                 if ui_fetch_ttl < 30 or ui_tide_ttl < 10 or ui_weather_ttl < 30:
                     errors["base"] = "ttl_too_small"
@@ -158,12 +168,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="advanced_config",
                     data_schema=vol.Schema(
                         {
-                            vol.Required("update_interval", default=default_update_interval): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                            vol.Required(
+                                "update_interval", default=default_update_interval
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(
+                                    min=30, max=86400, step=30, unit_of_measurement="s"
+                                )
                             ),
                             vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
                             vol.Required(CONF_FETCH_CACHE_TTL, default=default_fetch_cache_ttl): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
+                                selector.NumberSelectorConfig(
+                                    min=30, max=86400, step=30, unit_of_measurement="s"
+                                )
                             ),
                             vol.Required(CONF_TIDE_TTL, default=default_tide_ttl): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=10, max=86400, step=10, unit_of_measurement="s")
@@ -177,7 +193,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
                 )
 
-            # Save advanced options and continue flow
+            # Save advanced options and continue flow (store as top-level in ocean_config for final save)
             self.ocean_config["update_interval"] = ui_update_interval
             self.ocean_config["expose_raw"] = ui_expose_raw
             self.ocean_config[CONF_FETCH_CACHE_TTL] = ui_fetch_ttl
@@ -229,15 +245,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="ocean_species",
                     data_schema=vol.Schema(
-                        {vol.Required("profile_type"): selector.SelectSelector(
-                            selector.SelectSelectorConfig(
-                                options=[
-                                    {"value": "general", "label": "General region profile (mixed)"},
-                                    {"value": "species", "label": "Target a specific species (region-filtered)"},
-                                ],
-                                mode="list",
+                        {
+                            vol.Required("profile_type"): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": "general", "label": "General region profile (mixed)"},
+                                        {"value": "species", "label": "Target a specific species (region-filtered)"},
+                                    ],
+                                    mode="list",
+                                )
                             )
-                        )}
+                        }
                     ),
                     errors={"base": "invalid_selection"},
                 )
@@ -245,15 +263,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="ocean_species",
             data_schema=vol.Schema(
-                {vol.Required("profile_type"): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": "general", "label": "General region profile (mixed)"},
-                            {"value": "species", "label": "Target a specific species (region-filtered)"},
-                        ],
-                        mode="list",
+                {
+                    vol.Required("profile_type"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "general", "label": "General region profile (mixed)"},
+                                {"value": "species", "label": "Target a specific species (region-filtered)"},
+                            ],
+                            mode="list",
+                        )
                     )
-                )}
+                }
             ),
             description_placeholders={"info": "Choose whether to use a general regional profile or target a specific species."},
         )
@@ -554,7 +574,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Thresholds & finish (unchanged except persistence removed)
+    # Thresholds & finish (strict: store top-level keys, no legacy nested thresholds)
     # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
@@ -593,7 +613,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Build canonical safety_limits to store
                 safety_limits = normalized_limits
 
-                final_config = {
+                # Persist top-level keys only (no nested CONF_THRESHOLDS shape)
+                final_config: dict[str, Any] = {
                     # integration is ocean-only
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
                     CONF_LATITUDE: latitude,
@@ -603,20 +624,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_HABITAT_PRESET: habitat_preset,
                     CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
                     CONF_AUTO_APPLY_THRESHOLDS: False,
-                    # store both user thresholds (for UI/options) and canonical safety_limits (for runtime)
-                    CONF_THRESHOLDS: {
-                        "max_wind_speed": user_input["max_wind_speed"],
-                        "max_gust_speed": user_input.get("max_gust_speed"),
-                        "max_wave_height": user_input["max_wave_height"],
-                        "min_visibility": user_input.get("min_visibility"),
-                        "min_temperature": user_input.get("min_temperature"),
-                        "max_temperature": user_input.get("max_temperature"),
-                        "min_swell_period": user_input.get("min_swell_period"),
-                        # NEW: include precip chance in stored thresholds for options/UI
-                        "max_precip_chance": user_input.get("max_precip_chance"),
-                        # Preserve expose_raw from advanced config (moved there)
-                        "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
-                    },
+                    # store user thresholds as top-level keys
+                    "max_wind_speed": user_input["max_wind_speed"],
+                    "max_gust_speed": user_input.get("max_gust_speed"),
+                    "max_wave_height": user_input["max_wave_height"],
+                    "min_visibility": user_input.get("min_visibility"),
+                    "min_temperature": user_input.get("min_temperature"),
+                    "max_temperature": user_input.get("max_temperature"),
+                    "min_swell_period": user_input.get("min_swell_period"),
+                    "max_precip_chance": user_input.get("max_precip_chance"),
+                    # Preserve expose_raw from advanced config as top-level
+                    "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
                     "wind_unit": wind_unit,
@@ -627,8 +645,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if "update_interval" in self.ocean_config:
                     final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
 
-                # include TTL overrides from advanced config (Option B)
-                final_config[CONF_FETCH_CACHE_TTL] = int(self.ocean_config.get(CONF_FETCH_CACHE_TTL, DEFAULT_UPDATE_INTERVAL))
+                # include TTL overrides from advanced config
+                final_config[CONF_FETCH_CACHE_TTL] = int(self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL))
                 final_config[CONF_TIDE_TTL] = int(self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
                 final_config[CONF_WEATHER_CACHE_TTL] = int(self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
 
@@ -654,7 +672,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.debug("Unique-id registration/abort check raised: %s", exc)
                     raise
 
-                _LOGGER.debug("Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id)
+                _LOGGER.debug(
+                    "Creating ocean config entry with data keys: %s (unique_id=%s)",
+                    list(final_config.keys()),
+                    unique_id,
+                )
 
                 return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
             except KeyError as ke:
@@ -710,7 +732,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"info": "Set safe fishing limits based on your habitat and comfort level."},
         )
 
-    # Options flow (simple)
+    # Options flow (strict)
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
@@ -730,27 +752,30 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_ocean_options()
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        # Strict options: expect top-level keys in config_entry.data (no legacy nested thresholds)
         if user_input is not None:
+            # Accept and write top-level option keys into entry.options
             return self.async_create_entry(title="", data=user_input)
 
-        # Prefer values from entry.options (what HA stores when the options flow returns),
-        # but accept a nested CONF_THRESHOLDS dict in either options or data for compatibility.
-        opts = dict(self._config_entry.options or {})
-        data_thresholds = dict(self._config_entry.data.get(CONF_THRESHOLDS, {}) or {})
-        opts_thresholds = {}
-        if isinstance(opts.get(CONF_THRESHOLDS), dict):
-            opts_thresholds = dict(opts.get(CONF_THRESHOLDS))
+        try:
+            # Read defaults strictly from config_entry.data top-level keys
+            entry_data = self._config_entry.data
+            units = entry_data["units"]  # strict: must exist
+            default_time_periods = entry_data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)
+            default_max_wind = entry_data["max_wind_speed"]
+            default_max_gust = entry_data.get("max_gust_speed")
+            default_max_wave = entry_data["max_wave_height"]
+            default_precip = entry_data.get("max_precip_chance", 80)
+            default_min_swell = entry_data.get("min_swell_period", 3)
+            default_min_vis = entry_data.get("min_visibility", 1)
+            default_min_temp = entry_data.get("min_temperature", 5)
+            default_max_temp = entry_data.get("max_temperature", 35)
+            default_expose_raw = entry_data.get("expose_raw", False)
+        except KeyError as ke:
+            _LOGGER.exception("Config entry data missing required top-level keys for options flow: %s", ke)
+            return self.async_abort(reason="config_entry_invalid")
 
-        def _get(field: str, fallback: Any) -> Any:
-            # precedence: top-level option -> nested option thresholds -> data thresholds -> fallback
-            if field in opts:
-                return opts.get(field)
-            if field in opts_thresholds:
-                return opts_thresholds.get(field)
-            return data_thresholds.get(field, fallback)
-
-        # show units-driven labels based on stored units in config_entry.data
-        units = self._config_entry.data.get("units", "metric")
+        # show units-driven labels based on stored units
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
@@ -759,7 +784,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TIME_PERIODS, default=_get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                    vol.Required(CONF_TIME_PERIODS, default=default_time_periods): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
@@ -768,27 +793,26 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             mode="dropdown",
                         )
                     ),
-                    vol.Required("max_wind_speed", default=_get("max_wind_speed", 25)): selector.NumberSelector(
+                    vol.Required("max_wind_speed", default=default_max_wind): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
-                    vol.Required("max_gust_speed", default=_get("max_gust_speed", 40)): selector.NumberSelector(
+                    vol.Required("max_gust_speed", default=default_max_gust): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
-                    vol.Required("max_wave_height", default=_get("max_wave_height", 2.0)): selector.NumberSelector(
+                    vol.Required("max_wave_height", default=default_max_wave): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    # NEW: options flow exposure for precipitation chance
-                    vol.Required("max_precip_chance", default=_get("max_precip_chance", 80)): selector.NumberSelector(
+                    vol.Required("max_precip_chance", default=default_precip): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
-                    vol.Required("min_swell_period", default=_get("min_swell_period", 3)): selector.NumberSelector(
+                    vol.Required("min_swell_period", default=default_min_swell): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                     ),
-                    vol.Required("min_visibility", default=_get("min_visibility", 1)): selector.NumberSelector(
+                    vol.Required("min_visibility", default=default_min_vis): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                     ),
-                    # RESTORE: expose_raw option in Options flow — default computed from options/data
-                    vol.Required("expose_raw", default=bool(_get("expose_raw", False))): selector.BooleanSelector(),
+                    # RESTORE: expose_raw option in Options flow (top-level)
+                    vol.Required("expose_raw", default=default_expose_raw): selector.BooleanSelector(),
                 }
             ),
         )
