@@ -46,7 +46,7 @@ CONF_SPECIES_ID = "species"  # canonical key used in entry.options for chosen sp
 CONF_SPECIES_REGION = "species_region"
 CONF_HABITAT_PRESET = "habitat_preset"
 CONF_TIME_PERIODS = "time_periods"
-CONF_THRESHOLDS = "thresholds"
+# CONF_THRESHOLDS removed (no nested thresholds object — thresholds are top-level keys)
 CONF_TIMEZONE = "timezone"
 CONF_ELEVATION = "elevation"
 CONF_AUTO_APPLY_THRESHOLDS = "auto_apply_thresholds"
