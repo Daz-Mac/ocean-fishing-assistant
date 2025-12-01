@@ -296,6 +296,7 @@ class OFASensor(CoordinatorEntity):
         """
         Return the per-timestamp forecast for the current UTC hour (floored).
         Simple canonical behavior: use per_timestamp_forecasts list and match 'timestamp'.
+        Raises RuntimeError if no suitable forecast can be located (strict).
         """
         data = self.coordinator.data
         if not data or "per_timestamp_forecasts" not in data:
@@ -303,7 +304,7 @@ class OFASensor(CoordinatorEntity):
 
         forecasts = data["per_timestamp_forecasts"]
         if not isinstance(forecasts, list) or not forecasts:
-            return None
+            raise RuntimeError("per_timestamp_forecasts is empty or not a list (strict)")
 
         now_utc = dt_util.utcnow()
         floored = now_utc.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
@@ -323,8 +324,8 @@ class OFASensor(CoordinatorEntity):
             if dt and dt >= floored:
                 return entry
 
-        # fallback to first (strict list should be ordered)
-        return forecasts[0]
+        # No match — strict mode: raise instead of falling back
+        raise RuntimeError("No matching forecast found for current time (strict)")
 
     @property
     def state(self) -> Optional[int]:
@@ -657,3 +658,51 @@ class OFASensor(CoordinatorEntity):
         attrs["attribution"] = ATTRIBUTION
         attrs[ATTR_ATTRIBUTION] = ATTRIBUTION
         return attrs
+
+
+# --- Platform setup / unload (config entry integration) ---
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
+    """
+    Set up sensor platform for a config entry.
+
+    Strict behavior: require explicit CONF_NAME in entry.data. No fallbacks allowed.
+    """
+    _LOGGER.debug("sensor.async_setup_entry called for entry %s", entry.entry_id)
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is None:
+        _LOGGER.error("Coordinator not found for entry %s; aborting platform setup", entry.entry_id)
+        return
+
+    # STRICT: require CONF_NAME present in entry.data
+    name = entry.data.get(CONF_NAME)
+    if not name:
+        _LOGGER.error(
+            "Config entry %s missing required '%s' in entry.data (strict); aborting sensor setup",
+            entry.entry_id,
+            CONF_NAME,
+        )
+        # Fail loudly per project policy
+        raise ValueError("Entry data missing 'name' (strict)")
+
+    try:
+        sensor = OFASensor(coordinator, name, entry=entry)
+        async_add_entities([sensor], True)
+        # register options update listener so options changes refresh the coordinator
+        try:
+            entry.add_update_listener(_async_options_updated)
+        except Exception:
+            # non-fatal; continue. The worst case is options updates won't trigger a refresh.
+            _LOGGER.debug("Failed to attach entry update listener for entry %s", entry.entry_id)
+    except Exception as exc:
+        _LOGGER.exception("Failed to create OFASensor for entry %s: %s", entry.entry_id, exc)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """
+    Optional unload handler for the sensor platform. Home Assistant will call this when
+    the integration forwards unloads; nothing special needed here because entities
+    are removed by the entity platform. Return True to indicate unload handled.
+    """
+    _LOGGER.debug("sensor.async_unload_entry called for entry %s", entry.entry_id)
+    # nothing to persist/cleanup here for the simplified sensor; return True
+    return True
