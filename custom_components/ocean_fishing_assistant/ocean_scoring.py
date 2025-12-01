@@ -1,3 +1,4 @@
+# custom_components/ocean_fishing_assistant/ocean_scoring.py
 """
 Strict Ocean Fishing Scoring — no fallbacks, fail loudly.
 
@@ -22,6 +23,7 @@ from datetime import datetime, timezone
 _LOGGER = logging.getLogger(__name__)
 
 from . import unit_helpers
+from .moon_utils import coerce_phase, matches_moon_preference
 
 FACTOR_WEIGHTS = {
     "tide": 0.25,
@@ -198,22 +200,6 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], un
     return code
 
 
-# Common moon-name -> fraction mapping (0.0..1.0)
-# If you already have this mapping elsewhere, move it to a shared helper and import.
-MOON_NAME_TO_FRAC = {
-    "new": 0.0,
-    "new_moon": 0.0,
-    "first_quarter": 0.25,
-    "first": 0.25,
-    "waxing": 0.25,
-    "full": 0.5,
-    "full_moon": 0.5,
-    "last_quarter": 0.75,
-    "last": 0.75,
-    "waning": 0.75,
-}
-
-
 def compute_score(
     data: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
@@ -275,6 +261,8 @@ def compute_score(
             moon_phase_val = _to_float_safe(mp[use_index]) if use_index < len(mp) else None
         else:
             moon_phase_val = _to_float_safe(mp)
+    # coerce to normalized 0..1 using helper (optional; matching uses coerce internally)
+    moon_phase_val = coerce_phase(moon_phase_val) if moon_phase_val is not None else None
 
     # --- robust pressure delta calculation with backward-diff fallback ---
     pressure_delta = None
@@ -616,26 +604,11 @@ def compute_score(
         if not moon_pref:
             moon_score = 10.0
         else:
-            matched = False
-            for mpref in moon_pref:
-                # numeric first
-                try:
-                    mpf = float(mpref)
-                    if moon_phase_val is not None and abs(moon_phase_val - mpf) <= 0.05:
-                        matched = True
-                        break
-                except Exception:
-                    # try textual mapping
-                    try:
-                        key = str(mpref).strip().lower().replace(" ", "_")
-                        if key in MOON_NAME_TO_FRAC:
-                            target = MOON_NAME_TO_FRAC[key]
-                            if moon_phase_val is not None and abs(moon_phase_val - target) <= 0.05:
-                                matched = True
-                                break
-                    except Exception:
-                        continue
-            moon_score = 10.0 if matched else 4.0
+            # Use centralized helper to evaluate preference matches (supports numeric and textual tokens, lists)
+            if matches_moon_preference(moon_phase_val, moon_pref, tolerance=0.05):
+                moon_score = 10.0
+            else:
+                moon_score = 4.0
         moon_score = _clamp_0_10(moon_score)
         comp["moon"] = {"score_10": round(moon_score, 3), "score_100": int(round(moon_score * 10))}
     except Exception:
@@ -910,24 +883,7 @@ def compute_score(
         try:
             moon_pref_check = profile.get("moon_preference", []) or []
             if moon_pref_check and moon_phase_val is not None:
-                matched = False
-                for mpref in moon_pref_check:
-                    try:
-                        if isinstance(mpref, str):
-                            # textual mapping
-                            key = str(mpref).strip().lower().replace(" ", "_")
-                            if key in MOON_NAME_TO_FRAC:
-                                if abs(moon_phase_val - MOON_NAME_TO_FRAC[key]) <= 0.05:
-                                    matched = True
-                                    break
-                            # fallthrough to numeric attempt
-                        mpf = float(mpref)
-                        if abs(moon_phase_val - mpf) <= 0.05:
-                            matched = True
-                            break
-                    except Exception:
-                        continue
-                if not matched:
+                if not matches_moon_preference(moon_phase_val, moon_pref_check, tolerance=0.05):
                     _add_breach("moon_phase", moon_phase_val, unit=None, expected_min=None, expected_max=None, expected_pref_min=None, expected_pref_max=None, severity="caution", reason="moon_preference_mismatch", advice="Moon phase differs from species preference")
         except Exception:
             pass
