@@ -66,6 +66,7 @@ class SpeciesLoader:
         general_count = len(profiles.get("general_profiles", {})) if isinstance(profiles.get("general_profiles", {}), dict) else 0
         _LOGGER.info("Loaded species_profiles.json version %s with %d species and %d general profiles", version, species_count, general_count)
 
+        # keep profiles exactly as provided (no sanitization / no legacy fallbacks)
         self._profiles = profiles
 
     def _ensure_loaded(self) -> None:
@@ -73,11 +74,11 @@ class SpeciesLoader:
             _LOGGER.error("SpeciesLoader used before profiles were loaded")
             raise RuntimeError("Species profiles not loaded")
 
-    # ===== general profiles support =====
+    # ==== general profiles support ====
     def get_general_profiles(self) -> List[Dict[str, Any]]:
         """Return list of general profiles (copies)."""
         self._ensure_loaded()
-        general = []
+        general: List[Dict[str, Any]] = []
         gp_map = self._profiles.get("general_profiles", {}) if isinstance(self._profiles, dict) else {}
         for gid, gdata in gp_map.items():
             if not isinstance(gdata, dict):
@@ -112,7 +113,7 @@ class SpeciesLoader:
                 results.append(gcopy)
         return results
 
-    # ===== existing species helpers (unchanged behavior) =====
+    # ==== existing species helpers (unchanged behavior) ====
     def get_species(self, species_id: str) -> Optional[Dict[str, Any]]:
         """Return a copy of the species profile with the given ID, or None."""
         self._ensure_loaded()
