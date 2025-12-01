@@ -223,7 +223,7 @@ def compute_score(
         return x is not None and not (isinstance(x, (list, tuple)) and len(x) == 0)
 
     # Coerce empty-list fields to None to avoid numeric conversion errors
-    for key in ("preferred_wind_m_s", "preferred_temp_c", "max_wave_height_m", "preferred_tide_phase", "preferred_times", "moon_preference", "preferred_wave_period_s"):
+    for key in ("preferred_wind_m_s", "preferred_temp_c", "max_wave_height_m", "preferred_tide_phase", "preferred_times", "moon_preference", "preferred_swell_period_s"):
         val = profile.get(key)
         if isinstance(val, (list, tuple)) and len(val) == 0:
             profile[key] = None
@@ -250,8 +250,8 @@ def compute_score(
     temp = _get_at("temperature_c", use_index)
     pressure_arr = data.get("pressure_hpa")
 
-    # wave/wave-period values (we now use only wave_period_s)
-    wave_period = _get_at("wave_period_s", use_index)
+    # wave/wave-period values — use swell_period_s as canonical period
+    swell_period = _get_at("swell_period_s", use_index)
 
     moon_phase_val = None
     if "moon_phase" in data:
@@ -302,9 +302,9 @@ def compute_score(
     # require at least a neighbor pressure point (forward OR backward) -- we keep this strict
     if not pressure_arr_ok:
         missing.append("pressure_hpa_series_with_neighbor_point")
-    # wave period required if profile specifies preferred_wave_period_s
-    if _pref_is_set(profile.get("preferred_wave_period_s")) and wave_period is None:
-        missing.append("wave_period_s")
+    # swell period required if profile specifies preferred_swell_period_s
+    if _pref_is_set(profile.get("preferred_swell_period_s")) and swell_period is None:
+        missing.append("swell_period_s")
 
     if missing:
         msg = f"Missing required inputs for scoring at index={use_index} timestamp={timestamps[use_index]}: {', '.join(missing)}"
@@ -400,7 +400,7 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute wind component", exc_info=True)
 
-    # WAVES component — strict single-field logic: only preferred_wave_period_s used and only wave_period_s data consulted
+    # WAVES component — strict single-field logic: only preferred_swell_period_s used and only swell_period_s data consulted
     try:
         max_wave_pref = profile.get("max_wave_height_m")
         wave_score = None
@@ -423,18 +423,18 @@ def compute_score(
             else:
                 wave_score = 10.0 * (1.0 - (wave / max_wave))
 
-        # unified preference: only preferred_wave_period_s used by profiles (strict)
-        pref_wave_period = profile.get("preferred_wave_period_s")
+        # unified preference: only preferred_swell_period_s used by profiles (strict)
+        pref_swell_period = profile.get("preferred_swell_period_s")
         period_score = None
         try:
-            if pref_wave_period and wave_period is not None:
+            if pref_swell_period and swell_period is not None:
                 # accept single value or min/max list
-                if isinstance(pref_wave_period, (list, tuple)) and len(pref_wave_period) >= 2:
-                    pp_min, pp_max = float(pref_wave_period[0]), float(pref_wave_period[1])
+                if isinstance(pref_swell_period, (list, tuple)) and len(pref_swell_period) >= 2:
+                    pp_min, pp_max = float(pref_swell_period[0]), float(pref_swell_period[1])
                 else:
-                    pp = float(pref_wave_period)
+                    pp = float(pref_swell_period)
                     pp_min, pp_max = pp, pp
-                period_score = _linear_within_score_10(float(wave_period), pp_min, pp_max, tolerance=2.0)
+                period_score = _linear_within_score_10(float(swell_period), pp_min, pp_max, tolerance=2.0)
         except Exception:
             period_score = None
 
@@ -765,7 +765,7 @@ def compute_score(
                     safety["reasons"].append("vis_near_limit")
 
             min_swell = _to_float_safe(safety_limits.get("min_swell_period_s"))
-            swell = None  # we no longer use swell_period_s data for safety by design
+            swell = swell_period  # use canonical swell_period_s value for safety checks if implemented
             if min_swell is not None and swell is not None:
                 if swell < min_swell:
                     safety["unsafe"] = True
@@ -962,7 +962,7 @@ def compute_score(
             "timestamp": timestamps[use_index],
             "moon_phase": moon_phase_val,
             "wind_gust": _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None,
-            "swell_period_s": None,
+            "swell_period_s": swell_period,
             "precipitation_probability": _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None,
         },
         "profile_used": profile.get("common_name", "unknown"),
@@ -989,15 +989,18 @@ def compute_forecast(
             tide_height = payload.get("tide_height_m")[idx] if isinstance(payload.get("tide_height_m"), (list, tuple)) and idx < len(payload.get("tide_height_m")) else (payload.get("tide_height_m") if "tide_height_m" in payload else None)
             tide_phase_name = (payload.get("tide_phase_name")[idx] if isinstance(payload.get("tide_phase_name"), (list, tuple)) and idx < len(payload.get("tide_phase_name")) else (payload.get("tide_phase_name") if "tide_phase_name" in payload else None))
 
+            formatted_swell = payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) and idx < len(payload.get("swell_period_s")) else (payload.get("swell_period_s") if "swell_period_s" in payload else None)
+            formatted_wave_period = payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) and idx < len(payload.get("wave_period_s")) else (payload.get("wave_period_s") if "wave_period_s" in payload else None)
+
             forecast_raw = {
                 "formatted_weather": {
                     "temperature": payload.get("temperature_c")[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),
                     "wind": payload.get("wind_m_s")[idx] if isinstance(payload.get("wind_m_s"), (list, tuple)) else payload.get("wind_m_s"),
                     "wind_gust": payload.get("wind_max_m_s")[idx] if isinstance(payload.get("wind_max_m_s"), (list, tuple)) else payload.get("wind_max_m_s"),
-                    "swell_period_s": None,
+                    "swell_period_s": formatted_swell,
                     "pressure_hpa": payload.get("pressure_hpa")[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
                     "wave_height_m": payload.get("wave_height_m")[idx] if isinstance(payload.get("wave_height_m"), (list, tuple)) else payload.get("wave_height_m"),
-                    "wave_period_s": payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) else payload.get("wave_period_s"),
+                    "wave_period_s": formatted_wave_period,
                     "tide_height_m": tide_height,
                     "tide_phase_name": tide_phase_name,
                 },

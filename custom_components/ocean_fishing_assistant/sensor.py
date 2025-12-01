@@ -651,7 +651,6 @@ class OFASensor(CoordinatorEntity):
         else:
             attrs["current_wave_height"] = None
             attrs["current_wave_unit"] = None
-        attrs["current_wave_period_s"] = _round_opt(formatted.get("wave_period_s"), 2) if formatted.get("wave_period_s") is not None else None
         attrs["current_swell_period_s"] = _round_opt(formatted.get("swell_period_s"), 1) if formatted.get("swell_period_s") is not None else None
 
         # Attribution and return
