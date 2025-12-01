@@ -170,7 +170,7 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], un
             mw = safety_limits.get("max_wave_height_m")
             if mw is not None:
                 return f"Wave height approaching configured maximum ({mw} m)"
-        return "Wave height near configured maximum"
+        return "Wave height near configured minimum"
     if code == "vis_near_limit":
         if safety_limits:
             mv = safety_limits.get("min_visibility_km")
@@ -198,6 +198,22 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], un
     return code
 
 
+# Common moon-name -> fraction mapping (0.0..1.0)
+# If you already have this mapping elsewhere, move it to a shared helper and import.
+MOON_NAME_TO_FRAC = {
+    "new": 0.0,
+    "new_moon": 0.0,
+    "first_quarter": 0.25,
+    "first": 0.25,
+    "waxing": 0.25,
+    "full": 0.5,
+    "full_moon": 0.5,
+    "last_quarter": 0.75,
+    "last": 0.75,
+    "waning": 0.75,
+}
+
+
 def compute_score(
     data: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
@@ -215,6 +231,16 @@ def compute_score(
     if not isinstance(species_profile, dict):
         raise MissingDataError(f"species_profile must be a resolved dict (species metadata). Received: {species_profile!r}")
     profile = species_profile
+
+    # Helper to detect whether a profile preference is actually set (not None / not empty list)
+    def _pref_is_set(x: Any) -> bool:
+        return x is not None and not (isinstance(x, (list, tuple)) and len(x) == 0)
+
+    # Coerce empty-list fields to None to avoid numeric conversion errors
+    for key in ("preferred_wind_m_s", "preferred_temp_c", "max_wave_height_m", "preferred_tide_phase", "preferred_times", "moon_preference"):
+        val = profile.get(key)
+        if isinstance(val, (list, tuple)) and len(val) == 0:
+            profile[key] = None
 
     # Use global FACTOR_WEIGHTS only (no per-species weights)
     total = sum(FACTOR_WEIGHTS.values()) or 1.0
@@ -237,6 +263,10 @@ def compute_score(
     wave = _get_at("wave_height_m", use_index)
     temp = _get_at("temperature_c", use_index)
     pressure_arr = data.get("pressure_hpa")
+
+    # wave/wave-period/swell values
+    wave_period = _get_at("wave_period_s", use_index)
+    swell_period = _get_at("swell_period_s", use_index)
 
     moon_phase_val = None
     if "moon_phase" in data:
@@ -268,16 +298,21 @@ def compute_score(
     else:
         pressure_arr_ok = False
 
+    # Build missing list but only require components if profile requires them (except pressure & moon per policy)
     missing = []
-    if wind is None:
+    # wind required if species provided preference for wind
+    if wind is None and _pref_is_set(profile.get("preferred_wind_m_s")):
         missing.append("wind_m_s")
-    if wave is None:
+    # wave required if species provided a max wave preference
+    if wave is None and _pref_is_set(profile.get("max_wave_height_m")):
         missing.append("wave_height_m")
-    if temp is None:
+    # temp required if species provided a pref temp
+    if temp is None and _pref_is_set(profile.get("preferred_temp_c")):
         missing.append("temperature_c")
+    # moon: keep strict requirement (integration provides moon_phase via tide provider)
     if moon_phase_val is None:
         missing.append("moon_phase")
-    # require at least a neighbor pressure point (forward OR backward)
+    # require at least a neighbor pressure point (forward OR backward) -- we keep this strict
     if not pressure_arr_ok:
         missing.append("pressure_hpa_series_with_neighbor_point")
 
@@ -287,9 +322,11 @@ def compute_score(
 
     comp: Dict[str, Any] = {}
 
-    # TIDE component — phase-based only
+    # TIDE component — phase-based only (and tolerant "any" token)
     try:
-        pref_tide_phase = profile.get("preferred_tide_phase", []) or []
+        pref_tide_phase_raw = profile.get("preferred_tide_phase", []) or []
+        # normalize and treat "any"/"none" as no preference
+        pref_tide_phase = [str(p).strip().lower() for p in (pref_tide_phase_raw or []) if str(p).strip().lower() not in ("any", "none", "")]
         tide_phase_val = None
         # locate tide_phase (top-level or under tide)
         if "tide_phase" in data:
@@ -305,13 +342,14 @@ def compute_score(
             else:
                 tide_phase_val = tp
 
-        # Strict: if profile specifies preferred_tide_phase, tide_phase MUST be present and be a string.
+        # Strict: if pref_tide_phase specified (non-empty after filtering), tide_phase MUST be present and be a string.
         if pref_tide_phase:
             if tide_phase_val is None or not isinstance(tide_phase_val, str):
                 raise MissingDataError("tide_phase (string) required by species profile but missing or not a string")
             matched = any(str(pref).lower() == str(tide_phase_val).lower() for pref in pref_tide_phase)
             tide_score = 10.0 if matched else 3.0
         else:
+            # No preference -> maximum score (do not penalize missing tide phase)
             tide_score = 10.0
         tide_score = _clamp_0_10(tide_score)
         comp_tide: Dict[str, Any] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
@@ -345,18 +383,26 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute tide component (phase-based)", exc_info=True)
 
-    # WIND component — require preferred_wind_m_s in profile
+    # WIND component — require preferred_wind_m_s in profile to influence scoring; if not provided and data missing we already allowed that above
     try:
         pref_wind = profile.get("preferred_wind_m_s")
         if pref_wind is None:
-            raise MissingDataError("species_profile missing required 'preferred_wind_m_s'")
-        if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
-            pw_min, pw_max = float(pref_wind[0]), float(pref_wind[1])
+            # No preference: if wind data present compute neutral (10), otherwise already handled above
+            if wind is None:
+                wind_score = 10.0
+            else:
+                wind_score = 10.0
         else:
-            pw = float(pref_wind) if pref_wind is not None else 0.0
-            pw_min, pw_max = pw, pw
-        wind_tol = max(1.0, 0.2 * max(1.0, pw_max))
-        wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
+            if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
+                pw_min, pw_max = float(pref_wind[0]), float(pref_wind[1])
+            else:
+                pw = float(pref_wind) if pref_wind is not None else 0.0
+                pw_min, pw_max = pw, pw
+            wind_tol = max(1.0, 0.2 * max(1.0, pw_max))
+            if wind is None:
+                # missing wind data but pref exists -> should have been caught earlier
+                raise MissingDataError("wind_m_s required by profile but missing")
+            wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
         wind_score = _clamp_0_10(wind_score)
         comp["wind"] = {"score_10": round(wind_score, 3), "score_100": int(round(wind_score * 10))}
     except MissingDataError:
@@ -364,35 +410,82 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute wind component", exc_info=True)
 
-    # WAVES component — require max_wave_height_m in profile
+    # WAVES component — require max_wave_height_m in profile to limit, but allow no preference
     try:
         max_wave_pref = profile.get("max_wave_height_m")
+        wave_score = None
         if max_wave_pref is None:
-            raise MissingDataError("species_profile missing required 'max_wave_height_m'")
-        max_wave = float(max_wave_pref)
-        if wave is None:
-            wave_score = 0.0
+            # species has no wave preference: if data absent -> max score already allowed; else compute a neutral high score
+            if wave is None:
+                wave_score = 10.0
+            else:
+                # scale conservatively: small waves -> 10, larger waves -> 10 unless we want to penalize explicitly
+                wave_score = 10.0
         else:
+            max_wave = float(max_wave_pref)
+            if wave is None:
+                # missing wave data but pref exists -> missing earlier
+                raise MissingDataError("wave_height_m required by profile but missing")
             if wave <= 0.0:
                 wave_score = 10.0
             elif wave >= max_wave:
                 wave_score = 0.0
             else:
                 wave_score = 10.0 * (1.0 - (wave / max_wave))
-        wave_score = _clamp_0_10(wave_score)
-        comp["waves"] = {"score_10": round(wave_score, 3), "score_100": int(round(wave_score * 10))}
+
+        # incorporate wave_period / swell_period preferences if present
+        period_score = None
+        # profile keys may be "preferred_wave_period_s" or "preferred_swell_period_s"
+        pref_wave_period = profile.get("preferred_wave_period_s")
+        pref_swell_period = profile.get("preferred_swell_period_s")
+        try:
+            if pref_wave_period and wave_period is not None:
+                # accept single value or min/max list
+                if isinstance(pref_wave_period, (list, tuple)) and len(pref_wave_period) >= 2:
+                    pp_min, pp_max = float(pref_wave_period[0]), float(pref_wave_period[1])
+                else:
+                    pp = float(pref_wave_period)
+                    pp_min, pp_max = pp, pp
+                period_score = _linear_within_score_10(float(wave_period), pp_min, pp_max, tolerance=2.0)
+            elif pref_swell_period and swell_period is not None:
+                if isinstance(pref_swell_period, (list, tuple)) and len(pref_swell_period) >= 2:
+                    sp_min, sp_max = float(pref_swell_period[0]), float(pref_swell_period[1])
+                else:
+                    sp = float(pref_swell_period)
+                    sp_min, sp_max = sp, sp
+                period_score = _linear_within_score_10(float(swell_period), sp_min, sp_max, tolerance=2.0)
+        except Exception:
+            period_score = None
+
+        # combine height-based wave_score and period_score if both available
+        if period_score is not None:
+            # equally weight period and height for now
+            final_wave_score = ((wave_score or 0.0) + (period_score or 0.0)) / 2.0
+        else:
+            final_wave_score = wave_score if wave_score is not None else 10.0
+
+        final_wave_score = _clamp_0_10(final_wave_score)
+        comp["waves"] = {"score_10": round(final_wave_score, 3), "score_100": int(round(final_wave_score * 10))}
     except MissingDataError:
         raise
     except Exception:
         _LOGGER.debug("Failed to compute waves component", exc_info=True)
 
-    # TIME component
+    # TIME component (extended: support dawn/dusk/day/night tokens)
     try:
         preferred_times_raw = profile.get("preferred_times", []) or []
 
         def _normalize_preferred_times(pref_times: List[Any]) -> List[int]:
             out_hours: List[int] = []
+            token_map = {
+                "dawn": list(range(5, 7)),  # 05-06
+                "dusk": list(range(17, 19)),  # 17-18
+                "day": list(range(7, 17)),  # 07-16
+                "night": [h for h in range(0, 24) if h not in range(7, 17)],  # 19-06 roughly
+                "all_day": list(range(0, 24)),
+            }
             for it in pref_times:
+                # object forms as before
                 if isinstance(it, dict):
                     sh = None
                     eh = None
@@ -413,6 +506,11 @@ def compute_score(
                     try:
                         if sh is None:
                             continue
+                        # if start is a token like "dawn", expand
+                        if isinstance(sh, str) and str(sh).strip().lower() in token_map:
+                            token_hours = token_map[str(sh).strip().lower()]
+                            out_hours.extend(token_hours)
+                            continue
                         sh_i = int(sh)
                     except Exception:
                         continue
@@ -420,6 +518,11 @@ def compute_score(
                         out_hours.append(sh_i % 24)
                     else:
                         try:
+                            # token for end?
+                            if isinstance(eh, str) and str(eh).strip().lower() in token_map:
+                                token_hours = token_map[str(eh).strip().lower()]
+                                out_hours.extend(token_hours)
+                                continue
                             eh_i = int(eh)
                         except Exception:
                             out_hours.append(sh_i % 24)
@@ -430,6 +533,12 @@ def compute_score(
                             h = (h + 1) % 24
                             out_hours.append(h)
                 else:
+                    # primitives: number or token string
+                    if isinstance(it, str):
+                        key = it.strip().lower()
+                        if key in token_map:
+                            out_hours.extend(token_map[key])
+                            continue
                     try:
                         out_hours.append(int(float(it)) % 24)
                     except Exception:
@@ -501,19 +610,31 @@ def compute_score(
         _LOGGER.debug("Failed to compute season component", exc_info=True)
 
     try:
-        moon_pref = profile.get("moon_preference", []) or profile.get("moon_preference", []) or []
+        # Simplify moon_pref retrieval (removed redundant repetition)
+        moon_pref = profile.get("moon_preference", []) or []
+
         if not moon_pref:
             moon_score = 10.0
         else:
             matched = False
             for mpref in moon_pref:
+                # numeric first
                 try:
                     mpf = float(mpref)
                     if moon_phase_val is not None and abs(moon_phase_val - mpf) <= 0.05:
                         matched = True
                         break
                 except Exception:
-                    pass
+                    # try textual mapping
+                    try:
+                        key = str(mpref).strip().lower().replace(" ", "_")
+                        if key in MOON_NAME_TO_FRAC:
+                            target = MOON_NAME_TO_FRAC[key]
+                            if moon_phase_val is not None and abs(moon_phase_val - target) <= 0.05:
+                                matched = True
+                                break
+                    except Exception:
+                        continue
             moon_score = 10.0 if matched else 4.0
         moon_score = _clamp_0_10(moon_score)
         comp["moon"] = {"score_10": round(moon_score, 3), "score_100": int(round(moon_score * 10))}
@@ -523,14 +644,23 @@ def compute_score(
     try:
         pref_temp = profile.get("preferred_temp_c")
         if pref_temp is None:
-            raise MissingDataError("species_profile missing required 'preferred_temp_c'")
-        if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
-            pt_min, pt_max = float(pref_temp[0]), float(pref_temp[1])
+            # no preference -> max score even if temp missing
+            if temp is None:
+                temp_score = 10.0
+            else:
+                temp_score = 10.0
         else:
-            pt = float(pref_temp) if pref_temp is not None else 10.0
-            pt_min, pt_max = pt, pt
-        temp_tol = 5.0
-        temp_score = _linear_within_score_10(float(temp), pt_min, pt_max, temp_tol)
+            if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
+                pt_min, pt_max = float(pref_temp[0]), float(pref_temp[1])
+            else:
+                pt = float(pref_temp) if pref_temp is not None else 10.0
+                pt_min, pt_max = pt, pt
+            # tolerance
+            temp_tol = _to_float_safe(profile.get("preferred_temp_tol_c")) or 5.0
+            if temp is None:
+                # missing temp but profile required -> should have been caught earlier
+                raise MissingDataError("temperature_c required by profile but missing")
+            temp_score = _linear_within_score_10(float(temp), pt_min, pt_max, temp_tol)
         temp_score = _clamp_0_10(temp_score)
         comp["temperature"] = {"score_10": round(temp_score, 3), "score_100": int(round(temp_score * 10))}
     except MissingDataError:
@@ -538,9 +668,16 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute temperature component", exc_info=True)
 
+    # Compute overall score: keep global weights but avoid penalizing components that are not present in comp
     overall_10 = 0.0
+    # if a component exists in weights but missing from comp treat absent component as full score (10)
     for k in weights:
-        overall_10 += weights.get(k, 0.0) * comp.get(k, {}).get("score_10", 0.0)
+        comp_score = comp.get(k, {}).get("score_10")
+        if comp_score is None:
+            # if species had no preference and we didn't compute component, treat as 10
+            overall_10 += weights.get(k, 0.0) * 10.0
+        else:
+            overall_10 += weights.get(k, 0.0) * comp_score
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
@@ -740,8 +877,9 @@ def compute_score(
 
         # TIDE PHASE breach detection - strict: expect string tide_phase if profile requests it
         try:
-            pref_tide_phase = profile.get("preferred_tide_phase", []) or []
-            if pref_tide_phase:
+            pref_tide_phase_check = profile.get("preferred_tide_phase", []) or []
+            pref_tide_phase_check = [str(p).strip().lower() for p in pref_tide_phase_check if str(p).strip().lower() not in ("any", "none", "")]
+            if pref_tide_phase_check:
                 tide_phase_val = None
                 if "tide_phase" in data:
                     tp = data.get("tide_phase")
@@ -760,9 +898,9 @@ def compute_score(
                 if tide_phase_val is None or not isinstance(tide_phase_val, str):
                     raise MissingDataError("tide_phase (string) required by species profile but missing or not a string")
 
-                desired = [str(p).lower() for p in pref_tide_phase]
+                desired = [str(p).lower() for p in pref_tide_phase_check]
                 if str(tide_phase_val).lower() not in desired:
-                    _add_breach("tide_phase", tide_phase_val, unit=None, expected_min=None, expected_max=None, expected_pref_min=None, expected_pref_max=None, severity="caution", reason="tide_phase_mismatch", advice=f"{profile.get('common_name','Species')} prefers tide phases {pref_tide_phase}; current phase differs")
+                    _add_breach("tide_phase", tide_phase_val, unit=None, expected_min=None, expected_max=None, expected_pref_min=None, expected_pref_max=None, severity="caution", reason="tide_phase_mismatch", advice=f"{profile.get('common_name','Species')} prefers tide phases {pref_tide_phase_check}; current phase differs")
         except MissingDataError:
             raise
         except Exception:
@@ -770,18 +908,23 @@ def compute_score(
 
         # MOON preference mismatch
         try:
-            moon_pref = profile.get("moon_preference", []) or profile.get("moon_preference", []) or []
-            if moon_pref and moon_phase_val is not None:
+            moon_pref_check = profile.get("moon_preference", []) or []
+            if moon_pref_check and moon_phase_val is not None:
                 matched = False
-                for mpref in moon_pref:
+                for mpref in moon_pref_check:
                     try:
                         if isinstance(mpref, str):
-                            continue
-                        else:
-                            mpf = float(mpref)
-                            if abs(moon_phase_val - mpf) <= 0.05:
-                                matched = True
-                                break
+                            # textual mapping
+                            key = str(mpref).strip().lower().replace(" ", "_")
+                            if key in MOON_NAME_TO_FRAC:
+                                if abs(moon_phase_val - MOON_NAME_TO_FRAC[key]) <= 0.05:
+                                    matched = True
+                                    break
+                            # fallthrough to numeric attempt
+                        mpf = float(mpref)
+                        if abs(moon_phase_val - mpf) <= 0.05:
+                            matched = True
+                            break
                     except Exception:
                         continue
                 if not matched:
