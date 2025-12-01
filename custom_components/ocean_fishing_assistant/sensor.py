@@ -29,7 +29,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, CONF_NAME, CONF_THRESHOLDS
+from .const import DOMAIN, CONF_NAME
 from . import unit_helpers
 from . import tide_proxy
 from .moon_utils import coerce_phase as moon_coerce_phase, fraction_to_name
