@@ -733,7 +733,22 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        thresholds = self._config_entry.data.get(CONF_THRESHOLDS, {})
+        # Prefer values from entry.options (what HA stores when the options flow returns),
+        # but accept a nested CONF_THRESHOLDS dict in either options or data for compatibility.
+        opts = dict(self._config_entry.options or {})
+        data_thresholds = dict(self._config_entry.data.get(CONF_THRESHOLDS, {}) or {})
+        opts_thresholds = {}
+        if isinstance(opts.get(CONF_THRESHOLDS), dict):
+            opts_thresholds = dict(opts.get(CONF_THRESHOLDS))
+
+        def _get(field: str, fallback: Any) -> Any:
+            # precedence: top-level option -> nested option thresholds -> data thresholds -> fallback
+            if field in opts:
+                return opts.get(field)
+            if field in opts_thresholds:
+                return opts_thresholds.get(field)
+            return data_thresholds.get(field, fallback)
+
         # show units-driven labels based on stored units in config_entry.data
         units = self._config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
@@ -744,7 +759,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                    vol.Required(CONF_TIME_PERIODS, default=_get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
@@ -753,27 +768,27 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             mode="dropdown",
                         )
                     ),
-                    vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
+                    vol.Required("max_wind_speed", default=_get("max_wind_speed", 25)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
-                    vol.Required("max_gust_speed", default=thresholds.get("max_gust_speed", 40)): selector.NumberSelector(
+                    vol.Required("max_gust_speed", default=_get("max_gust_speed", 40)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
-                    vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
+                    vol.Required("max_wave_height", default=_get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
                     # NEW: options flow exposure for precipitation chance
-                    vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 80)): selector.NumberSelector(
+                    vol.Required("max_precip_chance", default=_get("max_precip_chance", 80)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
-                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 3)): selector.NumberSelector(
+                    vol.Required("min_swell_period", default=_get("min_swell_period", 3)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                     ),
-                    vol.Required("min_visibility", default=thresholds.get("min_visibility", 1)): selector.NumberSelector(
+                    vol.Required("min_visibility", default=_get("min_visibility", 1)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                     ),
-                    # RESTORE: expose_raw option in Options flow (left here so users can toggle later)
-                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
+                    # RESTORE: expose_raw option in Options flow — default computed from options/data
+                    vol.Required("expose_raw", default=bool(_get("expose_raw", False))): selector.BooleanSelector(),
                 }
             ),
         )
