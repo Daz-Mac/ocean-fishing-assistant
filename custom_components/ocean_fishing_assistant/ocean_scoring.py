@@ -223,7 +223,7 @@ def compute_score(
         return x is not None and not (isinstance(x, (list, tuple)) and len(x) == 0)
 
     # Coerce empty-list fields to None to avoid numeric conversion errors
-    for key in ("preferred_wind_m_s", "preferred_temp_c", "max_wave_height_m", "preferred_tide_phase", "preferred_times", "moon_preference"):
+    for key in ("preferred_wind_m_s", "preferred_temp_c", "max_wave_height_m", "preferred_tide_phase", "preferred_times", "moon_preference", "preferred_wave_period_s"):
         val = profile.get(key)
         if isinstance(val, (list, tuple)) and len(val) == 0:
             profile[key] = None
@@ -250,9 +250,8 @@ def compute_score(
     temp = _get_at("temperature_c", use_index)
     pressure_arr = data.get("pressure_hpa")
 
-    # wave/wave-period/swell values
+    # wave/wave-period values (we now use only wave_period_s)
     wave_period = _get_at("wave_period_s", use_index)
-    swell_period = _get_at("swell_period_s", use_index)
 
     moon_phase_val = None
     if "moon_phase" in data:
@@ -303,6 +302,9 @@ def compute_score(
     # require at least a neighbor pressure point (forward OR backward) -- we keep this strict
     if not pressure_arr_ok:
         missing.append("pressure_hpa_series_with_neighbor_point")
+    # wave period required if profile specifies preferred_wave_period_s
+    if _pref_is_set(profile.get("preferred_wave_period_s")) and wave_period is None:
+        missing.append("wave_period_s")
 
     if missing:
         msg = f"Missing required inputs for scoring at index={use_index} timestamp={timestamps[use_index]}: {', '.join(missing)}"
@@ -398,7 +400,7 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute wind component", exc_info=True)
 
-    # WAVES component — require max_wave_height_m in profile to limit, but allow no preference
+    # WAVES component — strict single-field logic: only preferred_wave_period_s used and only wave_period_s data consulted
     try:
         max_wave_pref = profile.get("max_wave_height_m")
         wave_score = None
@@ -407,7 +409,7 @@ def compute_score(
             if wave is None:
                 wave_score = 10.0
             else:
-                # scale conservatively: small waves -> 10, larger waves -> 10 unless we want to penalize explicitly
+                # neutral scoring if no explicit pref
                 wave_score = 10.0
         else:
             max_wave = float(max_wave_pref)
@@ -421,11 +423,9 @@ def compute_score(
             else:
                 wave_score = 10.0 * (1.0 - (wave / max_wave))
 
-        # incorporate wave_period / swell_period preferences if present
-        period_score = None
-        # profile keys may be "preferred_wave_period_s" or "preferred_swell_period_s"
+        # unified preference: only preferred_wave_period_s used by profiles (strict)
         pref_wave_period = profile.get("preferred_wave_period_s")
-        pref_swell_period = profile.get("preferred_swell_period_s")
+        period_score = None
         try:
             if pref_wave_period and wave_period is not None:
                 # accept single value or min/max list
@@ -435,13 +435,6 @@ def compute_score(
                     pp = float(pref_wave_period)
                     pp_min, pp_max = pp, pp
                 period_score = _linear_within_score_10(float(wave_period), pp_min, pp_max, tolerance=2.0)
-            elif pref_swell_period and swell_period is not None:
-                if isinstance(pref_swell_period, (list, tuple)) and len(pref_swell_period) >= 2:
-                    sp_min, sp_max = float(pref_swell_period[0]), float(pref_swell_period[1])
-                else:
-                    sp = float(pref_swell_period)
-                    sp_min, sp_max = sp, sp
-                period_score = _linear_within_score_10(float(swell_period), sp_min, sp_max, tolerance=2.0)
         except Exception:
             period_score = None
 
@@ -535,28 +528,79 @@ def compute_score(
 
         normalized_hours = _normalize_preferred_times(preferred_times_raw)
 
-        if not normalized_hours:
+        # NEW: detect whether the profile explicitly requested 'dawn'/'dusk' special windows
+        requested_special_tokens = set()
+        try:
+            for it in preferred_times_raw:
+                if isinstance(it, str):
+                    key = it.strip().lower()
+                    if key in ("dawn", "dusk"):
+                        requested_special_tokens.add(key)
+                elif isinstance(it, dict):
+                    # dicts may include start keyword with token string
+                    for k in ("start", "start_hour", "hour"):
+                        if k in it and isinstance(it.get(k), str):
+                            key = str(it.get(k)).strip().lower()
+                            if key in ("dawn", "dusk"):
+                                requested_special_tokens.add(key)
+        except Exception:
+            requested_special_tokens = set()
+
+        # If the user requested special tokens AND we have precomputed period_forecasts,
+        # prefer index-based matching: check whether current use_index is included in the
+        # period_forecasts[date_key][pname]['indices'] for any requested pname.
+        precomputed_pf = data.get("period_forecasts") if isinstance(data.get("period_forecasts"), dict) else {}
+        time_score = 10.0
+        if not normalized_hours and not requested_special_tokens:
+            # no preference
             time_score = 10.0
         else:
             try:
                 t_dt = _coerce_datetime(timestamps[use_index])
                 hour = t_dt.hour if t_dt else None
+                date_key = t_dt.date().isoformat() if t_dt else None
             except Exception:
                 hour = None
-            if hour is None:
-                time_score = 5.0
-            else:
-                def hour_distance(a: int, b: int) -> int:
-                    d = abs(a - b) % 24
-                    return min(d, 24 - d)
+                date_key = None
 
-                min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
-                if min_dist <= 3:
-                    time_score = 10.0
-                elif min_dist >= 6:
-                    time_score = 0.0
+            # If precomputed period forecasts exist and the profile requested dawn/dusk,
+            # check index membership first (precise).
+            used_precomputed_match = False
+            if requested_special_tokens and precomputed_pf and date_key:
+                pmap = precomputed_pf.get(date_key) or {}
+                for tok in requested_special_tokens:
+                    pdata = pmap.get(tok)
+                    if pdata and isinstance(pdata, dict):
+                        indices = pdata.get("indices") or []
+                        try:
+                            if int(use_index) in [int(x) for x in indices]:
+                                time_score = 10.0
+                                used_precomputed_match = True
+                                break
+                        except Exception:
+                            # ignore malformed indices and continue to fallback
+                            continue
+
+            if not used_precomputed_match:
+                # fallback to hour-based logic (existing behavior)
+                if hour is None:
+                    time_score = 5.0
                 else:
-                    time_score = 10.0 * (1.0 - ((min_dist - 3.0) / 3.0))
+                    def hour_distance(a: int, b: int) -> int:
+                        d = abs(a - b) % 24
+                        return min(d, 24 - d)
+
+                    if not normalized_hours:
+                        time_score = 10.0
+                    else:
+                        min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
+                        if min_dist <= 3:
+                            time_score = 10.0
+                        elif min_dist >= 6:
+                            time_score = 0.0
+                        else:
+                            time_score = 10.0 * (1.0 - ((min_dist - 3.0) / 3.0))
+
         time_score = _clamp_0_10(time_score)
         comp["time"] = {"score_10": round(time_score, 3), "score_100": int(round(time_score * 10))}
     except Exception:
@@ -721,7 +765,7 @@ def compute_score(
                     safety["reasons"].append("vis_near_limit")
 
             min_swell = _to_float_safe(safety_limits.get("min_swell_period_s"))
-            swell = _get_at("swell_period_s", use_index) if "swell_period_s" in data else None
+            swell = None  # we no longer use swell_period_s data for safety by design
             if min_swell is not None and swell is not None:
                 if swell < min_swell:
                     safety["unsafe"] = True
@@ -918,7 +962,7 @@ def compute_score(
             "timestamp": timestamps[use_index],
             "moon_phase": moon_phase_val,
             "wind_gust": _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None,
-            "swell_period_s": _get_at("swell_period_s", use_index) if "swell_period_s" in data else None,
+            "swell_period_s": None,
             "precipitation_probability": _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None,
         },
         "profile_used": profile.get("common_name", "unknown"),
@@ -950,7 +994,7 @@ def compute_forecast(
                     "temperature": payload.get("temperature_c")[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),
                     "wind": payload.get("wind_m_s")[idx] if isinstance(payload.get("wind_m_s"), (list, tuple)) else payload.get("wind_m_s"),
                     "wind_gust": payload.get("wind_max_m_s")[idx] if isinstance(payload.get("wind_max_m_s"), (list, tuple)) else payload.get("wind_max_m_s"),
-                    "swell_period_s": payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) else payload.get("swell_period_s"),
+                    "swell_period_s": None,
                     "pressure_hpa": payload.get("pressure_hpa")[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
                     "wave_height_m": payload.get("wave_height_m")[idx] if isinstance(payload.get("wave_height_m"), (list, tuple)) else payload.get("wave_height_m"),
                     "wave_period_s": payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) else payload.get("wave_period_s"),
