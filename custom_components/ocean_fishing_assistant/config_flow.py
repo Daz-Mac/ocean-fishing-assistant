@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -19,7 +19,6 @@ from .const import (
     CONF_SPECIES_REGION,
     CONF_HABITAT_PRESET,
     CONF_TIME_PERIODS,
-    CONF_THRESHOLDS,
     CONF_TIMEZONE,
     CONF_ELEVATION,
     CONF_AUTO_APPLY_THRESHOLDS,
@@ -35,9 +34,8 @@ from .const import (
     CONF_WEATHER_CACHE_TTL,
     TIDE_PROXY_TTL_DEFAULT,
     WEATHER_FETCHER_CACHE_TTL_DEFAULT,
-    CONF_FACTOR_WEIGHTS,
 )
-from .ocean_scoring import FACTOR_WEIGHTS
+
 from .species_loader import SpeciesLoader
 from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
 
@@ -85,7 +83,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     existing_entries = self.hass.config_entries.async_entries(DOMAIN)
                     for e in existing_entries:
                         if e.title == submitted_title:
-                            _LOGGER.debug("Attempt to create entry with duplicate title '%s' rejected at location step", submitted_title)
+                            _LOGGER.debug(
+                                "Attempt to create entry with duplicate title '%s' rejected at location step",
+                                submitted_title,
+                            )
                             errors["base"] = "title_exists"
                             break
 
@@ -178,15 +179,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
                 )
 
-            # Save advanced options and continue flow; next we present factor weight configuration (Advanced-only)
+            # Save advanced options and continue flow
             self.ocean_config["update_interval"] = ui_update_interval
             self.ocean_config["expose_raw"] = ui_expose_raw
             self.ocean_config[CONF_FETCH_CACHE_TTL] = ui_fetch_ttl
             self.ocean_config[CONF_TIDE_TTL] = ui_tide_ttl
             self.ocean_config[CONF_WEATHER_CACHE_TTL] = ui_weather_ttl
 
-            # Move to factor weights step in advanced mode
-            return await self.async_step_factor_weights()
+            return await self.async_step_ocean_species()
 
         return self.async_show_form(
             step_id="advanced_config",
@@ -211,60 +211,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # New advanced step: Factor weights (Advanced-only, strict sum-to-100)
-    # ----
-    async def async_step_factor_weights(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced: configure per-factor scoring weights (sum must equal 100)."""
-        # Build UI schema dynamically from FACTOR_WEIGHTS keys. Defaults present scaled to 100.
-        default_total = sum(FACTOR_WEIGHTS.values()) or 1.0
-        defaults: Dict[str, int] = {k: int(round(float(v) * 100.0 / default_total)) for k, v in FACTOR_WEIGHTS.items()}
-
-        schema_fields: Dict[Any, Any] = {}
-        for k in FACTOR_WEIGHTS.keys():
-            schema_fields[vol.Required(k, default=defaults.get(k, 0))] = selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=100, step=1)
-            )
-
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            try:
-                submitted: Dict[str, int] = {k: int(user_input.get(k, 0)) for k in FACTOR_WEIGHTS.keys()}
-            except Exception:
-                errors["base"] = "invalid_weights_values"
-                return self.async_show_form(
-                    step_id="factor_weights",
-                    data_schema=vol.Schema(schema_fields),
-                    errors=errors,
-                    description_placeholders={"info": "Set relative importance for scoring factors; sum must equal 100."},
-                )
-
-            # Enforce keys present (UI already provides them) and non-negative
-            for k, v in submitted.items():
-                if v is None or v < 0:
-                    errors["base"] = "invalid_weights_values"
-                    break
-
-            total = sum(submitted.values())
-            if total <= 0:
-                errors["base"] = "weights_sum_zero"
-            elif total != 100:
-                # Strict: require exact sum-to-100
-                errors["base"] = "weights_sum_not_100"
-
-            if not errors:
-                # Normalize to floats summing to 1.0 and store in ocean_config for later persistence
-                normalized = {k: float(v) / 100.0 for k, v in submitted.items()}
-                self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized
-                return await self.async_step_ocean_species()
-
-        return self.async_show_form(
-            step_id="factor_weights",
-            data_schema=vol.Schema(schema_fields),
-            errors=errors or {},
-            description_placeholders={"info": "Set relative importance for scoring factors; sum must equal 100."},
-        )
-
-    # ----
     # Species selection flow: first choose profile type (general vs species)
     # ----
     async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -285,15 +231,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="ocean_species",
                     data_schema=vol.Schema(
-                        {vol.Required("profile_type"): selector.SelectSelector(
-                            selector.SelectSelectorConfig(
-                                options=[
-                                    {"value": "general", "label": "General region profile (mixed)"},
-                                    {"value": "species", "label": "Target a specific species (region-filtered)"},
-                                ],
-                                mode="list",
+                        {
+                            vol.Required("profile_type"): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": "general", "label": "General region profile (mixed)"},
+                                        {"value": "species", "label": "Target a specific species (region-filtered)"},
+                                    ],
+                                    mode="list",
+                                )
                             )
-                        )}
+                        }
                     ),
                     errors={"base": "invalid_selection"},
                 )
@@ -301,15 +249,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="ocean_species",
             data_schema=vol.Schema(
-                {vol.Required("profile_type"): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": "general", "label": "General region profile (mixed)"},
-                            {"value": "species", "label": "Target a specific species (region-filtered)"},
-                        ],
-                        mode="list",
+                {
+                    vol.Required("profile_type"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "general", "label": "General region profile (mixed)"},
+                                {"value": "species", "label": "Target a specific species (region-filtered)"},
+                            ],
+                            mode="list",
+                        )
                     )
-                )}
+                }
             ),
             description_placeholders={"info": "Choose whether to use a general regional profile or target a specific species."},
         )
@@ -353,9 +303,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="select_general_profile",
             data_schema=vol.Schema(
-                {vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=options, mode="dropdown")
-                )}
+                {
+                    vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, mode="dropdown")
+                    )
+                }
             ),
             description_placeholders={"info": "Choose a mixed/general regional profile."},
         )
@@ -382,9 +334,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="select_region",
                     data_schema=vol.Schema(
-                        {vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
-                            selector.SelectSelectorConfig(options=[{"value": r["id"], "label": r.get("name", r["id"])} for r in regions], mode="dropdown")
-                        )}
+                        {
+                            vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[{"value": r["id"], "label": r.get("name", r["id"])} for r in regions],
+                                    mode="dropdown",
+                                )
+                            )
+                        }
                     ),
                     errors={"base": "invalid_region"},
                 )
@@ -399,9 +356,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="select_region",
             data_schema=vol.Schema(
-                {vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=region_options, mode="dropdown")
-                )}
+                {
+                    vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=region_options, mode="dropdown")
+                    )
+                }
             ),
             description_placeholders={"info": "Choose the region you will fish in — species list will be filtered by this region."},
         )
@@ -429,9 +388,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="select_species_for_region",
                     data_schema=vol.Schema(
-                        {vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                            selector.SelectSelectorConfig(options=[{"value": s["id"], "label": f'{s.get("emoji","🐟")} {s.get("common_name", s["id"])}'} for s in species_list], mode="dropdown")
-                        )}
+                        {
+                            vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": s["id"], "label": f'{s.get("emoji","🐟")} {s.get("common_name", s["id"])}'}
+                                        for s in species_list
+                                    ],
+                                    mode="dropdown",
+                                )
+                            )
+                        }
                     ),
                     errors={"base": "invalid_species_for_region"},
                 )
@@ -453,9 +420,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="select_species_for_region",
             data_schema=vol.Schema(
-                {vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=options, mode="dropdown")
-                )}
+                {
+                    vol.Required(CONF_SPECIES_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, mode="dropdown")
+                    )
+                }
             ),
             description_placeholders={"info": "Choose the specific species you want to target in this region."},
         )
@@ -531,11 +500,20 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="ocean_time_periods",
                     data_schema=vol.Schema(
                         {
-                            vol.Required(CONF_TIME_PERIODS, default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                            vol.Required(
+                                CONF_TIME_PERIODS,
+                                default=self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
+                            ): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                                        {
+                                            "value": TIME_PERIODS_FULL_DAY,
+                                            "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)",
+                                        },
+                                        {
+                                            "value": TIME_PERIODS_DAWN_DUSK,
+                                            "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
+                                        },
                                     ],
                                     mode="list",
                                 )
@@ -543,7 +521,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         }
                     ),
                     errors=errors,
-                    description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+                    description_placeholders={
+                        "info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."
+                    },
                 )
 
             self.ocean_config.update(user_input)
@@ -578,15 +558,19 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if units not in ("metric", "imperial"):
                 return self.async_show_form(
                     step_id="ocean_units",
-                    data_schema=vol.Schema({vol.Required("units", default="metric"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
-                            ],
-                            mode="dropdown",
-                        )
-                    )}),
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required("units", default="metric"): selector.SelectSelector(
+                                selector.SelectSelectorConfig(
+                                    options=[
+                                        {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                        {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                                    ],
+                                    mode="dropdown",
+                                )
+                            )
+                        }
+                    ),
                     errors={"base": "invalid_units"},
                 )
             self.ocean_config["units"] = units
@@ -659,20 +643,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_HABITAT_PRESET: habitat_preset,
                     CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
                     CONF_AUTO_APPLY_THRESHOLDS: False,
-                    # store both user thresholds (for UI/options) and canonical safety_limits (for runtime)
-                    CONF_THRESHOLDS: {
-                        "max_wind_speed": user_input["max_wind_speed"],
-                        "max_gust_speed": user_input.get("max_gust_speed"),
-                        "max_wave_height": user_input["max_wave_height"],
-                        "min_visibility": user_input.get("min_visibility"),
-                        "min_temperature": user_input.get("min_temperature"),
-                        "max_temperature": user_input.get("max_temperature"),
-                        "min_swell_period": user_input.get("min_swell_period"),
-                        # NEW: include precip chance in stored thresholds for options/UI
-                        "max_precip_chance": user_input.get("max_precip_chance"),
-                        # Preserve expose_raw from advanced config (moved there)
-                        "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
-                    },
+                    # store user thresholds as top-level keys (no nested CONF_THRESHOLDS)
+                    "max_wind_speed": user_input["max_wind_speed"],
+                    "max_gust_speed": user_input.get("max_gust_speed"),
+                    "max_wave_height": user_input["max_wave_height"],
+                    "min_visibility": user_input.get("min_visibility"),
+                    "min_temperature": user_input.get("min_temperature"),
+                    "max_temperature": user_input.get("max_temperature"),
+                    "min_swell_period": user_input.get("min_swell_period"),
+                    # NEW: include precip chance in stored thresholds for options/UI
+                    "max_precip_chance": user_input.get("max_precip_chance"),
+                    # Preserve expose_raw from advanced config (moved there)
+                    "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
                     # Strict runtime keys required by async_setup_entry
                     "units": units,
                     "wind_unit": wind_unit,
@@ -684,16 +666,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
 
                 # include TTL overrides from advanced config (Option B)
-                final_config[CONF_FETCH_CACHE_TTL] = int(self.ocean_config.get(CONF_FETCH_CACHE_TTL, DEFAULT_UPDATE_INTERVAL))
-                final_config[CONF_TIDE_TTL] = int(self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
-                final_config[CONF_WEATHER_CACHE_TTL] = int(self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
+                final_config[CONF_FETCH_CACHE_TTL] = int(
+                    self.ocean_config.get(CONF_FETCH_CACHE_TTL, DEFAULT_UPDATE_INTERVAL)
+                )
+                final_config[CONF_TIDE_TTL] = int(
+                    self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
+                )
+                final_config[CONF_WEATHER_CACHE_TTL] = int(
+                    self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
+                )
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
-
-                # Include factor weights if present (we store normalized floats summing to 1.0)
-                if CONF_FACTOR_WEIGHTS in self.ocean_config:
-                    final_config[CONF_FACTOR_WEIGHTS] = self.ocean_config[CONF_FACTOR_WEIGHTS]
 
                 # ---- DUPLICATE CHECKS / UNIQUE ID HANDLING ----
                 # 1) Warn user if an existing entry already has the same human-visible title.
@@ -714,7 +698,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.debug("Unique-id registration/abort check raised: %s", exc)
                     raise
 
-                _LOGGER.debug("Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id)
+                _LOGGER.debug(
+                    "Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id
+                )
 
                 return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
             except KeyError as ke:
@@ -727,7 +713,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self._show_ocean_thresholds_form()
 
     def _show_ocean_thresholds_form(self, errors: dict[str, str] | None = None) -> FlowResult:
-        habitat = HABITAT_PRESETS.get(self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT), HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}))
+        habitat = HABITAT_PRESETS.get(
+            self.ocean_config.get(CONF_HABITAT_PRESET, HABITAT_ROCKY_POINT),
+            HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}),
+        )
         units = self.ocean_config.get("units", "metric")
         # map display units for selector labels
         wind_unit_label = "km/h" if units == "metric" else "mph"
@@ -791,41 +780,34 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
-            # Persist user-provided options (unchanged behavior)
             return self.async_create_entry(title="", data=user_input)
 
-        thresholds = self._config_entry.data.get(CONF_THRESHOLDS, {})
+        # Build thresholds dict from top-level stored keys (no nested CONF_THRESHOLDS)
+        thresholds = {
+            "max_wind_speed": self._config_entry.data.get("max_wind_speed", 25),
+            "max_gust_speed": self._config_entry.data.get("max_gust_speed", 40),
+            "max_wave_height": self._config_entry.data.get("max_wave_height", 2.0),
+            "max_precip_chance": self._config_entry.data.get("max_precip_chance", 80),
+            "min_swell_period": self._config_entry.data.get("min_swell_period", 3),
+            "min_visibility": self._config_entry.data.get("min_visibility", 1),
+            "min_temperature": self._config_entry.data.get("min_temperature", 5),
+            "max_temperature": self._config_entry.data.get("max_temperature", 35),
+            "expose_raw": self._config_entry.data.get("expose_raw", False),
+        }
+
         # show units-driven labels based on stored units in config_entry.data
         units = self._config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
 
-        # Build factor-weights defaults for options UI if present in the entry data
-        weights_in_entry = self._config_entry.data.get(CONF_FACTOR_WEIGHTS)
-        if weights_in_entry and isinstance(weights_in_entry, dict):
-            # convert normalized floats to percentages
-            try:
-                total = sum(weights_in_entry.values()) or 1.0
-                fw_defaults = {k: int(round(float(v) * 100.0 / float(total))) for k, v in weights_in_entry.items()}
-            except Exception:
-                fw_defaults = {k: int(round(float(v) * 100.0)) for k, v in FACTOR_WEIGHTS.items()}
-        else:
-            total = sum(FACTOR_WEIGHTS.values()) or 1.0
-            fw_defaults = {k: int(round(float(v) * 100.0 / total)) for k, v in FACTOR_WEIGHTS.items()}
-
-        # Build factor weight schema for options flow (still enforce sum==100 here)
-        fw_fields: Dict[Any, Any] = {}
-        for k in FACTOR_WEIGHTS.keys():
-            fw_fields[vol.Required(f"fw__{k}", default=fw_defaults.get(k, 0))] = selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=100, step=1)
-            )
-
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                    vol.Required(
+                        CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)
+                    ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
@@ -855,8 +837,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     # RESTORE: expose_raw option in Options flow (left here so users can toggle later)
                     vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
-                    # Factor weights group (prefixed keys so we can validate separately)
-                    **fw_fields,
                 }
             ),
         )
