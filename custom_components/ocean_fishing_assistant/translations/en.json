@@ -23,21 +23,6 @@
           "weather_cache_ttl": "Weather cache TTL (s)"
         }
       },
-      "factor_weights": {
-        "title": "Scoring weights",
-        "description": "Adjust scoring weights (current total = {total}%). Values must add to 100%.",
-        "data": {
-          "_factors_total": "Total (%)",
-          "factor_tide": "Tide",
-          "factor_wind": "Wind",
-          "factor_waves": "Waves",
-          "factor_time": "Time of day",
-          "factor_pressure": "Pressure",
-          "factor_season": "Season",
-          "factor_moon": "Moon phase",
-          "factor_temperature": "Temperature"
-        }
-      },
       "ocean_species": {
         "title": "Profile type",
         "description": "Choose whether to use a general regional profile or target a specific species.",
@@ -123,24 +108,42 @@
       "update_interval_too_small": "Update interval is too small.",
       "ttl_too_small": "One or more TTL values are too small.",
       "invalid_advanced_values": "Invalid advanced option values.",
-      "sum_not_100": "Scoring factors must add to 100%.",
-      "invalid_factor_weights": "Provided factor weights are invalid.",
       "invalid_selection": "Invalid selection.",
       "invalid_region": "Invalid region selected.",
       "invalid_species_for_region": "Selected species is not available in the chosen region.",
-      "no_general_profiles": "No general profiles are available.",
-      "no_regions": "No regions are defined.",
-      "no_species_for_region": "No species defined for this region.",
-      "profile_not_found": "Selected profile not found.",
       "invalid_time_periods": "Invalid time periods selection.",
       "invalid_units": "Invalid units selection.",
       "unknown": "An unknown error occurred."
     },
     "abort": {
+      "profile_not_found": "Selected profile not found.",
       "no_general_profiles": "No general profiles are available in the species database.",
       "no_regions": "No regions are defined in the species database.",
-      "no_species_for_region": "No species available for the selected region.",
-      "profile_not_found": "Selected profile not found."
+      "region_missing": "Region selection is missing (internal flow error).",
+      "no_species_for_region": "No species available for the selected region."
     }
+  },
+  "strings": {
+    "setup_mode_normal": "Normal Mode",
+    "setup_mode_advanced": "Advanced Mode (show interval & extra options)",
+    "units_metric": "Metric (m, km/h, °C)",
+    "units_imperial": "Imperial (ft, mph, °F)",
+    "time_full_day_short": "🌅 Full Day (4 periods)",
+    "time_dawn_dusk_short": "🌄 Dawn & Dusk Only",
+    "time_full_day_long": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)",
+    "time_dawn_dusk_long": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
+    "profile_general_label": "General region profile (mixed)",
+    "profile_species_label": "Target a specific species (region-filtered)",
+    "habitat_open_beach": "🏖️ Open Sandy Beach",
+    "habitat_rocky_point": "🪨 Rocky Point/Jetty",
+    "habitat_harbour": "⚓ Harbour/Pier",
+    "habitat_reef": "🪸 Offshore Reef",
+    "ocean_options_full_day": "🌅 Full Day (4 periods)",
+    "ocean_options_dawn_dusk": "🌄 Dawn & Dusk Only",
+    "select_profile_prompt": "Choose whether to use a general regional profile or target a specific species.",
+    "select_general_profile_prompt": "Choose a mixed/general regional profile.",
+    "select_region_prompt": "Choose the region you will fish in — species list will be filtered by this region.",
+    "select_species_prompt": "Choose the specific species you want to target in this region.",
+    "ocean_units_prompt": "Choose display units (metric or imperial)."
   }
 }
