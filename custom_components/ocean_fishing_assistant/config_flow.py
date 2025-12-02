@@ -207,7 +207,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Factor weights (own screen) — total shown in description text (non-editable)
+    # Factor weights (own screen)
     # ----
     async def async_step_factor_weights(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show scoring factor sliders on their own step and normalize them on submit."""
@@ -244,18 +244,23 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 # require total approximately 100 (tolerance to avoid tiny float rounding issues)
                 if abs(total - 100.0) > 0.5:
-                    # re-show form with error; show computed total in visible description
-                    schema_fields: dict = {}
+                    # re-show form with error; include top numeric total as a non-authoritative display (user edits ignored)
+                    schema_fields: dict = {
+                        vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                        )
+                    }
                     for k in FACTOR_WEIGHTS.keys():
                         schema_fields[vol.Required(f"factor_{k}", default=int(round(ui_weights_raw.get(k, 0))))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
                         )
 
+                    # NOTE: using description_placeholders so older HA versions won't raise TypeError
                     return self.async_show_form(
                         step_id="factor_weights",
                         data_schema=vol.Schema(schema_fields),
                         errors={"base": "sum_not_100"},
-                        description=f"Total = {total:.1f}%. Scoring factors must add to 100%. Adjust the sliders to reach 100%.",
+                        description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
                     )
 
                 # Convert percentages to normalized floats (sum to 1.0)
@@ -264,13 +269,17 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Validate normalized weights via existing helper (keeps key checks consistent)
                 normalized_weights = _validate_and_normalize_factor_weights(normalized_weights)
 
+                # Save the computed normalized weights (ignore any user edits to _factors_total)
                 self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized_weights
 
                 return await self.async_step_ocean_species()
             except ValueError as ve:
                 _LOGGER.debug("Factor weights validation failed: %s", ve)
-                # Show form with defaults and description total
-                schema_fields: dict = {}
+                schema_fields: dict = {
+                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                    )
+                }
                 for k in FACTOR_WEIGHTS.keys():
                     schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -280,11 +289,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="factor_weights",
                     data_schema=vol.Schema(schema_fields),
                     errors={"base": "invalid_factor_weights"},
-                    description=f"Total = {total_default}%. Adjust sliders so they add to 100%.",
+                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
-                schema_fields: dict = {}
+                schema_fields: dict = {
+                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                    )
+                }
                 for k in FACTOR_WEIGHTS.keys():
                     schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -293,11 +306,16 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="factor_weights",
                     data_schema=vol.Schema(schema_fields),
                     errors={"base": "unknown"},
-                    description=f"Total = {total_default}%. Adjust sliders so they add to 100%.",
+                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
 
-        # Show sliders (single-purpose screen) — total shown in description only (non-editable)
-        schema_fields: dict = {}
+        # Show sliders (single-purpose screen) with top numeric display. Note: frontend will allow editing,
+        # but the submitted value for _factors_total is ignored and the sliders determine the result.
+        schema_fields: dict = {
+            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+            )
+        }
         for k in FACTOR_WEIGHTS.keys():
             schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -306,7 +324,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="factor_weights",
             data_schema=vol.Schema(schema_fields),
-            description=f"Adjust scoring weights (current total = {total_default}%). Values must add to 100%.",
+            description_placeholders={"info": f"Adjust scoring weights (current total = {total_default}%). Values must add to 100%."},
         )
 
     # ----
@@ -900,7 +918,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             step_id="ocean_options",
                             data_schema=vol.Schema(schema_fields),
                             errors={"base": "sum_not_100"},
-                            description=f"Total = {total:.1f}%. Scoring factors must add to 100%. Adjust the sliders to reach 100%.",
+                            description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%. Adjust the sliders to reach 100%."},
                         )
 
                     # normalize and validate weights_raw
@@ -969,5 +987,5 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(schema_fields),
-            description=f"Adjust factor weights (current total = {total_default}%). Ensure values add to 100%.",
+            description_placeholders={"info": f"Adjust factor weights (current total = {total_default}%). Ensure values add to 100%."},
         )
