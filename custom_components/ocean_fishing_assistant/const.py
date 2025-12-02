@@ -51,6 +51,9 @@ CONF_TIMEZONE = "timezone"
 CONF_ELEVATION = "elevation"
 CONF_AUTO_APPLY_THRESHOLDS = "auto_apply_thresholds"
 
+# NEW: per-entry configurable factor weights (normalized floats summing to 1.0)
+CONF_FACTOR_WEIGHTS = "factor_weights"
+
 # TTL config keys (Option B)
 CONF_FETCH_CACHE_TTL = "fetch_cache_ttl"       # coordinator shared fetch cache TTL (seconds)
 CONF_TIDE_TTL = "tide_ttl"                     # tide proxy ttl (seconds)

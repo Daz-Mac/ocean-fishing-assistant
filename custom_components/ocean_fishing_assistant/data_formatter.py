@@ -1,6 +1,8 @@
-# (Full file content — replace your existing data_formatter.py with the contents below)
+# custom_components/ocean_fishing_assistant/data_formatter.py
+"""
+Strict DataFormatter (no fallbacks, fail loudly)
+"""
 
-# Strict DataFormatter (no fallbacks, fail loudly)
 from __future__ import annotations
 
 import logging
@@ -11,6 +13,7 @@ from homeassistant.util import dt as dt_util
 
 from . import unit_helpers
 from . import ocean_scoring
+from .const import CONF_FACTOR_WEIGHTS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,10 +40,41 @@ class DataFormatter:
         "swell_wave_period": "swell_period_s",
     }
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, config_entry_data: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Optionally accept config_entry_data (the entry.data dict). If provided,
+        DataFormatter will look for CONF_FACTOR_WEIGHTS there when validate() is called
+        so saved per-entry factor weights are applied automatically.
+        """
+        self._config_entry_data = config_entry_data or {}
 
-    def validate(self, raw_payload: Dict[str, Any], species_profile=None, units: str = "metric", safety_limits: Optional[dict] = None, precomputed_period_indices: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def _extract_factor_weights_from_self(self) -> Optional[Dict[str, float]]:
+        try:
+            if isinstance(self._config_entry_data, dict) and self._config_entry_data.get(CONF_FACTOR_WEIGHTS):
+                return self._config_entry_data.get(CONF_FACTOR_WEIGHTS)
+        except Exception:
+            pass
+        # no other stored locations expected in this project, return None
+        return None
+
+    def validate(
+        self,
+        raw_payload: Dict[str, Any],
+        species_profile=None,
+        units: str = "metric",
+        safety_limits: Optional[dict] = None,
+        precomputed_period_indices: Optional[Dict[str, Dict[str, Any]]] = None,
+        factor_weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Validate and normalize the raw_payload and produce the canonical 'data'
+        structure expected by the rest of the integration.
+
+        The function will forward factor_weights (if provided) to ocean_scoring.compute_forecast.
+        If factor_weights is None, it will attempt to use self._config_entry_data[CONF_FACTOR_WEIGHTS]
+        so that per-entry saved weights are applied without modifying other call sites.
+        """
+
         if not isinstance(raw_payload, dict):
             raise ValueError("raw_payload must be a dict (strict)")
 
@@ -212,9 +246,6 @@ class DataFormatter:
                 len_t = len(timestamps)
                 if len_p < len_t:
                     missing_keys.append(f"pressure_hpa_series_too_short ({len_p} < {len_t})")
-                # NOTE: previous versions trimmed timestamps when pressure length == timestamps.
-                # That is no longer necessary because scoring now accepts a neighbor (backward or forward)
-                # for pressure delta. So we intentionally do NOT trim when len_p == len_t.
                 else:
                     # len_p >= len_t is acceptable; keep canonical as-is
                     pass
@@ -225,8 +256,15 @@ class DataFormatter:
         if missing_keys:
             raise ValueError(f"Insufficient canonical keys to compute strict forecasts (missing {missing_keys})")
 
+        # Determine factor weights to use: explicit param -> self._config_entry_data -> None
+        fw = None
+        if factor_weights is not None:
+            fw = factor_weights
+        else:
+            fw = self._extract_factor_weights_from_self()
+
         per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(
-            canonical, species_profile=species_profile, safety_limits=safety_limits, units=units
+            canonical, species_profile=species_profile, safety_limits=safety_limits, units=units, factor_weights=fw
         )
 
         for i, entry in enumerate(per_ts_forecasts):

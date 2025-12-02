@@ -77,7 +77,7 @@ async def async_setup_entry(hass, entry):
         # fail setup loudly (per project policy)
         return False
 
-    formatter = DataFormatter()
+    formatter = DataFormatter(config_entry_data=entry.data)
     _LOGGER.debug("DataFormatter instantiated for entry %s", entry.entry_id)
 
     # --- Read required canonical values from entry.data (strict: no migrations) ---

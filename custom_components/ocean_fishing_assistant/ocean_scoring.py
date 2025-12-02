@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Iterable
 from datetime import datetime, timezone
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 from . import unit_helpers
 from .moon_utils import coerce_phase, matches_moon_preference
 
+# Default global factor weights (used when no per-entry weights supplied)
 FACTOR_WEIGHTS = {
     "tide": 0.25,
     "wind": 0.15,
@@ -200,12 +201,53 @@ def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], un
     return code
 
 
+def _validate_and_normalize_factor_weights(weights: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """
+    Validate that weights include exactly the keys in FACTOR_WEIGHTS,
+    all values are numeric >= 0 and sum > 0. Normalize them to sum to 1.0.
+
+    If weights is None, returns normalized default FACTOR_WEIGHTS.
+    Raises ValueError on invalid inputs.
+    """
+    if weights is None:
+        # normalize defaults
+        total = sum(FACTOR_WEIGHTS.values()) or 1.0
+        return {k: float(v) / total for k, v in FACTOR_WEIGHTS.items()}
+
+    if not isinstance(weights, dict):
+        raise ValueError("factor_weights must be a dict mapping factor name -> numeric weight")
+
+    expected_keys = set(FACTOR_WEIGHTS.keys())
+    provided_keys = set(weights.keys())
+    if provided_keys != expected_keys:
+        raise ValueError(f"factor_weights must contain exactly keys: {sorted(expected_keys)}; provided: {sorted(provided_keys)}")
+
+    # numeric and non-negative
+    norm: Dict[str, float] = {}
+    for k, v in weights.items():
+        try:
+            fv = float(v)
+        except Exception:
+            raise ValueError(f"factor_weights value for '{k}' is not numeric: {v!r}")
+        if fv < 0.0:
+            raise ValueError(f"factor_weights value for '{k}' must be >= 0")
+        norm[k] = fv
+
+    total = sum(norm.values())
+    if total <= 0.0:
+        raise ValueError("factor_weights sum must be > 0")
+
+    # Normalize to sum to 1.0
+    return {k: float(v) / float(total) for k, v in norm.items()}
+
+
 def compute_score(
     data: Dict[str, Any],
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
     use_index: int = 0,
     safety_limits: Optional[Dict[str, Any]] = None,
     units: str = "metric",
+    factor_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     if not data or "timestamps" not in data:
         raise MissingDataError("Missing timestamps in data")
@@ -218,6 +260,13 @@ def compute_score(
         raise MissingDataError(f"species_profile must be a resolved dict (species metadata). Received: {species_profile!r}")
     profile = species_profile
 
+    # Validate factor weights (either defaults or provided)
+    try:
+        weights_norm = _validate_and_normalize_factor_weights(factor_weights)
+    except Exception as exc:
+        # Fail fast — weight config invalid
+        raise ValueError(f"Invalid factor_weights provided: {exc}")
+
     # Helper to detect whether a profile preference is actually set (not None / not empty list)
     def _pref_is_set(x: Any) -> bool:
         return x is not None and not (isinstance(x, (list, tuple)) and len(x) == 0)
@@ -227,10 +276,6 @@ def compute_score(
         val = profile.get(key)
         if isinstance(val, (list, tuple)) and len(val) == 0:
             profile[key] = None
-
-    # Use global FACTOR_WEIGHTS only (no per-species weights)
-    total = sum(FACTOR_WEIGHTS.values()) or 1.0
-    weights = {k: float(v) / total for k, v in FACTOR_WEIGHTS.items()}
 
     def _get_at(key: str, index: int = 0) -> Optional[float]:
         if key not in data:
@@ -353,7 +398,6 @@ def compute_score(
         except Exception:
             pass
 
-        # include friendly tide phase name when available (do not emit duplicate `tide_phase`)
         PHASE_NAME_MAP = {
             "rising": "Rising",
             "falling": "Falling",
@@ -373,11 +417,10 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute tide component (phase-based)", exc_info=True)
 
-    # WIND component — require preferred_wind_m_s in profile to influence scoring; if not provided and data missing we already allowed that above
+    # WIND component
     try:
         pref_wind = profile.get("preferred_wind_m_s")
         if pref_wind is None:
-            # No preference: if wind data present compute neutral (10), otherwise already handled above
             if wind is None:
                 wind_score = 10.0
             else:
@@ -390,7 +433,6 @@ def compute_score(
                 pw_min, pw_max = pw, pw
             wind_tol = max(1.0, 0.2 * max(1.0, pw_max))
             if wind is None:
-                # missing wind data but pref exists -> should have been caught earlier
                 raise MissingDataError("wind_m_s required by profile but missing")
             wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
         wind_score = _clamp_0_10(wind_score)
@@ -400,21 +442,18 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute wind component", exc_info=True)
 
-    # WAVES component — strict single-field logic: only preferred_swell_period_s used and only swell_period_s data consulted
+    # WAVES component
     try:
         max_wave_pref = profile.get("max_wave_height_m")
         wave_score = None
         if max_wave_pref is None:
-            # species has no wave preference: if data absent -> max score already allowed; else compute a neutral high score
             if wave is None:
                 wave_score = 10.0
             else:
-                # neutral scoring if no explicit pref
                 wave_score = 10.0
         else:
             max_wave = float(max_wave_pref)
             if wave is None:
-                # missing wave data but pref exists -> missing earlier
                 raise MissingDataError("wave_height_m required by profile but missing")
             if wave <= 0.0:
                 wave_score = 10.0
@@ -423,12 +462,10 @@ def compute_score(
             else:
                 wave_score = 10.0 * (1.0 - (wave / max_wave))
 
-        # unified preference: only preferred_swell_period_s used by profiles (strict)
         pref_swell_period = profile.get("preferred_swell_period_s")
         period_score = None
         try:
             if pref_swell_period and swell_period is not None:
-                # accept single value or min/max list
                 if isinstance(pref_swell_period, (list, tuple)) and len(pref_swell_period) >= 2:
                     pp_min, pp_max = float(pref_swell_period[0]), float(pref_swell_period[1])
                 else:
@@ -438,9 +475,7 @@ def compute_score(
         except Exception:
             period_score = None
 
-        # combine height-based wave_score and period_score if both available
         if period_score is not None:
-            # equally weight period and height for now
             final_wave_score = ((wave_score or 0.0) + (period_score or 0.0)) / 2.0
         else:
             final_wave_score = wave_score if wave_score is not None else 10.0
@@ -452,7 +487,7 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute waves component", exc_info=True)
 
-    # TIME component (extended: support dawn/dusk/day/night tokens)
+    # TIME component
     try:
         preferred_times_raw = profile.get("preferred_times", []) or []
 
@@ -466,7 +501,6 @@ def compute_score(
                 "all_day": list(range(0, 24)),
             }
             for it in pref_times:
-                # object forms as before
                 if isinstance(it, dict):
                     sh = None
                     eh = None
@@ -487,7 +521,6 @@ def compute_score(
                     try:
                         if sh is None:
                             continue
-                        # if start is a token like "dawn", expand
                         if isinstance(sh, str) and str(sh).strip().lower() in token_map:
                             token_hours = token_map[str(sh).strip().lower()]
                             out_hours.extend(token_hours)
@@ -499,7 +532,6 @@ def compute_score(
                         out_hours.append(sh_i % 24)
                     else:
                         try:
-                            # token for end?
                             if isinstance(eh, str) and str(eh).strip().lower() in token_map:
                                 token_hours = token_map[str(eh).strip().lower()]
                                 out_hours.extend(token_hours)
@@ -514,7 +546,6 @@ def compute_score(
                             h = (h + 1) % 24
                             out_hours.append(h)
                 else:
-                    # primitives: number or token string
                     if isinstance(it, str):
                         key = it.strip().lower()
                         if key in token_map:
@@ -528,7 +559,6 @@ def compute_score(
 
         normalized_hours = _normalize_preferred_times(preferred_times_raw)
 
-        # NEW: detect whether the profile explicitly requested 'dawn'/'dusk' special windows
         requested_special_tokens = set()
         try:
             for it in preferred_times_raw:
@@ -537,7 +567,6 @@ def compute_score(
                     if key in ("dawn", "dusk"):
                         requested_special_tokens.add(key)
                 elif isinstance(it, dict):
-                    # dicts may include start keyword with token string
                     for k in ("start", "start_hour", "hour"):
                         if k in it and isinstance(it.get(k), str):
                             key = str(it.get(k)).strip().lower()
@@ -546,13 +575,9 @@ def compute_score(
         except Exception:
             requested_special_tokens = set()
 
-        # If the user requested special tokens AND we have precomputed period_forecasts,
-        # prefer index-based matching: check whether current use_index is included in the
-        # period_forecasts[date_key][pname]['indices'] for any requested pname.
         precomputed_pf = data.get("period_forecasts") if isinstance(data.get("period_forecasts"), dict) else {}
         time_score = 10.0
         if not normalized_hours and not requested_special_tokens:
-            # no preference
             time_score = 10.0
         else:
             try:
@@ -563,8 +588,6 @@ def compute_score(
                 hour = None
                 date_key = None
 
-            # If precomputed period forecasts exist and the profile requested dawn/dusk,
-            # check index membership first (precise).
             used_precomputed_match = False
             if requested_special_tokens and precomputed_pf and date_key:
                 pmap = precomputed_pf.get(date_key) or {}
@@ -578,11 +601,9 @@ def compute_score(
                                 used_precomputed_match = True
                                 break
                         except Exception:
-                            # ignore malformed indices and continue to fallback
                             continue
 
             if not used_precomputed_match:
-                # fallback to hour-based logic (existing behavior)
                 if hour is None:
                     time_score = 5.0
                 else:
@@ -606,7 +627,7 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute time component", exc_info=True)
 
-    # PRESSURE, SEASON, MOON, TEMPERATURE components (unchanged, strict as before)
+    # PRESSURE, SEASON, MOON, TEMPERATURE components (unchanged logic)...
     try:
         if pressure_delta is None:
             pressure_score = 5.0
@@ -642,13 +663,11 @@ def compute_score(
         _LOGGER.debug("Failed to compute season component", exc_info=True)
 
     try:
-        # Simplify moon_pref retrieval (removed redundant repetition)
         moon_pref = profile.get("moon_preference", []) or []
 
         if not moon_pref:
             moon_score = 10.0
         else:
-            # Use centralized helper to evaluate preference matches (supports numeric and textual tokens, lists)
             if matches_moon_preference(moon_phase_val, moon_pref, tolerance=0.05):
                 moon_score = 10.0
             else:
@@ -661,7 +680,6 @@ def compute_score(
     try:
         pref_temp = profile.get("preferred_temp_c")
         if pref_temp is None:
-            # no preference -> max score even if temp missing
             if temp is None:
                 temp_score = 10.0
             else:
@@ -672,10 +690,8 @@ def compute_score(
             else:
                 pt = float(pref_temp) if pref_temp is not None else 10.0
                 pt_min, pt_max = pt, pt
-            # tolerance
             temp_tol = _to_float_safe(profile.get("preferred_temp_tol_c")) or 5.0
             if temp is None:
-                # missing temp but profile required -> should have been caught earlier
                 raise MissingDataError("temperature_c required by profile but missing")
             temp_score = _linear_within_score_10(float(temp), pt_min, pt_max, temp_tol)
         temp_score = _clamp_0_10(temp_score)
@@ -685,16 +701,14 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute temperature component", exc_info=True)
 
-    # Compute overall score: keep global weights but avoid penalizing components that are not present in comp
+    # Compute overall score using normalized weights_norm
     overall_10 = 0.0
-    # if a component exists in weights but missing from comp treat absent component as full score (10)
-    for k in weights:
+    for k in weights_norm:
         comp_score = comp.get(k, {}).get("score_10")
         if comp_score is None:
-            # if species had no preference and we didn't compute component, treat as 10
-            overall_10 += weights.get(k, 0.0) * 10.0
+            overall_10 += weights_norm.get(k, 0.0) * 10.0
         else:
-            overall_10 += weights.get(k, 0.0) * comp_score
+            overall_10 += weights_norm.get(k, 0.0) * comp_score
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
@@ -705,7 +719,6 @@ def compute_score(
             if max_wind is not None and wind is not None:
                 if wind > max_wind:
                     safety["unsafe"] = True
-                    # include the threshold formatted into user's preferred units for clarity
                     try:
                         if units == "metric":
                             thr_val = round(unit_helpers.m_s_to_kmh(max_wind), 1)
@@ -765,7 +778,7 @@ def compute_score(
                     safety["reasons"].append("vis_near_limit")
 
             min_swell = _to_float_safe(safety_limits.get("min_swell_period_s"))
-            swell = swell_period  # use canonical swell_period_s value for safety checks if implemented
+            swell = swell_period
             if min_swell is not None and swell is not None:
                 if swell < min_swell:
                     safety["unsafe"] = True
@@ -796,7 +809,6 @@ def compute_score(
     breaches: List[Dict[str, Any]] = []
     try:
         def _add_breach(variable: str, value: Any, unit: Optional[str] = None, expected_min: Any = None, expected_max: Any = None, expected_pref_min: Any = None, expected_pref_max: Any = None, severity: str = "caution", reason: Optional[str] = None, advice: Optional[str] = None):
-            # Build item but omit keys where value is None to avoid emitting nulls in the output
             item: Dict[str, Any] = {"variable": variable, "value": value, "severity": severity, "reason": reason or f"{variable}_breach", "category": "species"}
             if unit is not None:
                 item["unit"] = unit
@@ -812,7 +824,7 @@ def compute_score(
                 item["advice"] = advice
             breaches.append(item)
 
-        # TEMPERATURE breach detection (include both pref bounds and allowed bounds used)
+        # TEMPERATURE breach detection
         try:
             pref_temp = profile.get("preferred_temp_c")
             if temp is not None and pref_temp is not None:
@@ -844,7 +856,7 @@ def compute_score(
         except Exception:
             pass
 
-        # WIND breach detection (upper bound)
+        # WIND breach detection
         try:
             pref_wind = profile.get("preferred_wind_m_s")
             if wind is not None and pref_wind is not None:
@@ -869,9 +881,7 @@ def compute_score(
                     hour = t_dt.hour if t_dt else None
                 except Exception:
                     hour = None
-                # use normalized_hours calculated in the TIME component above to ensure consistency
                 if 'normalized_hours' in locals() and normalized_hours and hour is not None:
-                    # reuse the same distance logic as used when computing the time score (3-hour tolerance)
                     def hour_distance(a: int, b: int) -> int:
                         d = abs(a - b) % 24
                         return min(d, 24 - d)
@@ -892,7 +902,7 @@ def compute_score(
         except Exception:
             pass
 
-        # TIDE PHASE breach detection - strict: expect string tide_phase if profile requests it
+        # TIDE PHASE breach detection
         try:
             pref_tide_phase_check = profile.get("preferred_tide_phase", []) or []
             pref_tide_phase_check = [str(p).strip().lower() for p in pref_tide_phase_check if str(p).strip().lower() not in ("any", "none", "")]
@@ -911,7 +921,6 @@ def compute_score(
                     else:
                         tide_phase_val = tp
 
-                # Strict: tide_phase must be string when preferred_tide_phase specified
                 if tide_phase_val is None or not isinstance(tide_phase_val, str):
                     raise MissingDataError("tide_phase (string) required by species profile but missing or not a string")
 
@@ -977,6 +986,7 @@ def compute_forecast(
     species_profile: Optional[Union[str, Dict[str, Any]]] = None,
     safety_limits: Optional[Dict[str, Any]] = None,
     units: str = "metric",
+    factor_weights: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     if not payload or "timestamps" not in payload:
@@ -984,8 +994,7 @@ def compute_forecast(
     timestamps = payload.get("timestamps") or []
     for idx, ts in enumerate(timestamps):
         try:
-            res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units)
-            # add tide fields into formatted_weather if available
+            res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
             tide_height = payload.get("tide_height_m")[idx] if isinstance(payload.get("tide_height_m"), (list, tuple)) and idx < len(payload.get("tide_height_m")) else (payload.get("tide_height_m") if "tide_height_m" in payload else None)
             tide_phase_name = (payload.get("tide_phase_name")[idx] if isinstance(payload.get("tide_phase_name"), (list, tuple)) and idx < len(payload.get("tide_phase_name")) else (payload.get("tide_phase_name") if "tide_phase_name" in payload else None))
 
