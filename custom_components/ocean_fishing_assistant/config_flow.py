@@ -225,6 +225,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
         }
 
+        total_default = sum(factor_defaults_percent.values())
+
         if user_input is not None:
             try:
                 # Collect factor values in 0..100 and validate
@@ -238,8 +240,37 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         fv = 0.0
                     ui_weights_raw[k] = fv
 
-                # Validate and normalize; will raise on errors (e.g., all zeros)
-                normalized_weights = _validate_and_normalize_factor_weights(ui_weights_raw)
+                total = float(sum(ui_weights_raw.values()))
+
+                # require total approximately 100 (tolerance to avoid tiny float rounding issues)
+                if abs(total - 100.0) > 0.5:
+                    # re-show form with error and the submitted total visible in the description + bottom numeric box
+                    return self.async_show_form(
+                        step_id="factor_weights",
+                        data_schema=vol.Schema(
+                            {
+                                vol.Required(f"factor_{k}", default=int(round(factor_defaults_percent.get(k, 0)))): selector.NumberSelector(
+                                    selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                                )
+                                for k in FACTOR_WEIGHTS.keys()
+                            }
+                            | {
+                                # display-only numeric box showing running total (UI can't do true read-only; this is a display aid)
+                                vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
+                                    selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                                )
+                            }
+                        ),
+                        errors={"base": "sum_not_100"},
+                        description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
+                    )
+
+                # Convert percentages to normalized floats (sum to 1.0)
+                normalized_weights = {k: ui_weights_raw[k] / 100.0 for k in ui_weights_raw.keys()}
+
+                # Validate normalized weights via existing helper (keeps key checks consistent)
+                normalized_weights = _validate_and_normalize_factor_weights(normalized_weights)
+
                 self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized_weights
 
                 return await self.async_step_ocean_species()
@@ -254,8 +285,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             )
                             for k in FACTOR_WEIGHTS.keys()
                         }
+                        | {
+                            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                            )
+                        }
                     ),
                     errors={"base": "invalid_factor_weights"},
+                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
@@ -268,22 +305,36 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             )
                             for k in FACTOR_WEIGHTS.keys()
                         }
+                        | {
+                            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                            )
+                        }
                     ),
                     errors={"base": "unknown"},
+                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
 
-        # Show sliders (single-purpose screen)
+        # Show sliders (single-purpose screen) with a bottom numeric box showing the default total
+        schema_fields: dict = {
+            vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+            )
+            for k in FACTOR_WEIGHTS.keys()
+        }
+        # Add bottom numeric display for running total (UI display aid)
+        schema_fields.update(
+            {
+                vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                )
+            }
+        )
+
         return self.async_show_form(
             step_id="factor_weights",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                    )
-                    for k in FACTOR_WEIGHTS.keys()
-                }
-            ),
-            description_placeholders={"info": "Adjust scoring factor weights (percent). Values will be normalized."},
+            data_schema=vol.Schema(schema_fields),
+            description_placeholders={"info": f"Adjust scoring weights (total = {total_default}%). Values must add to 100%."},
         )
 
     # ----
@@ -825,6 +876,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
             try:
+                # Collect factor_* keys from user_input if present and normalize
                 weights_raw = {}
                 for k in FACTOR_WEIGHTS.keys():
                     key_name = f"factor_{k}"
@@ -833,14 +885,73 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             weights_raw[k] = float(user_input.get(key_name, 0.0))
                         except Exception:
                             weights_raw[k] = 0.0
+
+                # if user provided factor_* keys, require sum == 100 (approx)
                 if weights_raw:
-                    normalized = _validate_and_normalize_factor_weights(weights_raw)
+                    total = float(sum(weights_raw.values()))
+                    if abs(total - 100.0) > 0.5:
+                        # re-show form with error: include total in description and show bottom numeric box
+                        # build form fields with submitted defaults where possible
+                        stored_defaults = {k: int(round(weights_raw.get(k, 0))) for k in FACTOR_WEIGHTS.keys()}
+                        return self.async_show_form(
+                            step_id="ocean_options",
+                            data_schema=vol.Schema(
+                                {
+                                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
+                                        selector.SelectSelectorConfig(
+                                            options=[
+                                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                                            ],
+                                            mode="dropdown",
+                                        )
+                                    ),
+                                    vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25)): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                                    ),
+                                    vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40)): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement="km/h", mode="slider")
+                                    ),
+                                    vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0)): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement="m", mode="slider")
+                                    ),
+                                    vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80)): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
+                                    ),
+                                    vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3)): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
+                                    ),
+                                    vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1)): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
+                                    ),
+                                    vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False)): selector.BooleanSelector(),
+                                    **{
+                                        vol.Required(f"factor_{k}", default=stored_defaults.get(k, 0)): selector.NumberSelector(
+                                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                                        )
+                                        for k in FACTOR_WEIGHTS.keys()
+                                    },
+                                    vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
+                                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                                    ),
+                                }
+                            ),
+                            errors={"base": "sum_not_100"},
+                            description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
+                        )
+
+                    # normalize and validate weights_raw
+                    normalized = {k: weights_raw.get(k, 0.0) / 100.0 for k in FACTOR_WEIGHTS.keys()}
+                    normalized = _validate_and_normalize_factor_weights(normalized)
                     user_input[CONF_FACTOR_WEIGHTS] = normalized
+                    # remove factor_* keys so stored options are clean
                     for k in list(FACTOR_WEIGHTS.keys()):
                         user_input.pop(f"factor_{k}", None)
+
                 return self.async_create_entry(title="", data=user_input)
             except Exception as exc:
                 _LOGGER.debug("Options flow factor weights normalization failed: %s", exc)
+                # fall through to re-show form with a generic error
 
         # Build labels based on stored units
         units = self._config_entry.data.get("units", "metric")
@@ -857,6 +968,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         factor_defaults_percent: dict[str, int] = {
             k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
         }
+        total_default = sum(factor_defaults_percent.values())
 
         return self.async_show_form(
             step_id="ocean_options",
@@ -896,6 +1008,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         )
                         for k in FACTOR_WEIGHTS.keys()
                     },
+                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                    ),
                 }
             ),
+            description_placeholders={"info": f"Adjust factor weights (total = {total_default}%). Ensure values add to 100%."},
         )
