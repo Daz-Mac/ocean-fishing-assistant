@@ -207,7 +207,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Factor weights (own screen) — total shown in description, not as editable field
+    # Factor weights (own screen) — total shown in description text (non-editable)
     # ----
     async def async_step_factor_weights(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show scoring factor sliders on their own step and normalize them on submit."""
@@ -244,7 +244,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 # require total approximately 100 (tolerance to avoid tiny float rounding issues)
                 if abs(total - 100.0) > 0.5:
-                    # re-show form with error; show computed total in description (not editable)
+                    # re-show form with error; show computed total in visible description
                     schema_fields: dict = {}
                     for k in FACTOR_WEIGHTS.keys():
                         schema_fields[vol.Required(f"factor_{k}", default=int(round(ui_weights_raw.get(k, 0))))] = selector.NumberSelector(
@@ -255,7 +255,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         step_id="factor_weights",
                         data_schema=vol.Schema(schema_fields),
                         errors={"base": "sum_not_100"},
-                        description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
+                        description=f"Total = {total:.1f}%. Scoring factors must add to 100%. Adjust the sliders to reach 100%.",
                     )
 
                 # Convert percentages to normalized floats (sum to 1.0)
@@ -280,7 +280,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="factor_weights",
                     data_schema=vol.Schema(schema_fields),
                     errors={"base": "invalid_factor_weights"},
-                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
+                    description=f"Total = {total_default}%. Adjust sliders so they add to 100%.",
                 )
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
@@ -293,7 +293,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="factor_weights",
                     data_schema=vol.Schema(schema_fields),
                     errors={"base": "unknown"},
-                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
+                    description=f"Total = {total_default}%. Adjust sliders so they add to 100%.",
                 )
 
         # Show sliders (single-purpose screen) — total shown in description only (non-editable)
@@ -306,7 +306,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="factor_weights",
             data_schema=vol.Schema(schema_fields),
-            description_placeholders={"info": f"Adjust scoring weights (total = {total_default}%). Values must add to 100%."},
+            description=f"Adjust scoring weights (current total = {total_default}%). Values must add to 100%.",
         )
 
     # ----
@@ -900,7 +900,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             step_id="ocean_options",
                             data_schema=vol.Schema(schema_fields),
                             errors={"base": "sum_not_100"},
-                            description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
+                            description=f"Total = {total:.1f}%. Scoring factors must add to 100%. Adjust the sliders to reach 100%.",
                         )
 
                     # normalize and validate weights_raw
@@ -969,5 +969,5 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(schema_fields),
-            description_placeholders={"info": f"Adjust factor weights (total = {total_default}%). Ensure values add to 100%."},
+            description=f"Adjust factor weights (current total = {total_default}%). Ensure values add to 100%.",
         )
