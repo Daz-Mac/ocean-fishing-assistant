@@ -19,6 +19,7 @@ from .const import (
     CONF_SPECIES_REGION,
     CONF_HABITAT_PRESET,
     CONF_TIME_PERIODS,
+    CONF_FACTOR_WEIGHTS,
     CONF_TIMEZONE,
     CONF_ELEVATION,
     CONF_AUTO_APPLY_THRESHOLDS,
@@ -38,6 +39,7 @@ from .const import (
 
 from .species_loader import SpeciesLoader
 from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
+from .ocean_scoring import FACTOR_WEIGHTS, _validate_and_normalize_factor_weights
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,21 +54,16 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.species_loader: SpeciesLoader | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Start the ocean-only flow; forward to ocean_location step."""
+        """Start the flow; forward to location step."""
         return await self.async_step_ocean_location(user_input)
 
     # ----
-    # Ocean location (now includes Normal / Advanced mode selector as first field)
+    # Ocean location (mode, name, coordinates)
     # ----
     async def async_step_ocean_location(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure ocean location (mode, name and coordinates)."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            # Save the selected setup mode first (normal/advanced)
-            setup_mode = str(user_input.get("setup_mode", "normal"))
-            if setup_mode not in ("normal", "advanced"):
-                errors["base"] = "invalid_setup_mode"
-
             # Validate coordinates and title
             try:
                 lat = float(user_input[CONF_LATITUDE])
@@ -76,7 +73,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except (ValueError, KeyError):
                 errors["base"] = "invalid_coordinates"
 
-            # If coordinates valid, check for duplicate human-visible title immediately
+            # Duplicate title check
             if not errors:
                 submitted_title = str(user_input.get(CONF_NAME, "")).strip()
                 if submitted_title:
@@ -91,14 +88,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             break
 
             if not errors:
-                # Store the basic values
+                # Save basic values
                 self.ocean_config.update(user_input)
-                # ensure setup_mode stored explicitly
-                self.ocean_config["setup_mode"] = setup_mode
-                # If advanced mode requested, show advanced config step first
-                if setup_mode == "advanced":
+                # Default setup_mode -> normal unless explicitly provided
+                self.ocean_config.setdefault("setup_mode", "normal")
+                if self.ocean_config.get("setup_mode") == "advanced":
                     return await self.async_step_advanced_config()
-                # Otherwise continue normal flow
                 return await self.async_step_ocean_species()
 
         default_name = user_input.get(CONF_NAME, "") if user_input else ""
@@ -116,7 +111,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "normal", "label": "Normal Mode"},
                                 {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
                             ],
-                            mode="list",
+                            mode="dropdown",
                         )
                     ),
                     vol.Required(CONF_NAME, default=default_name): str,
@@ -128,16 +123,29 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Advanced configuration step (only shown when user selected Advanced Mode)
+    # Advanced configuration step (only when user picks advanced)
     # ----
     async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced options: update_interval and expose_raw (persistence removed)."""
-        # Defaults: use current integration/coordinator defaults or previously chosen advanced values
+        """Advanced options: update_interval, TTLs, expose_raw, and factor weights."""
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
         default_expose_raw = self.ocean_config.get("expose_raw", False)
         default_fetch_cache_ttl = self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL)
         default_tide_ttl = self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
         default_weather_cache_ttl = self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
+
+        # Prepare defaults for factor sliders (percent integers)
+        existing_weights = self.ocean_config.get(CONF_FACTOR_WEIGHTS)
+        try:
+            normalized_defaults = (
+                existing_weights
+                if isinstance(existing_weights, dict)
+                else _validate_and_normalize_factor_weights(None)
+            )
+        except Exception:
+            normalized_defaults = _validate_and_normalize_factor_weights(None)
+        factor_defaults_percent: dict[str, int] = {
+            k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
+        }
 
         if user_input is not None:
             errors: dict[str, str] = {}
@@ -149,9 +157,26 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ui_fetch_ttl = int(user_input.get(CONF_FETCH_CACHE_TTL, default_fetch_cache_ttl))
                 ui_tide_ttl = int(user_input.get(CONF_TIDE_TTL, default_tide_ttl))
                 ui_weather_ttl = int(user_input.get(CONF_WEATHER_CACHE_TTL, default_weather_cache_ttl))
-                # sanity checks
                 if ui_fetch_ttl < 30 or ui_tide_ttl < 10 or ui_weather_ttl < 30:
                     errors["base"] = "ttl_too_small"
+
+                # Collect factor slider inputs (0..100) as numeric weights
+                ui_weights_raw: dict[str, float] = {}
+                for k in FACTOR_WEIGHTS.keys():
+                    key_name = f"factor_{k}"
+                    val = user_input.get(key_name, factor_defaults_percent.get(k, 0))
+                    try:
+                        fv = float(val)
+                    except Exception:
+                        fv = 0.0
+                    ui_weights_raw[k] = fv
+
+                # Validate & normalize (raises on invalid)
+                normalized_weights = _validate_and_normalize_factor_weights(ui_weights_raw)
+
+            except ValueError as ve:
+                _LOGGER.debug("Advanced config factor validation failed: %s", ve)
+                errors["base"] = "invalid_factor_weights"
             except Exception:
                 errors["base"] = "invalid_advanced_values"
 
@@ -173,21 +198,29 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_WEATHER_CACHE_TTL, default=default_weather_cache_ttl): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                             ),
+                            **{
+                                vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                                    selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                                )
+                                for k in FACTOR_WEIGHTS.keys()
+                            },
                         }
                     ),
                     errors=errors,
-                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
+                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, and scoring factor weights."},
                 )
 
-            # Save advanced options and continue flow
+            # Save advanced options and normalized factor weights and continue flow
             self.ocean_config["update_interval"] = ui_update_interval
             self.ocean_config["expose_raw"] = ui_expose_raw
             self.ocean_config[CONF_FETCH_CACHE_TTL] = ui_fetch_ttl
             self.ocean_config[CONF_TIDE_TTL] = ui_tide_ttl
             self.ocean_config[CONF_WEATHER_CACHE_TTL] = ui_weather_ttl
+            self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized_weights
 
             return await self.async_step_ocean_species()
 
+        # First-time show advanced form
         return self.async_show_form(
             step_id="advanced_config",
             data_schema=vol.Schema(
@@ -205,17 +238,22 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_WEATHER_CACHE_TTL, default=default_weather_cache_ttl): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                     ),
+                    **{
+                        vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                        )
+                        for k in FACTOR_WEIGHTS.keys()
+                    },
                 }
             ),
-            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
+            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, and scoring factor weights."},
         )
 
     # ----
-    # Species selection flow: first choose profile type (general vs species)
+    # Species selection: choose general vs species
     # ----
     async def async_step_ocean_species(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Ask whether the user wants a general profile or a species profile."""
-        # Ensure loader is available and loaded for listings
         if self.species_loader is None:
             self.species_loader = SpeciesLoader(self.hass)
             await self.species_loader.async_load_profiles()
@@ -227,7 +265,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             elif choice == "species":
                 return await self.async_step_select_region()
             else:
-                # defensive fallback: re-show form with error
                 return self.async_show_form(
                     step_id="ocean_species",
                     data_schema=vol.Schema(
@@ -238,7 +275,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "general", "label": "General region profile (mixed)"},
                                         {"value": "species", "label": "Target a specific species (region-filtered)"},
                                     ],
-                                    mode="list",
+                                    mode="dropdown",
                                 )
                             )
                         }
@@ -256,7 +293,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "general", "label": "General region profile (mixed)"},
                                 {"value": "species", "label": "Target a specific species (region-filtered)"},
                             ],
-                            mode="list",
+                            mode="dropdown",
                         )
                     )
                 }
@@ -279,14 +316,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not gp:
                 _LOGGER.error("Selected general profile id %s not found", profile_id)
                 return self.async_abort(reason="profile_not_found")
-            # store selected general profile and its primary region (first region if present)
             regions = gp.get("regions", ["global"]) or ["global"]
             region = regions[0]
             self.ocean_config[CONF_SPECIES_ID] = profile_id
             self.ocean_config[CONF_SPECIES_REGION] = region
             return await self.async_step_ocean_habitat()
 
-        # Build options
         general_profiles = self.species_loader.get_general_profiles()
         if not general_profiles:
             _LOGGER.error("No general profiles available in species_profiles.json")
@@ -328,7 +363,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             region_id = user_input.get(CONF_SPECIES_REGION)
-            # verify region exists
             if not any(r.get("id") == region_id for r in regions):
                 _LOGGER.error("Selected region %s not valid", region_id)
                 return self.async_show_form(
@@ -346,11 +380,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors={"base": "invalid_region"},
                 )
 
-            # Save region and advance to species-for-region step
             self.ocean_config[CONF_SPECIES_REGION] = region_id
             return await self.async_step_select_species_for_region()
 
-        # Build region options
         region_options = [{"value": r["id"], "label": r.get("name", r["id"])} for r in regions]
 
         return self.async_show_form(
@@ -381,7 +413,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             species_id = user_input.get(CONF_SPECIES_ID)
-            # verify species belongs to region
             species_list = self.species_loader.get_species_by_region(region_id)
             if not any(s.get("id") == species_id for s in species_list):
                 _LOGGER.error("Species %s not available in region %s", species_id, region_id)
@@ -406,7 +437,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.ocean_config[CONF_SPECIES_ID] = species_id
             return await self.async_step_ocean_habitat()
 
-        # Build species options for region
         species_list = self.species_loader.get_species_by_region(region_id)
         if not species_list:
             _LOGGER.error("No species defined for region %s", region_id)
@@ -430,7 +460,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Habitat selection (unchanged)
+    # Habitat selection
     # ----
     async def async_step_ocean_habitat(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose habitat preset for ocean mode."""
@@ -455,9 +485,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
                                         {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
                                         {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                        {"value": "reef", "label": "\U0001fab8 Offshore Reef"},
+                                        {"value": "reef", "label": "🪸 Offshore Reef"},
                                     ],
-                                    mode="list",
+                                    mode="dropdown",
                                 )
                             )
                         }
@@ -475,9 +505,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
                                 {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
                                 {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                {"value": "reef", "label": "\U0001fab8 Offshore Reef"},
+                                {"value": "reef", "label": "🪸 Offshore Reef"},
                             ],
-                            mode="list",
+                            mode="dropdown",
                         )
                     )
                 }
@@ -485,7 +515,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Time periods (unchanged)
+    # Time periods
     # ----
     async def async_step_ocean_time_periods(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Choose time periods for ocean monitoring."""
@@ -515,7 +545,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                             "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
                                         },
                                     ],
-                                    mode="list",
+                                    mode="dropdown",
                                 )
                             )
                         }
@@ -527,7 +557,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             self.ocean_config.update(user_input)
-            # Ask units next so that thresholds form can render correct unit labels.
             return await self.async_step_ocean_units()
 
         return self.async_show_form(
@@ -540,7 +569,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
                                 {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
                             ],
-                            mode="list",
+                            mode="dropdown",
                         )
                     )
                 }
@@ -549,7 +578,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Units selection (unchanged)
+    # Units selection
     # ----
     async def async_step_ocean_units(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Ask user which display units they want (metric/imperial)."""
@@ -594,15 +623,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Thresholds & finish (unchanged except persistence removed)
+    # Thresholds & finish
     # ----
     async def async_step_ocean_thresholds(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure thresholds and finish ocean config (strict)."""
         if user_input is not None:
             try:
-                # Ensure coordinates are present and valid
                 if CONF_LATITUDE not in self.ocean_config or CONF_LONGITUDE not in self.ocean_config:
-                    _LOGGER.error("Latitude/Longitude missing from ocean_config; aborting to surface the issue.")
+                    _LOGGER.error("Latitude/Longitude missing from ocean_config; aborting.")
                     raise RuntimeError("Missing latitude/longitude in ocean_config")
 
                 lat_raw = self.ocean_config[CONF_LATITUDE]
@@ -617,24 +645,20 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 units = self.ocean_config.get("units", "metric")
                 wind_unit = "km/h" if units == "metric" else "mph"
 
-                # Build a display->canonical safety dict then convert -> validate/normalize
+                # Build display->canonical safety dict then convert -> validate/normalize
                 safety_display = {
                     "safety_max_wind": user_input["max_wind_speed"],
                     "safety_max_gust": user_input.get("max_gust_speed"),
                     "safety_max_wave_height": user_input["max_wave_height"],
                     "safety_min_visibility": user_input.get("min_visibility"),
                     "safety_min_swell_period": user_input.get("min_swell_period"),
-                    # NEW: precipitation chance display key (percent)
                     "safety_max_precip_chance": user_input.get("max_precip_chance"),
                 }
                 canonical = convert_safety_display_to_metric(safety_display, entry_units=units)
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
-
-                # Build canonical safety_limits to store
                 safety_limits = normalized_limits
 
                 final_config = {
-                    # integration is ocean-only
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
                     CONF_LATITUDE: latitude,
                     CONF_LONGITUDE: longitude,
@@ -643,7 +667,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_HABITAT_PRESET: habitat_preset,
                     CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
                     CONF_AUTO_APPLY_THRESHOLDS: False,
-                    # store user thresholds as top-level keys (no nested CONF_THRESHOLDS)
                     "max_wind_speed": user_input["max_wind_speed"],
                     "max_gust_speed": user_input.get("max_gust_speed"),
                     "max_wave_height": user_input["max_wave_height"],
@@ -651,52 +674,39 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "min_temperature": user_input.get("min_temperature"),
                     "max_temperature": user_input.get("max_temperature"),
                     "min_swell_period": user_input.get("min_swell_period"),
-                    # NEW: include precip chance in stored thresholds for options/UI
                     "max_precip_chance": user_input.get("max_precip_chance"),
-                    # Preserve expose_raw from advanced config (moved there)
                     "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
-                    # Strict runtime keys required by async_setup_entry
                     "units": units,
                     "wind_unit": wind_unit,
                     "safety_limits": safety_limits,
                 }
 
-                # If advanced options were provided earlier, include them in final_config (otherwise async_setup_entry will use defaults).
+                final_config[CONF_FACTOR_WEIGHTS] = self.ocean_config.get(
+                    CONF_FACTOR_WEIGHTS, _validate_and_normalize_factor_weights(None)
+                )
+
                 if "update_interval" in self.ocean_config:
                     final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
 
-                # include TTL overrides from advanced config (Option B)
-                final_config[CONF_FETCH_CACHE_TTL] = int(
-                    self.ocean_config.get(CONF_FETCH_CACHE_TTL, DEFAULT_UPDATE_INTERVAL)
-                )
-                final_config[CONF_TIDE_TTL] = int(
-                    self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
-                )
-                final_config[CONF_WEATHER_CACHE_TTL] = int(
-                    self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
-                )
+                final_config[CONF_FETCH_CACHE_TTL] = int(self.ocean_config.get(CONF_FETCH_CACHE_TTL, DEFAULT_UPDATE_INTERVAL))
+                final_config[CONF_TIDE_TTL] = int(self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
+                final_config[CONF_WEATHER_CACHE_TTL] = int(self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
 
                 final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
                 final_config[CONF_ELEVATION] = self.hass.config.elevation
 
-                # ---- DUPLICATE CHECKS / UNIQUE ID HANDLING ----
-                # 1) Warn user if an existing entry already has the same human-visible title.
+                # Duplicate title check
                 existing_entries = self.hass.config_entries.async_entries(DOMAIN)
                 title = final_config[CONF_NAME]
                 for e in existing_entries:
                     if e.title == title:
-                        # show the thresholds form again with a visible warning
                         _LOGGER.debug("User attempted to create entry with duplicate title '%s'", title)
                         return self._show_ocean_thresholds_form(errors={"base": "title_exists"})
 
-                # 2) Use the same title as unique_id and register it with HA.
+                # Use title as unique_id (legacy/simple approach)
                 unique_id = title.strip() if isinstance(title, str) else str(title)
-                try:
-                    await self.async_set_unique_id(unique_id)
-                    self._abort_if_unique_id_configured()
-                except Exception as exc:
-                    _LOGGER.debug("Unique-id registration/abort check raised: %s", exc)
-                    raise
+                await self.async_set_unique_id(unique_id)
+                self._abort_if_unique_id_configured()
 
                 _LOGGER.debug(
                     "Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id
@@ -718,7 +728,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             HABITAT_PRESETS.get(HABITAT_ROCKY_POINT, {}),
         )
         units = self.ocean_config.get("units", "metric")
-        # map display units for selector labels
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         temp_unit_label = "°C" if units == "metric" else "°F"
@@ -737,7 +746,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("max_wave_height", default=habitat.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    # NEW: maximum precipitation chance (percentage)
                     vol.Required("max_precip_chance", default=habitat.get("max_precip_chance", 80)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
@@ -770,7 +778,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Ocean Fishing Assistant."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        # Do NOT assign to `self.config_entry` (deprecated). Use a private attribute instead.
         self._config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -780,34 +787,45 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            try:
+                weights_raw = {}
+                for k in FACTOR_WEIGHTS.keys():
+                    key_name = f"factor_{k}"
+                    if key_name in user_input:
+                        try:
+                            weights_raw[k] = float(user_input.get(key_name, 0.0))
+                        except Exception:
+                            weights_raw[k] = 0.0
+                if weights_raw:
+                    normalized = _validate_and_normalize_factor_weights(weights_raw)
+                    user_input[CONF_FACTOR_WEIGHTS] = normalized
+                    for k in list(FACTOR_WEIGHTS.keys()):
+                        user_input.pop(f"factor_{k}", None)
+                return self.async_create_entry(title="", data=user_input)
+            except Exception as exc:
+                _LOGGER.debug("Options flow factor weights normalization failed: %s", exc)
 
-        # Build thresholds dict from top-level stored keys (no nested CONF_THRESHOLDS)
-        thresholds = {
-            "max_wind_speed": self._config_entry.data.get("max_wind_speed", 25),
-            "max_gust_speed": self._config_entry.data.get("max_gust_speed", 40),
-            "max_wave_height": self._config_entry.data.get("max_wave_height", 2.0),
-            "max_precip_chance": self._config_entry.data.get("max_precip_chance", 80),
-            "min_swell_period": self._config_entry.data.get("min_swell_period", 3),
-            "min_visibility": self._config_entry.data.get("min_visibility", 1),
-            "min_temperature": self._config_entry.data.get("min_temperature", 5),
-            "max_temperature": self._config_entry.data.get("max_temperature", 35),
-            "expose_raw": self._config_entry.data.get("expose_raw", False),
-        }
-
-        # show units-driven labels based on stored units in config_entry.data
+        # Build labels based on stored units
         units = self._config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
 
+        # Factor defaults for options form (percent)
+        stored_weights = self._config_entry.data.get(CONF_FACTOR_WEIGHTS)
+        try:
+            normalized_defaults = stored_weights if isinstance(stored_weights, dict) else _validate_and_normalize_factor_weights(None)
+        except Exception:
+            normalized_defaults = _validate_and_normalize_factor_weights(None)
+        factor_defaults_percent: dict[str, int] = {
+            k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
+        }
+
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)
-                    ): selector.SelectSelector(
+                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
@@ -816,27 +834,31 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             mode="dropdown",
                         )
                     ),
-                    vol.Required("max_wind_speed", default=thresholds.get("max_wind_speed", 25)): selector.NumberSelector(
+                    vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
-                    vol.Required("max_gust_speed", default=thresholds.get("max_gust_speed", 40)): selector.NumberSelector(
+                    vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
                     ),
-                    vol.Required("max_wave_height", default=thresholds.get("max_wave_height", 2.0)): selector.NumberSelector(
+                    vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
                     ),
-                    # NEW: options flow exposure for precipitation chance
-                    vol.Required("max_precip_chance", default=thresholds.get("max_precip_chance", 80)): selector.NumberSelector(
+                    vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                     ),
-                    vol.Required("min_swell_period", default=thresholds.get("min_swell_period", 3)): selector.NumberSelector(
+                    vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                     ),
-                    vol.Required("min_visibility", default=thresholds.get("min_visibility", 1)): selector.NumberSelector(
+                    vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1)): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                     ),
-                    # RESTORE: expose_raw option in Options flow (left here so users can toggle later)
-                    vol.Required("expose_raw", default=thresholds.get("expose_raw", False)): selector.BooleanSelector(),
+                    vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False)): selector.BooleanSelector(),
+                    **{
+                        vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                        )
+                        for k in FACTOR_WEIGHTS.keys()
+                    },
                 }
             ),
         )
