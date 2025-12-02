@@ -108,8 +108,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("setup_mode", default=default_mode): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "normal", "label": "Normal Mode"},
-                                {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
+                                {"value": "normal", "translation_key": "setup_mode_normal"},
+                                {"value": "advanced", "translation_key": "setup_mode_advanced"},
                             ],
                             mode="list",
                         )
@@ -211,7 +211,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ----
     async def async_step_factor_weights(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show scoring factor sliders on their own step and normalize them on submit."""
-        # Determine defaults (percent) from existing ocean_config or scoring defaults
         existing_weights = self.ocean_config.get(CONF_FACTOR_WEIGHTS)
         try:
             normalized_defaults = (
@@ -221,15 +220,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
         except Exception:
             normalized_defaults = _validate_and_normalize_factor_weights(None)
+
         factor_defaults_percent: dict[str, int] = {
             k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
         }
-
         total_default = sum(factor_defaults_percent.values())
 
         if user_input is not None:
             try:
-                # Collect factor values in 0..100 and validate
                 ui_weights_raw: dict[str, float] = {}
                 for k in FACTOR_WEIGHTS.keys():
                     key_name = f"factor_{k}"
@@ -242,9 +240,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 total = float(sum(ui_weights_raw.values()))
 
-                # require total approximately 100 (tolerance to avoid tiny float rounding issues)
                 if abs(total - 100.0) > 0.5:
-                    # re-show form with error; include top numeric total as a non-authoritative display (user edits ignored)
                     schema_fields: dict = {
                         vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
@@ -255,21 +251,18 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
                         )
 
-                    # NOTE: using description_placeholders so older HA versions won't raise TypeError
                     return self.async_show_form(
                         step_id="factor_weights",
                         data_schema=vol.Schema(schema_fields),
                         errors={"base": "sum_not_100"},
-                        description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
+                        description_placeholders={
+                            "info": f"Adjust scoring weights. Current total is {total:.1f}%. Values must add to 100%."
+                        },
                     )
 
-                # Convert percentages to normalized floats (sum to 1.0)
                 normalized_weights = {k: ui_weights_raw[k] / 100.0 for k in ui_weights_raw.keys()}
-
-                # Validate normalized weights via existing helper (keeps key checks consistent)
                 normalized_weights = _validate_and_normalize_factor_weights(normalized_weights)
 
-                # Save the computed normalized weights (ignore any user edits to _factors_total)
                 self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized_weights
 
                 return await self.async_step_ocean_species()
@@ -289,7 +282,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="factor_weights",
                     data_schema=vol.Schema(schema_fields),
                     errors={"base": "invalid_factor_weights"},
-                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
+                    description_placeholders={
+                        "info": f"Adjust scoring weights. Current default total is {total_default}%. Values must add to 100%."
+                    },
                 )
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
@@ -306,11 +301,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="factor_weights",
                     data_schema=vol.Schema(schema_fields),
                     errors={"base": "unknown"},
-                    description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
+                    description_placeholders={
+                        "info": f"Adjust scoring weights. Current default total is {total_default}%. Values must add to 100%."
+                    },
                 )
 
-        # Show sliders (single-purpose screen) with top numeric display. Note: frontend will allow editing,
-        # but the submitted value for _factors_total is ignored and the sliders determine the result.
         schema_fields: dict = {
             vol.Required("_factors_total", default=total_default): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
@@ -324,7 +319,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="factor_weights",
             data_schema=vol.Schema(schema_fields),
-            description_placeholders={"info": f"Adjust scoring weights (current total = {total_default}%). Values must add to 100%."},
+            description_placeholders={
+                "info": f"Adjust scoring weights. Current total is {total_default}%. Values must add to 100%."
+            },
         )
 
     # ----
@@ -350,8 +347,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("profile_type"): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "general", "label": "General region profile (mixed)"},
-                                        {"value": "species", "label": "Target a specific species (region-filtered)"},
+                                        {"value": "general", "translation_key": "profile_general_label"},
+                                        {"value": "species", "translation_key": "profile_species_label"},
                                     ],
                                     mode="list",
                                 )
@@ -368,8 +365,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("profile_type"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "general", "label": "General region profile (mixed)"},
-                                {"value": "species", "label": "Target a specific species (region-filtered)"},
+                                {"value": "general", "translation_key": "profile_general_label"},
+                                {"value": "species", "translation_key": "profile_species_label"},
                             ],
                             mode="list",
                         )
@@ -560,10 +557,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
-                                        {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
-                                        {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                        {"value": "reef", "label": "🪸 Offshore Reef"},
+                                        {"value": "open_beach", "translation_key": "habitat_open_beach"},
+                                        {"value": "rocky_point", "translation_key": "habitat_rocky_point"},
+                                        {"value": "harbour", "translation_key": "habitat_harbour"},
+                                        {"value": "reef", "translation_key": "habitat_reef"},
                                     ],
                                     mode="list",
                                 )
@@ -580,10 +577,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
-                                {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
-                                {"value": "harbour", "label": "⚓ Harbour/Pier"},
-                                {"value": "reef", "label": "🪸 Offshore Reef"},
+                                {"value": "open_beach", "translation_key": "habitat_open_beach"},
+                                {"value": "rocky_point", "translation_key": "habitat_rocky_point"},
+                                {"value": "harbour", "translation_key": "habitat_harbour"},
+                                {"value": "reef", "translation_key": "habitat_reef"},
                             ],
                             mode="list",
                         )
@@ -614,14 +611,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             ): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {
-                                            "value": TIME_PERIODS_FULL_DAY,
-                                            "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)",
-                                        },
-                                        {
-                                            "value": TIME_PERIODS_DAWN_DUSK,
-                                            "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
-                                        },
+                                        {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_long"},
+                                        {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_long"},
                                     ],
                                     mode="list",
                                 )
@@ -644,8 +635,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
+                                {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_long"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_long"},
                             ],
                             mode="list",
                         )
@@ -670,8 +661,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("units", default="metric"): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                        {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                                        {"value": "metric", "translation_key": "units_metric"},
+                                        {"value": "imperial", "translation_key": "units_imperial"},
                                     ],
                                     mode="list",
                                 )
@@ -690,8 +681,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("units", default="metric"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
-                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
+                                {"value": "metric", "translation_key": "units_metric"},
+                                {"value": "imperial", "translation_key": "units_imperial"},
                             ],
                             mode="list",
                         )
@@ -877,14 +868,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 if weights_raw:
                     total = float(sum(weights_raw.values()))
                     if abs(total - 100.0) > 0.5:
-                        # re-show form with error: do not include an editable total field, show total in description
                         stored_defaults = {k: int(round(weights_raw.get(k, 0))) for k in FACTOR_WEIGHTS.keys()}
                         schema_fields: dict = {}
                         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=[
-                                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
-                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                                    {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_short"},
+                                    {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_short"},
                                 ],
                                 mode="dropdown",
                             )
@@ -918,10 +908,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             step_id="ocean_options",
                             data_schema=vol.Schema(schema_fields),
                             errors={"base": "sum_not_100"},
-                            description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%. Adjust the sliders to reach 100%."},
+                            description_placeholders={
+                                "info": f"Adjust factor weights. Current total is {total:.1f}%. Values must add to 100%."
+                            },
                         )
 
-                    # normalize and validate weights_raw
                     normalized = {k: weights_raw.get(k, 0.0) / 100.0 for k in FACTOR_WEIGHTS.keys()}
                     normalized = _validate_and_normalize_factor_weights(normalized)
                     user_input[CONF_FACTOR_WEIGHTS] = normalized
@@ -931,13 +922,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             except Exception as exc:
                 _LOGGER.debug("Options flow factor weights normalization failed: %s", exc)
 
-        # Build labels based on stored units
         units = self._config_entry.data.get("units", "metric")
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
 
-        # Factor defaults for options form (percent)
         stored_weights = self._config_entry.data.get(CONF_FACTOR_WEIGHTS)
         try:
             normalized_defaults = stored_weights if isinstance(stored_weights, dict) else _validate_and_normalize_factor_weights(None)
@@ -948,13 +937,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         }
         total_default = sum(factor_defaults_percent.values())
 
-        # Build ordered schema with sliders (no editable total)
         schema_fields: dict = {}
         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
-                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
-                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                    {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_short"},
+                    {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_short"},
                 ],
                 mode="dropdown",
             )
@@ -987,5 +975,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="ocean_options",
             data_schema=vol.Schema(schema_fields),
-            description_placeholders={"info": f"Adjust factor weights (current total = {total_default}%). Ensure values add to 100%."},
+            description_placeholders={
+                "info": f"Adjust factor weights. Current total is {total_default}%. Values must add to 100%."
+            },
         )

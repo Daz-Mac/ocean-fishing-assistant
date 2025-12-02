@@ -23,6 +23,23 @@
           "weather_cache_ttl": "Weather cache TTL (s)"
         }
       },
+      "factor_weights": {
+        "title": "Factor weights",
+        "description": "Adjust scoring weights. Values must add to 100%.",
+        "data": {
+          "_factors_total": "Total",
+          "factor_tide": "Tide",
+          "factor_wind": "Wind",
+          "factor_waves": "Waves",
+          "factor_time": "Time of day",
+          "factor_pressure": "Pressure",
+          "factor_season": "Season",
+          "factor_moon": "Moon",
+          "factor_visibility": "Visibility",
+          "factor_temperature": "Temperature",
+          "factor_precipitation": "Precipitation"
+        }
+      },
       "ocean_species": {
         "title": "Profile type",
         "description": "Choose whether to use a general regional profile or target a specific species.",
@@ -97,7 +114,17 @@
           "max_precip_chance": "Max precipitation chance",
           "min_swell_period": "Min swell period",
           "min_visibility": "Min visibility",
-          "expose_raw": "Expose raw data"
+          "expose_raw": "Expose raw data",
+          "factor_tide": "Tide",
+          "factor_wind": "Wind",
+          "factor_waves": "Waves",
+          "factor_time": "Time of day",
+          "factor_pressure": "Pressure",
+          "factor_season": "Season",
+          "factor_moon": "Moon",
+          "factor_visibility": "Visibility",
+          "factor_temperature": "Temperature",
+          "factor_precipitation": "Precipitation"
         }
       }
     },
@@ -139,13 +166,6 @@
     "habitat_open_beach": "🏖️ Open Sandy Beach",
     "habitat_rocky_point": "🪨 Rocky Point/Jetty",
     "habitat_harbour": "⚓ Harbour/Pier",
-    "habitat_reef": "🪸 Offshore Reef",
-    "ocean_options_full_day": "🌅 Full Day (4 periods)",
-    "ocean_options_dawn_dusk": "🌄 Dawn & Dusk Only",
-    "select_profile_prompt": "Choose whether to use a general regional profile or target a specific species.",
-    "select_general_profile_prompt": "Choose a mixed/general regional profile.",
-    "select_region_prompt": "Choose the region you will fish in — species list will be filtered by this region.",
-    "select_species_prompt": "Choose the specific species you want to target in this region.",
-    "ocean_units_prompt": "Choose display units (metric or imperial)."
+    "habitat_reef": "🪸 Offshore Reef"
   }
 }
