@@ -111,7 +111,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "normal", "label": "Normal Mode"},
                                 {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
                             ],
-                            mode="list",  # render as radio/list
+                            mode="list",
                         )
                     ),
                     vol.Required(CONF_NAME, default=default_name): str,
@@ -207,7 +207,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ----
-    # Factor weights (own screen)
+    # Factor weights (own screen) — total shown in description, not as editable field
     # ----
     async def async_step_factor_weights(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show scoring factor sliders on their own step and normalize them on submit."""
@@ -244,13 +244,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 # require total approximately 100 (tolerance to avoid tiny float rounding issues)
                 if abs(total - 100.0) > 0.5:
-                    # re-show form with error and the submitted total visible in the description + top numeric box
-                    # Build ordered schema: total display at top, then sliders
-                    schema_fields: dict = {
-                        vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                        )
-                    }
+                    # re-show form with error; show computed total in description (not editable)
+                    schema_fields: dict = {}
                     for k in FACTOR_WEIGHTS.keys():
                         schema_fields[vol.Required(f"factor_{k}", default=int(round(ui_weights_raw.get(k, 0))))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -274,12 +269,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_ocean_species()
             except ValueError as ve:
                 _LOGGER.debug("Factor weights validation failed: %s", ve)
-                # Show form with defaults and top total
-                schema_fields: dict = {
-                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                    )
-                }
+                # Show form with defaults and description total
+                schema_fields: dict = {}
                 for k in FACTOR_WEIGHTS.keys():
                     schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -293,11 +284,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
-                schema_fields: dict = {
-                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                    )
-                }
+                schema_fields: dict = {}
                 for k in FACTOR_WEIGHTS.keys():
                     schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -309,12 +296,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
 
-        # Show sliders (single-purpose screen) with a top numeric box showing the default total
-        schema_fields: dict = {
-            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-            )
-        }
+        # Show sliders (single-purpose screen) — total shown in description only (non-editable)
+        schema_fields: dict = {}
         for k in FACTOR_WEIGHTS.keys():
             schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -352,7 +335,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "general", "label": "General region profile (mixed)"},
                                         {"value": "species", "label": "Target a specific species (region-filtered)"},
                                     ],
-                                    mode="list",  # radio/list like
+                                    mode="list",
                                 )
                             )
                         }
@@ -564,7 +547,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "harbour", "label": "⚓ Harbour/Pier"},
                                         {"value": "reef", "label": "🪸 Offshore Reef"},
                                     ],
-                                    mode="list",  # show as list/radio-like
+                                    mode="list",
                                 )
                             )
                         }
@@ -622,7 +605,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                             "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
                                         },
                                     ],
-                                    mode="list",  # radio/list like
+                                    mode="list",
                                 )
                             )
                         }
@@ -865,7 +848,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
             try:
-                # Collect factor_* keys from user_input if present and normalize
                 weights_raw = {}
                 for k in FACTOR_WEIGHTS.keys():
                     key_name = f"factor_{k}"
@@ -874,22 +856,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             weights_raw[k] = float(user_input.get(key_name, 0.0))
                         except Exception:
                             weights_raw[k] = 0.0
-
-                # if user provided factor_* keys, require sum == 100 (approx)
                 if weights_raw:
                     total = float(sum(weights_raw.values()))
                     if abs(total - 100.0) > 0.5:
-                        # re-show form with error: include total in description and show top numeric box
+                        # re-show form with error: do not include an editable total field, show total in description
                         stored_defaults = {k: int(round(weights_raw.get(k, 0))) for k in FACTOR_WEIGHTS.keys()}
-
-                        # Build ordered schema: total at top, then options fields & sliders
-                        schema_fields: dict = {
-                            vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                            )
-                        }
-
-                        # time periods & thresholds first (keeps previous order)
+                        schema_fields: dict = {}
                         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=[
@@ -919,13 +891,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         )
                         schema_fields[vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False))] = selector.BooleanSelector()
 
-                        # factor sliders (use stored_defaults where possible)
                         for k in FACTOR_WEIGHTS.keys():
                             schema_fields[vol.Required(f"factor_{k}", default=stored_defaults.get(k, 0))] = selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
                             )
 
-                        # total numeric box already added at top
                         return self.async_show_form(
                             step_id="ocean_options",
                             data_schema=vol.Schema(schema_fields),
@@ -937,14 +907,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     normalized = {k: weights_raw.get(k, 0.0) / 100.0 for k in FACTOR_WEIGHTS.keys()}
                     normalized = _validate_and_normalize_factor_weights(normalized)
                     user_input[CONF_FACTOR_WEIGHTS] = normalized
-                    # remove factor_* keys so stored options are clean
                     for k in list(FACTOR_WEIGHTS.keys()):
                         user_input.pop(f"factor_{k}", None)
-
                 return self.async_create_entry(title="", data=user_input)
             except Exception as exc:
                 _LOGGER.debug("Options flow factor weights normalization failed: %s", exc)
-                # fall through to re-show form with a generic error
 
         # Build labels based on stored units
         units = self._config_entry.data.get("units", "metric")
@@ -963,12 +930,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         }
         total_default = sum(factor_defaults_percent.values())
 
-        # Build ordered schema with total at top
-        schema_fields: dict = {
-            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-            )
-        }
+        # Build ordered schema with sliders (no editable total)
+        schema_fields: dict = {}
         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
