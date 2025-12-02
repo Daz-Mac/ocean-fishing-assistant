@@ -1,9 +1,146 @@
 {
   "title": "Ocean Fishing Assistant",
-  "sensor": {
-    "ocean_fishing_score": {
-      "name": "Ocean Fishing Score",
-      "state": "Score"
+  "config": {
+    "step": {
+      "ocean_location": {
+        "title": "Ocean Fishing Location",
+        "description": "Set a name and coordinates for this fishing location.",
+        "data": {
+          "setup_mode": "Setup mode",
+          "name": "Name",
+          "latitude": "Latitude",
+          "longitude": "Longitude"
+        }
+      },
+      "advanced_config": {
+        "title": "Advanced options",
+        "description": "Configure advanced options and cache TTLs.",
+        "data": {
+          "update_interval": "Update interval (seconds)",
+          "expose_raw": "Expose raw data",
+          "fetch_cache_ttl": "Fetch cache TTL (s)",
+          "tide_ttl": "Tide TTL (s)",
+          "weather_cache_ttl": "Weather cache TTL (s)"
+        }
+      },
+      "factor_weights": {
+        "title": "Scoring weights",
+        "description": "Adjust scoring weights (current total = {total}%). Values must add to 100%.",
+        "data": {
+          "_factors_total": "Total (%)",
+          "factor_tide": "Tide",
+          "factor_wind": "Wind",
+          "factor_waves": "Waves",
+          "factor_time": "Time of day",
+          "factor_pressure": "Pressure",
+          "factor_season": "Season",
+          "factor_moon": "Moon phase",
+          "factor_temperature": "Temperature"
+        }
+      },
+      "ocean_species": {
+        "title": "Profile type",
+        "description": "Choose whether to use a general regional profile or target a specific species.",
+        "data": {
+          "profile_type": "Profile type"
+        }
+      },
+      "select_general_profile": {
+        "title": "General profile",
+        "description": "Choose a mixed/general regional profile.",
+        "data": {
+          "species_id": "General profile"
+        }
+      },
+      "select_region": {
+        "title": "Region",
+        "description": "Choose the region you will fish in — species list will be filtered by this region.",
+        "data": {
+          "species_region": "Region"
+        }
+      },
+      "select_species_for_region": {
+        "title": "Species",
+        "description": "Choose the specific species you want to target in this region.",
+        "data": {
+          "species_id": "Species"
+        }
+      },
+      "ocean_habitat": {
+        "title": "Habitat preset",
+        "description": "Choose the habitat preset that best matches your fishing spot.",
+        "data": {
+          "habitat_preset": "Habitat preset"
+        }
+      },
+      "ocean_time_periods": {
+        "title": "Time periods",
+        "description": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times.",
+        "data": {
+          "time_periods": "Time periods"
+        }
+      },
+      "ocean_units": {
+        "title": "Units",
+        "description": "Choose display units (metric or imperial).",
+        "data": {
+          "units": "Units"
+        }
+      },
+      "ocean_thresholds": {
+        "title": "Safety & thresholds",
+        "description": "Set safe fishing limits based on your habitat and comfort level.",
+        "data": {
+          "max_wind_speed": "Max wind speed",
+          "max_gust_speed": "Max gust speed",
+          "max_wave_height": "Max wave height",
+          "max_precip_chance": "Max precipitation chance",
+          "min_swell_period": "Min swell period",
+          "min_visibility": "Min visibility",
+          "min_temperature": "Min temperature",
+          "max_temperature": "Max temperature"
+        }
+      },
+      "ocean_options": {
+        "title": "Ocean options",
+        "description": "Change options and factor weights.",
+        "data": {
+          "time_periods": "Time periods",
+          "max_wind_speed": "Max wind speed",
+          "max_gust_speed": "Max gust speed",
+          "max_wave_height": "Max wave height",
+          "max_precip_chance": "Max precipitation chance",
+          "min_swell_period": "Min swell period",
+          "min_visibility": "Min visibility",
+          "expose_raw": "Expose raw data"
+        }
+      }
+    },
+    "error": {
+      "invalid_coordinates": "Invalid coordinates.",
+      "invalid_setup_mode": "Invalid setup mode.",
+      "title_exists": "An entry with that name already exists.",
+      "update_interval_too_small": "Update interval is too small.",
+      "ttl_too_small": "One or more TTL values are too small.",
+      "invalid_advanced_values": "Invalid advanced option values.",
+      "sum_not_100": "Scoring factors must add to 100%.",
+      "invalid_factor_weights": "Provided factor weights are invalid.",
+      "invalid_selection": "Invalid selection.",
+      "invalid_region": "Invalid region selected.",
+      "invalid_species_for_region": "Selected species is not available in the chosen region.",
+      "no_general_profiles": "No general profiles are available.",
+      "no_regions": "No regions are defined.",
+      "no_species_for_region": "No species defined for this region.",
+      "profile_not_found": "Selected profile not found.",
+      "invalid_time_periods": "Invalid time periods selection.",
+      "invalid_units": "Invalid units selection.",
+      "unknown": "An unknown error occurred."
+    },
+    "abort": {
+      "no_general_profiles": "No general profiles are available in the species database.",
+      "no_regions": "No regions are defined in the species database.",
+      "no_species_for_region": "No species available for the selected region.",
+      "profile_not_found": "Selected profile not found."
     }
   }
 }
