@@ -111,7 +111,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "normal", "label": "Normal Mode"},
                                 {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
                             ],
-                            mode="dropdown",
+                            mode="list",  # render as radio/list (was changed to dropdown previously)
                         )
                     ),
                     vol.Required(CONF_NAME, default=default_name): str,
@@ -126,26 +126,12 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Advanced configuration step (only when user picks advanced)
     # ----
     async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced options: update_interval, TTLs, expose_raw, and factor weights."""
+        """Advanced options: update_interval, TTLs, expose_raw. Factor weights live on their own screen."""
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
         default_expose_raw = self.ocean_config.get("expose_raw", False)
         default_fetch_cache_ttl = self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL)
         default_tide_ttl = self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
         default_weather_cache_ttl = self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
-
-        # Prepare defaults for factor sliders (percent integers)
-        existing_weights = self.ocean_config.get(CONF_FACTOR_WEIGHTS)
-        try:
-            normalized_defaults = (
-                existing_weights
-                if isinstance(existing_weights, dict)
-                else _validate_and_normalize_factor_weights(None)
-            )
-        except Exception:
-            normalized_defaults = _validate_and_normalize_factor_weights(None)
-        factor_defaults_percent: dict[str, int] = {
-            k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
-        }
 
         if user_input is not None:
             errors: dict[str, str] = {}
@@ -160,23 +146,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if ui_fetch_ttl < 30 or ui_tide_ttl < 10 or ui_weather_ttl < 30:
                     errors["base"] = "ttl_too_small"
 
-                # Collect factor slider inputs (0..100) as numeric weights
-                ui_weights_raw: dict[str, float] = {}
-                for k in FACTOR_WEIGHTS.keys():
-                    key_name = f"factor_{k}"
-                    val = user_input.get(key_name, factor_defaults_percent.get(k, 0))
-                    try:
-                        fv = float(val)
-                    except Exception:
-                        fv = 0.0
-                    ui_weights_raw[k] = fv
-
-                # Validate & normalize (raises on invalid)
-                normalized_weights = _validate_and_normalize_factor_weights(ui_weights_raw)
-
-            except ValueError as ve:
-                _LOGGER.debug("Advanced config factor validation failed: %s", ve)
-                errors["base"] = "invalid_factor_weights"
             except Exception:
                 errors["base"] = "invalid_advanced_values"
 
@@ -198,29 +167,23 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_WEATHER_CACHE_TTL, default=default_weather_cache_ttl): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                             ),
-                            **{
-                                vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
-                                    selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                                )
-                                for k in FACTOR_WEIGHTS.keys()
-                            },
                         }
                     ),
                     errors=errors,
-                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, and scoring factor weights."},
+                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
                 )
 
-            # Save advanced options and normalized factor weights and continue flow
+            # Save advanced options
             self.ocean_config["update_interval"] = ui_update_interval
             self.ocean_config["expose_raw"] = ui_expose_raw
             self.ocean_config[CONF_FETCH_CACHE_TTL] = ui_fetch_ttl
             self.ocean_config[CONF_TIDE_TTL] = ui_tide_ttl
             self.ocean_config[CONF_WEATHER_CACHE_TTL] = ui_weather_ttl
-            self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized_weights
 
-            return await self.async_step_ocean_species()
+            # After advanced options, go to factor weights step (separate screen)
+            return await self.async_step_factor_weights()
 
-        # First-time show advanced form
+        # First-time show advanced form (no factor sliders here)
         return self.async_show_form(
             step_id="advanced_config",
             data_schema=vol.Schema(
@@ -238,15 +201,89 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_WEATHER_CACHE_TTL, default=default_weather_cache_ttl): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                     ),
-                    **{
-                        vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                        )
-                        for k in FACTOR_WEIGHTS.keys()
-                    },
                 }
             ),
-            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, and scoring factor weights."},
+            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs."},
+        )
+
+    # ----
+    # Factor weights (own screen)
+    # ----
+    async def async_step_factor_weights(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Show scoring factor sliders on their own step and normalize them on submit."""
+        # Determine defaults (percent) from existing ocean_config or scoring defaults
+        existing_weights = self.ocean_config.get(CONF_FACTOR_WEIGHTS)
+        try:
+            normalized_defaults = (
+                existing_weights
+                if isinstance(existing_weights, dict)
+                else _validate_and_normalize_factor_weights(None)
+            )
+        except Exception:
+            normalized_defaults = _validate_and_normalize_factor_weights(None)
+        factor_defaults_percent: dict[str, int] = {
+            k: int(round((normalized_defaults.get(k, 0.0) * 100))) for k in FACTOR_WEIGHTS.keys()
+        }
+
+        if user_input is not None:
+            try:
+                # Collect factor values in 0..100 and validate
+                ui_weights_raw: dict[str, float] = {}
+                for k in FACTOR_WEIGHTS.keys():
+                    key_name = f"factor_{k}"
+                    val = user_input.get(key_name, factor_defaults_percent.get(k, 0))
+                    try:
+                        fv = float(val)
+                    except Exception:
+                        fv = 0.0
+                    ui_weights_raw[k] = fv
+
+                # Validate and normalize; will raise on errors (e.g., all zeros)
+                normalized_weights = _validate_and_normalize_factor_weights(ui_weights_raw)
+                self.ocean_config[CONF_FACTOR_WEIGHTS] = normalized_weights
+
+                return await self.async_step_ocean_species()
+            except ValueError as ve:
+                _LOGGER.debug("Factor weights validation failed: %s", ve)
+                return self.async_show_form(
+                    step_id="factor_weights",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                            )
+                            for k in FACTOR_WEIGHTS.keys()
+                        }
+                    ),
+                    errors={"base": "invalid_factor_weights"},
+                )
+            except Exception as exc:
+                _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
+                return self.async_show_form(
+                    step_id="factor_weights",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                            )
+                            for k in FACTOR_WEIGHTS.keys()
+                        }
+                    ),
+                    errors={"base": "unknown"},
+                )
+
+        # Show sliders (single-purpose screen)
+        return self.async_show_form(
+            step_id="factor_weights",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                    )
+                    for k in FACTOR_WEIGHTS.keys()
+                }
+            ),
+            description_placeholders={"info": "Adjust scoring factor weights (percent). Values will be normalized."},
         )
 
     # ----
@@ -275,7 +312,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "general", "label": "General region profile (mixed)"},
                                         {"value": "species", "label": "Target a specific species (region-filtered)"},
                                     ],
-                                    mode="dropdown",
+                                    mode="list",  # radio/list like
                                 )
                             )
                         }
@@ -293,7 +330,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "general", "label": "General region profile (mixed)"},
                                 {"value": "species", "label": "Target a specific species (region-filtered)"},
                             ],
-                            mode="dropdown",
+                            mode="list",
                         )
                     )
                 }
@@ -487,7 +524,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "harbour", "label": "⚓ Harbour/Pier"},
                                         {"value": "reef", "label": "🪸 Offshore Reef"},
                                     ],
-                                    mode="dropdown",
+                                    mode="list",  # show as list/radio-like
                                 )
                             )
                         }
@@ -507,7 +544,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "harbour", "label": "⚓ Harbour/Pier"},
                                 {"value": "reef", "label": "🪸 Offshore Reef"},
                             ],
-                            mode="dropdown",
+                            mode="list",
                         )
                     )
                 }
@@ -545,7 +582,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                             "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
                                         },
                                     ],
-                                    mode="dropdown",
+                                    mode="list",  # radio/list like
                                 )
                             )
                         }
@@ -569,7 +606,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
                                 {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
                             ],
-                            mode="dropdown",
+                            mode="list",
                         )
                     )
                 }
@@ -595,7 +632,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         {"value": "metric", "label": "Metric (m, km/h, °C)"},
                                         {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
                                     ],
-                                    mode="dropdown",
+                                    mode="list",
                                 )
                             )
                         }
@@ -615,7 +652,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "metric", "label": "Metric (m, km/h, °C)"},
                                 {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
                             ],
-                            mode="dropdown",
+                            mode="list",
                         )
                     )
                 }
