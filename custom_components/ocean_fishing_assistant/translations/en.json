@@ -14,27 +14,13 @@
       },
       "advanced_config": {
         "title": "Advanced options",
-        "description": "Configure advanced options: how often to fetch and cache TTLs.",
+        "description": "Configure advanced options and cache TTLs.",
         "data": {
           "update_interval": "Update interval (seconds)",
           "expose_raw": "Expose raw data",
           "fetch_cache_ttl": "Fetch cache TTL (s)",
           "tide_ttl": "Tide TTL (s)",
           "weather_cache_ttl": "Weather cache TTL (s)"
-        }
-      },
-      "factor_weights": {
-        "title": "Factor weights",
-        "description": "Adjust scoring weights (current total = {total}%). Values must add to 100%.",
-        "data": {
-          "_factors_total": "Total",
-          "factor_weather": "Weather",
-          "factor_tide": "Tide",
-          "factor_moon": "Moon",
-          "factor_precipitation": "Precipitation",
-          "factor_visibility": "Visibility",
-          "factor_temperature": "Temperature",
-          "factor_species": "Species"
         }
       },
       "ocean_species": {
@@ -111,14 +97,7 @@
           "max_precip_chance": "Max precipitation chance",
           "min_swell_period": "Min swell period",
           "min_visibility": "Min visibility",
-          "expose_raw": "Expose raw data",
-          "factor_weather": "Weather",
-          "factor_tide": "Tide",
-          "factor_moon": "Moon",
-          "factor_precipitation": "Precipitation",
-          "factor_visibility": "Visibility",
-          "factor_temperature": "Temperature",
-          "factor_species": "Species"
+          "expose_raw": "Expose raw data"
         }
       }
     },

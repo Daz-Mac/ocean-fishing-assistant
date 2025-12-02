@@ -108,8 +108,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("setup_mode", default=default_mode): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "normal", "label": "setup_mode_normal"},
-                                {"value": "advanced", "label": "setup_mode_advanced"},
+                                {"value": "normal", "label": "Normal Mode"},
+                                {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
                             ],
                             mode="list",
                         )
@@ -350,8 +350,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("profile_type"): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "general", "label": "profile_general_label"},
-                                        {"value": "species", "label": "profile_species_label"},
+                                        {"value": "general", "label": "General region profile (mixed)"},
+                                        {"value": "species", "label": "Target a specific species (region-filtered)"},
                                     ],
                                     mode="list",
                                 )
@@ -368,8 +368,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("profile_type"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "general", "label": "profile_general_label"},
-                                {"value": "species", "label": "profile_species_label"},
+                                {"value": "general", "label": "General region profile (mixed)"},
+                                {"value": "species", "label": "Target a specific species (region-filtered)"},
                             ],
                             mode="list",
                         )
@@ -560,10 +560,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "open_beach", "label": "habitat_open_beach"},
-                                        {"value": "rocky_point", "label": "habitat_rocky_point"},
-                                        {"value": "harbour", "label": "habitat_harbour"},
-                                        {"value": "reef", "label": "habitat_reef"},
+                                        {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
+                                        {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
+                                        {"value": "harbour", "label": "⚓ Harbour/Pier"},
+                                        {"value": "reef", "label": "🪸 Offshore Reef"},
                                     ],
                                     mode="list",
                                 )
@@ -580,10 +580,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "open_beach", "label": "habitat_open_beach"},
-                                {"value": "rocky_point", "label": "habitat_rocky_point"},
-                                {"value": "harbour", "label": "habitat_harbour"},
-                                {"value": "reef", "label": "habitat_reef"},
+                                {"value": "open_beach", "label": "🏖️ Open Sandy Beach"},
+                                {"value": "rocky_point", "label": "🪨 Rocky Point/Jetty"},
+                                {"value": "harbour", "label": "⚓ Harbour/Pier"},
+                                {"value": "reef", "label": "🪸 Offshore Reef"},
                             ],
                             mode="list",
                         )
@@ -616,11 +616,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     options=[
                                         {
                                             "value": TIME_PERIODS_FULL_DAY,
-                                            "label": "time_full_day_long",
+                                            "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)",
                                         },
                                         {
                                             "value": TIME_PERIODS_DAWN_DUSK,
-                                            "label": "time_dawn_dusk_long",
+                                            "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
                                         },
                                     ],
                                     mode="list",
@@ -644,8 +644,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "time_full_day_long"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "time_dawn_dusk_long"},
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)"},
                             ],
                             mode="list",
                         )
@@ -670,8 +670,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("units", default="metric"): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "metric", "label": "units_metric"},
-                                        {"value": "imperial", "label": "units_imperial"},
+                                        {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                        {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
                                     ],
                                     mode="list",
                                 )
@@ -690,8 +690,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("units", default="metric"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "metric", "label": "units_metric"},
-                                {"value": "imperial", "label": "units_imperial"},
+                                {"value": "metric", "label": "Metric (m, km/h, °C)"},
+                                {"value": "imperial", "label": "Imperial (ft, mph, °F)"},
                             ],
                             mode="list",
                         )
@@ -883,8 +883,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=[
-                                    {"value": TIME_PERIODS_FULL_DAY, "label": "ocean_options_full_day"},
-                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "ocean_options_dawn_dusk"},
+                                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
                                 ],
                                 mode="dropdown",
                             )
@@ -953,8 +953,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
-                    {"value": TIME_PERIODS_FULL_DAY, "label": "ocean_options_full_day"},
-                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "ocean_options_dawn_dusk"},
+                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
                 ],
                 mode="dropdown",
             )
