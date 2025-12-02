@@ -111,7 +111,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 {"value": "normal", "label": "Normal Mode"},
                                 {"value": "advanced", "label": "Advanced Mode (show interval & extra options)"},
                             ],
-                            mode="list",  # render as radio/list (was changed to dropdown previously)
+                            mode="list",  # render as radio/list
                         )
                     ),
                     vol.Required(CONF_NAME, default=default_name): str,
@@ -244,23 +244,21 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 # require total approximately 100 (tolerance to avoid tiny float rounding issues)
                 if abs(total - 100.0) > 0.5:
-                    # re-show form with error and the submitted total visible in the description + bottom numeric box
+                    # re-show form with error and the submitted total visible in the description + top numeric box
+                    # Build ordered schema: total display at top, then sliders
+                    schema_fields: dict = {
+                        vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                        )
+                    }
+                    for k in FACTOR_WEIGHTS.keys():
+                        schema_fields[vol.Required(f"factor_{k}", default=int(round(ui_weights_raw.get(k, 0))))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                        )
+
                     return self.async_show_form(
                         step_id="factor_weights",
-                        data_schema=vol.Schema(
-                            {
-                                vol.Required(f"factor_{k}", default=int(round(factor_defaults_percent.get(k, 0)))): selector.NumberSelector(
-                                    selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                                )
-                                for k in FACTOR_WEIGHTS.keys()
-                            }
-                            | {
-                                # display-only numeric box showing running total (UI can't do true read-only; this is a display aid)
-                                vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
-                                    selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                                )
-                            }
-                        ),
+                        data_schema=vol.Schema(schema_fields),
                         errors={"base": "sum_not_100"},
                         description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
                     )
@@ -276,60 +274,51 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_ocean_species()
             except ValueError as ve:
                 _LOGGER.debug("Factor weights validation failed: %s", ve)
+                # Show form with defaults and top total
+                schema_fields: dict = {
+                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                    )
+                }
+                for k in FACTOR_WEIGHTS.keys():
+                    schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                    )
+
                 return self.async_show_form(
                     step_id="factor_weights",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                            )
-                            for k in FACTOR_WEIGHTS.keys()
-                        }
-                        | {
-                            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                            )
-                        }
-                    ),
+                    data_schema=vol.Schema(schema_fields),
                     errors={"base": "invalid_factor_weights"},
                     description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
             except Exception as exc:
                 _LOGGER.exception("Unhandled exception in factor_weights: %s", exc)
+                schema_fields: dict = {
+                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                    )
+                }
+                for k in FACTOR_WEIGHTS.keys():
+                    schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                    )
                 return self.async_show_form(
                     step_id="factor_weights",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                            )
-                            for k in FACTOR_WEIGHTS.keys()
-                        }
-                        | {
-                            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                            )
-                        }
-                    ),
+                    data_schema=vol.Schema(schema_fields),
                     errors={"base": "unknown"},
                     description_placeholders={"info": f"Total = {total_default}%. Adjust sliders so they add to 100%."},
                 )
 
-        # Show sliders (single-purpose screen) with a bottom numeric box showing the default total
+        # Show sliders (single-purpose screen) with a top numeric box showing the default total
         schema_fields: dict = {
-            vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
+            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+            )
+        }
+        for k in FACTOR_WEIGHTS.keys():
+            schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
             )
-            for k in FACTOR_WEIGHTS.keys()
-        }
-        # Add bottom numeric display for running total (UI display aid)
-        schema_fields.update(
-            {
-                vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                )
-            }
-        )
 
         return self.async_show_form(
             step_id="factor_weights",
@@ -890,52 +879,56 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 if weights_raw:
                     total = float(sum(weights_raw.values()))
                     if abs(total - 100.0) > 0.5:
-                        # re-show form with error: include total in description and show bottom numeric box
-                        # build form fields with submitted defaults where possible
+                        # re-show form with error: include total in description and show top numeric box
                         stored_defaults = {k: int(round(weights_raw.get(k, 0))) for k in FACTOR_WEIGHTS.keys()}
+
+                        # Build ordered schema: total at top, then options fields & sliders
+                        schema_fields: dict = {
+                            vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+                            )
+                        }
+
+                        # time periods & thresholds first (keeps previous order)
+                        schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
+                            selector.SelectSelectorConfig(
+                                options=[
+                                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                                ],
+                                mode="dropdown",
+                            )
+                        )
+                        schema_fields[vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                        )
+                        schema_fields[vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement="km/h", mode="slider")
+                        )
+                        schema_fields[vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement="m", mode="slider")
+                        )
+                        schema_fields[vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
+                        )
+                        schema_fields[vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
+                        )
+                        schema_fields[vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1))] = selector.NumberSelector(
+                            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
+                        )
+                        schema_fields[vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False))] = selector.BooleanSelector()
+
+                        # factor sliders (use stored_defaults where possible)
+                        for k in FACTOR_WEIGHTS.keys():
+                            schema_fields[vol.Required(f"factor_{k}", default=stored_defaults.get(k, 0))] = selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+                            )
+
+                        # total numeric box already added at top
                         return self.async_show_form(
                             step_id="ocean_options",
-                            data_schema=vol.Schema(
-                                {
-                                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
-                                        selector.SelectSelectorConfig(
-                                            options=[
-                                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
-                                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
-                                            ],
-                                            mode="dropdown",
-                                        )
-                                    ),
-                                    vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25)): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
-                                    ),
-                                    vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40)): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement="km/h", mode="slider")
-                                    ),
-                                    vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0)): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement="m", mode="slider")
-                                    ),
-                                    vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80)): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
-                                    ),
-                                    vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3)): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
-                                    ),
-                                    vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1)): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
-                                    ),
-                                    vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False)): selector.BooleanSelector(),
-                                    **{
-                                        vol.Required(f"factor_{k}", default=stored_defaults.get(k, 0)): selector.NumberSelector(
-                                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                                        )
-                                        for k in FACTOR_WEIGHTS.keys()
-                                    },
-                                    vol.Required("_factors_total", default=int(round(total))): selector.NumberSelector(
-                                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                                    ),
-                                }
-                            ),
+                            data_schema=vol.Schema(schema_fields),
                             errors={"base": "sum_not_100"},
                             description_placeholders={"info": f"Total = {total:.1f}%. Scoring factors must add to 100%."},
                         )
@@ -970,48 +963,48 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         }
         total_default = sum(factor_defaults_percent.values())
 
+        # Build ordered schema with total at top
+        schema_fields: dict = {
+            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+            )
+        }
+        schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
+                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
+                ],
+                mode="dropdown",
+            )
+        )
+        schema_fields[vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25))] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+        )
+        schema_fields[vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40))] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
+        )
+        schema_fields[vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0))] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
+        )
+        schema_fields[vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80))] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
+        )
+        schema_fields[vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3))] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
+        )
+        schema_fields[vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1))] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
+        )
+        schema_fields[vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False))] = selector.BooleanSelector()
+
+        for k in FACTOR_WEIGHTS.keys():
+            schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
+            )
+
         return self.async_show_form(
             step_id="ocean_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "🌅 Full Day (4 periods)"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "🌄 Dawn & Dusk Only"},
-                            ],
-                            mode="dropdown",
-                        )
-                    ),
-                    vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
-                    ),
-                    vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
-                    ),
-                    vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
-                    ),
-                    vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
-                    ),
-                    vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False)): selector.BooleanSelector(),
-                    **{
-                        vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0)): selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
-                        )
-                        for k in FACTOR_WEIGHTS.keys()
-                    },
-                    vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-                    ),
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             description_placeholders={"info": f"Adjust factor weights (total = {total_default}%). Ensure values add to 100%."},
         )
