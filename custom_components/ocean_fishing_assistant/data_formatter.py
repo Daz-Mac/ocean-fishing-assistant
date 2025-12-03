@@ -267,9 +267,9 @@ class DataFormatter:
             canonical, species_profile=species_profile, safety_limits=safety_limits, units=units, factor_weights=fw
         )
 
-        # Respect expose_raw setting: when raw is not exposed, limit breach examples to 2
+        # Respect expose_raw setting: when raw is not exposed, limit breach examples
         expose_raw = bool(self._config_entry_data.get("expose_raw", False))
-        max_breach_examples = 4 if expose_raw else 2
+        max_breach_examples = 4 if expose_raw else 1
 
         for i, entry in enumerate(per_ts_forecasts):
             if entry.get("score_100") is None:
