@@ -668,7 +668,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             entry.entry_id,
             CONF_NAME,
         )
-        # Fail loudly per project policy
         raise ValueError("Entry data missing 'name' (strict)")
 
     try:
