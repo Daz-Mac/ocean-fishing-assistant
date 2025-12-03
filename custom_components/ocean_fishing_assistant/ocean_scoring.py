@@ -34,7 +34,7 @@ FACTOR_WEIGHTS = {
     "pressure": 0.10,
     "season": 0.10,
     "moon": 0.05,
-    "temperature": 0.03,
+    "temperature": 0.04,
 }
 
 
