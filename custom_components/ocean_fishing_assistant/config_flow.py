@@ -108,8 +108,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("setup_mode", default=default_mode): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "normal", "translation_key": "setup_mode_normal"},
-                                {"value": "advanced", "translation_key": "setup_mode_advanced"},
+                                {"value": "normal", "label": "Normal mode (simple setup)"},
+                                {"value": "advanced", "label": "Advanced mode (intervals, TTLs, factor weights)"},
                             ],
                             mode="list",
                         )
@@ -347,8 +347,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("profile_type"): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "general", "translation_key": "profile_general_label"},
-                                        {"value": "species", "translation_key": "profile_species_label"},
+                                        {"value": "general", "label": "General / mixed profile"},
+                                        {"value": "species", "label": "Target a specific species"},
                                     ],
                                     mode="list",
                                 )
@@ -365,8 +365,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("profile_type"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "general", "translation_key": "profile_general_label"},
-                                {"value": "species", "translation_key": "profile_species_label"},
+                                {"value": "general", "label": "General / mixed profile"},
+                                {"value": "species", "label": "Target a specific species"},
                             ],
                             mode="list",
                         )
@@ -557,10 +557,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "open_beach", "translation_key": "habitat_open_beach"},
-                                        {"value": "rocky_point", "translation_key": "habitat_rocky_point"},
-                                        {"value": "harbour", "translation_key": "habitat_harbour"},
-                                        {"value": "reef", "translation_key": "habitat_reef"},
+                                        {"value": "open_beach", "label": "Open beach"},
+                                        {"value": "rocky_point", "label": "Rocky point / headland"},
+                                        {"value": "harbour", "label": "Harbour / breakwater"},
+                                        {"value": "reef", "label": "Reef / offshore"},
                                     ],
                                     mode="list",
                                 )
@@ -577,10 +577,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "open_beach", "translation_key": "habitat_open_beach"},
-                                {"value": "rocky_point", "translation_key": "habitat_rocky_point"},
-                                {"value": "harbour", "translation_key": "habitat_harbour"},
-                                {"value": "reef", "translation_key": "habitat_reef"},
+                                {"value": "open_beach", "label": "Open beach"},
+                                {"value": "rocky_point", "label": "Rocky point / headland"},
+                                {"value": "harbour", "label": "Harbour / breakwater"},
+                                {"value": "reef", "label": "Reef / offshore"},
                             ],
                             mode="list",
                         )
@@ -611,8 +611,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             ): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_long"},
-                                        {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_long"},
+                                        {"value": TIME_PERIODS_FULL_DAY, "label": "Full day (00:00–24:00)"},
+                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk only"},
                                     ],
                                     mode="list",
                                 )
@@ -621,7 +621,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     errors=errors,
                     description_placeholders={
-                        "info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."
+                        "info": "Choose which time periods to monitor. Dawn & dusk focuses on the most productive fishing times."
                     },
                 )
 
@@ -635,15 +635,15 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_long"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_long"},
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "Full day (00:00–24:00)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk only"},
                             ],
                             mode="list",
                         )
                     )
                 }
             ),
-            description_placeholders={"info": "Choose which time periods to monitor. Dawn & Dusk focuses on the most productive fishing times."},
+            description_placeholders={"info": "Choose which time periods to monitor. Dawn & dusk focuses on the most productive fishing times."},
         )
 
     # ----
@@ -661,8 +661,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required("units", default="metric"): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "metric", "translation_key": "units_metric"},
-                                        {"value": "imperial", "translation_key": "units_imperial"},
+                                        {"value": "metric", "label": "Metric (km/h, m, °C)"},
+                                        {"value": "imperial", "label": "Imperial (mph, ft, °F)"},
                                     ],
                                     mode="list",
                                 )
@@ -681,8 +681,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("units", default="metric"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "metric", "translation_key": "units_metric"},
-                                {"value": "imperial", "translation_key": "units_imperial"},
+                                {"value": "metric", "label": "Metric (km/h, m, °C)"},
+                                {"value": "imperial", "label": "Imperial (mph, ft, °F)"},
                             ],
                             mode="list",
                         )
@@ -873,8 +873,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=[
-                                    {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_short"},
-                                    {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_short"},
+                                    {"value": TIME_PERIODS_FULL_DAY, "label": "Full day"},
+                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk"},
                                 ],
                                 mode="dropdown",
                             )
@@ -941,8 +941,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
-                    {"value": TIME_PERIODS_FULL_DAY, "translation_key": "time_full_day_short"},
-                    {"value": TIME_PERIODS_DAWN_DUSK, "translation_key": "time_dawn_dusk_short"},
+                    {"value": TIME_PERIODS_FULL_DAY, "label": "Full day"},
+                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk"},
                 ],
                 mode="dropdown",
             )
