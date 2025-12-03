@@ -267,6 +267,10 @@ class DataFormatter:
             canonical, species_profile=species_profile, safety_limits=safety_limits, units=units, factor_weights=fw
         )
 
+        # Respect expose_raw setting: when raw is not exposed, limit breach examples to 2
+        expose_raw = bool(self._config_entry_data.get("expose_raw", False))
+        max_breach_examples = 4 if expose_raw else 2
+
         for i, entry in enumerate(per_ts_forecasts):
             if entry.get("score_100") is None:
                 ts = entry.get("timestamp")
@@ -444,6 +448,18 @@ class DataFormatter:
                         "breaches": breaches_summary,
                     })
                     period_forecasts[date_key][pname] = summary
+
+        # enforce breach examples limit per expose_raw setting
+        try:
+            for date_key, pmap in period_forecasts.items():
+                for pname, pdata in pmap.items():
+                    breaches = pdata.get("breaches") or {}
+                    ex = breaches.get("examples") if isinstance(breaches, dict) else None
+                    if ex and isinstance(ex, list):
+                        breaches["examples"] = ex[:max_breach_examples]
+                        pdata["breaches"] = breaches
+        except Exception:
+            pass
 
         final_out = {
             "timestamps": timestamps,

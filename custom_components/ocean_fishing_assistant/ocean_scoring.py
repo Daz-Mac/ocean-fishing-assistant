@@ -820,8 +820,6 @@ def compute_score(
                 item["expected_pref_min"] = expected_pref_min
             if expected_pref_max is not None:
                 item["expected_pref_max"] = expected_pref_max
-            if advice is not None:
-                item["advice"] = advice
             breaches.append(item)
 
         # TEMPERATURE breach detection
