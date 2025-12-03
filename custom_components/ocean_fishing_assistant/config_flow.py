@@ -557,10 +557,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": "open_beach", "label": "Open beach"},
-                                        {"value": "rocky_point", "label": "Rocky point / headland"},
-                                        {"value": "harbour", "label": "Harbour / breakwater"},
-                                        {"value": "reef", "label": "Reef / offshore"},
+                                        {"value": "open_beach", "label": "Open Sandy Beach"},
+                                        {"value": "rocky_point", "label": "Rocky Point / Jetty"},
+                                        {"value": "harbour", "label": "Harbour / Pier"},
+                                        {"value": "reef", "label": "Offshore Reef"},
                                     ],
                                     mode="list",
                                 )
@@ -577,10 +577,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_HABITAT_PRESET, default=HABITAT_ROCKY_POINT): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": "open_beach", "label": "Open beach"},
-                                {"value": "rocky_point", "label": "Rocky point / headland"},
-                                {"value": "harbour", "label": "Harbour / breakwater"},
-                                {"value": "reef", "label": "Reef / offshore"},
+                                {"value": "open_beach", "label": "Open Sandy Beach"},
+                                {"value": "rocky_point", "label": "Rocky Point / Jetty"},
+                                {"value": "harbour", "label": "Harbour / Pier"},
+                                {"value": "reef", "label": "Offshore Reef"},
                             ],
                             mode="list",
                         )
@@ -611,8 +611,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             ): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[
-                                        {"value": TIME_PERIODS_FULL_DAY, "label": "Full day (00:00–24:00)"},
-                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk only"},
+                                        {"value": TIME_PERIODS_FULL_DAY, "label": "Full Day (4 periods)"},
+                                        {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & Dusk only"},
                                     ],
                                     mode="list",
                                 )
@@ -635,8 +635,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_TIME_PERIODS, default=TIME_PERIODS_FULL_DAY): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                {"value": TIME_PERIODS_FULL_DAY, "label": "Full day (00:00–24:00)"},
-                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk only"},
+                                {"value": TIME_PERIODS_FULL_DAY, "label": "Full Day (4 periods)"},
+                                {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & Dusk only"},
                             ],
                             mode="list",
                         )
@@ -870,11 +870,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     if abs(total - 100.0) > 0.5:
                         stored_defaults = {k: int(round(weights_raw.get(k, 0))) for k in FACTOR_WEIGHTS.keys()}
                         schema_fields: dict = {}
+
                         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=[
-                                    {"value": TIME_PERIODS_FULL_DAY, "label": "Full day"},
-                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk"},
+                                    {"value": TIME_PERIODS_FULL_DAY, "label": "Full Day (4 periods)"},
+                                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & Dusk only"},
                                 ],
                                 mode="dropdown",
                             )
@@ -941,8 +942,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
-                    {"value": TIME_PERIODS_FULL_DAY, "label": "Full day"},
-                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & dusk"},
+                    {"value": TIME_PERIODS_FULL_DAY, "label": "Full Day (4 periods)"},
+                    {"value": TIME_PERIODS_DAWN_DUSK, "label": "Dawn & Dusk only"},
                 ],
                 mode="dropdown",
             )
