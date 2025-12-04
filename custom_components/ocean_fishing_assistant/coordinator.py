@@ -11,7 +11,7 @@ from typing import Optional
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIME_PERIODS
+from .const import FETCH_CACHE_TTL, DOMAIN
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
@@ -105,21 +105,23 @@ class OFACoordinator(DataUpdateCoordinator):
         """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
         async with async_timeout.timeout(60):
             cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
-            cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(5))
+            # Use an explicit 'days' variable — ensures cache key matches fetch parameters.
+            days = 5
+            cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(days))
             cached = cache_dict.get(cache_key)
             raw = None
             if cached and (time.time() - float(cached.get("fetched_at", 0))) < self._fetch_cache_ttl:
                 raw = cached.get("data")
             else:
                 # fetch raw Open-Meteo payload strictly (may raise)
-                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=5)
+                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=days)
                 cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
 
             # Fetch marine variables (STRICT: marine is required for ocean assistant)
             if not hasattr(self.fetcher, "fetch_marine_direct"):
                 raise RuntimeError("Fetcher does not implement fetch_marine_direct (marine required)")
 
-            marine = await self.fetcher.fetch_marine_direct(days=5)  # will raise on failure
+            marine = await self.fetcher.fetch_marine_direct(days=days)  # will raise on failure
             if not isinstance(marine, dict) or "hourly" not in marine or not isinstance(marine["hourly"], dict):
                 raise RuntimeError("Marine payload invalid (strict)")
 
