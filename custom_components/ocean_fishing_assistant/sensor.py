@@ -142,6 +142,9 @@ def _augment_components_with_values_simple(
          temperature -> temperature (e.g. "21.0 °C")
     This function strictly reads canonical numeric values from score_calc_raw and does not
     attempt to read legacy fields or pre-merged strings.
+
+    Additionally: if a component contains explicit sibling unit keys (e.g. 'tide_height' and 'tide_unit'),
+    merge them into a single display string and remove the separate unit key to ensure consistent merged output.
     """
     if components is None:
         return None
@@ -149,6 +152,92 @@ def _augment_components_with_values_simple(
         return components
 
     comps_copy = copy.deepcopy(components)
+
+    def _merge_sibling_value_unit(cc: Dict[str, Any]) -> None:
+        """
+        Detect and merge any measurement + unit sibling pairs inside a component dict.
+        Heuristic rounding:
+          - wind-related -> 2 dp
+          - temperature -> 1 dp
+          - tide / wave / pressure / delta / height -> 3 dp
+          - fallback -> 3 dp
+        After merging, remove the corresponding '*_unit' key.
+        """
+        try:
+            for unit_key in list(cc.keys()):
+                if not unit_key.endswith("_unit"):
+                    continue
+                unit = cc.get(unit_key)
+                # base name is the part before _unit
+                base = unit_key[:-5]
+                candidate = None
+
+                # Prefer candidate keys that start with base
+                for k in cc.keys():
+                    if k == unit_key or k.endswith("_unit"):
+                        continue
+                    if k.startswith(base):
+                        candidate = k
+                        break
+
+                # If no prefix match, try contains base
+                if candidate is None:
+                    for k in cc.keys():
+                        if k == unit_key or k.endswith("_unit"):
+                            continue
+                        if base in k:
+                            candidate = k
+                            break
+
+                # Last-resort: pick first numeric-like key that isn't a unit
+                if candidate is None:
+                    for k in cc.keys():
+                        if k == unit_key or k.endswith("_unit"):
+                            continue
+                        v = cc.get(k)
+                        if isinstance(v, (int, float)):
+                            candidate = k
+                            break
+                        if isinstance(v, str):
+                            # numeric-ish string?
+                            s = v.strip()
+                            if s.replace(".", "", 1).lstrip("-").isdigit():
+                                candidate = k
+                                break
+
+                if candidate is None:
+                    # nothing to merge for this unit_key; remove leftover unit to avoid duplication
+                    cc.pop(unit_key, None)
+                    continue
+
+                val = cc.get(candidate)
+                # If value already looks like a merged string containing the unit, just drop the unit key
+                if isinstance(val, str) and isinstance(unit, str) and unit in val:
+                    cc.pop(unit_key, None)
+                    continue
+
+                # Try to coerce numeric value
+                try:
+                    num = float(val)
+                except Exception:
+                    # can't coerce; drop the unit_key to avoid leaving extra keys
+                    cc.pop(unit_key, None)
+                    continue
+
+                # Decide rounding
+                nd = 3
+                if "wind" in candidate or "gust" in candidate:
+                    nd = 2
+                elif "temp" in candidate or "temperature" in candidate:
+                    nd = 1
+                elif "height" in candidate or "wave" in candidate or "tide" in candidate or "delta" in candidate or "pressure" in candidate:
+                    nd = 3
+
+                cc[candidate] = _format_with_unit(num, unit, ndigits=nd)
+                cc.pop(unit_key, None)
+        except Exception:
+            # If anything goes wrong, leave component as-is (best-effort merging only)
+            pass
 
     out: Dict[str, Any] = {}
     for cname, cobj in comps_copy.items():
@@ -194,6 +283,11 @@ def _augment_components_with_values_simple(
         except Exception:
             # On any unexpected error we skip augmentation for that component.
             pass
+
+        # After injecting canonical merged strings from raw (when present), also merge any
+        # existing sibling value+unit keys into the merged form to ensure consistency.
+        _merge_sibling_value_unit(cc)
+
         out[cname] = cc
     return out
 
