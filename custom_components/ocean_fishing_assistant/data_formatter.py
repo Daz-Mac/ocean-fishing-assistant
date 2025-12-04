@@ -277,6 +277,54 @@ class DataFormatter:
                 details = entry.get("forecast_raw") or {}
                 raise ValueError(f"Incomplete scoring at index={i} timestamp={ts}: missing required inputs or scoring failed; details={details}")
 
+        # helper: merge breach 'value' + 'unit' into single display string and remove 'unit' key
+        def _merge_breach_example(ex: Dict[str, Any], units_local: str) -> Dict[str, Any]:
+            try:
+                u = ex.pop("unit", None)
+                v = ex.get("value")
+                if u is None or v is None:
+                    return ex
+                # If value already a string that includes the unit, nothing to do
+                if isinstance(v, str) and isinstance(u, str) and u in v:
+                    ex["value"] = v
+                    return ex
+                # Try numeric formatting
+                try:
+                    num = float(v)
+                except Exception:
+                    # fallback to concatenation
+                    ex["value"] = f"{v} {u}"
+                    return ex
+
+                # m/s conversion/display using unit_helpers if needed
+                if u == "m/s":
+                    try:
+                        if units_local == "metric":
+                            conv = unit_helpers.m_s_to_kmh(num)
+                            label = "km/h"
+                        elif units_local == "imperial":
+                            conv = unit_helpers.m_s_to_mph(num)
+                            label = "mph"
+                        else:
+                            conv = num
+                            label = "m/s"
+                        ex["value"] = f"{round(conv, 2)} {label}"
+                        return ex
+                    except Exception:
+                        ex["value"] = f"{round(num, 2)} {u}"
+                        return ex
+
+                # choose rounding: hours -> int, °C -> 1dp, default 3dp for meters etc.
+                nd = 3
+                if isinstance(u, str) and ("hour" in u):
+                    nd = 0
+                elif isinstance(u, str) and ("°C" in u or "hPa" in u):
+                    nd = 1
+                ex["value"] = f"{round(num, nd)} {u}"
+                return ex
+            except Exception:
+                return ex
+
         hourly_like: List[Dict[str, Any]] = []
         length = len(timestamps)
         for i, ts in enumerate(timestamps):
@@ -336,9 +384,10 @@ class DataFormatter:
                             entry_bc["count"] += 1
                             if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
                                 entry_bc["severity"] = "unsafe"
-                            if len(breach_examples) < 3:
+                            if len(breach_examples) < max_breach_examples:
                                 ex = dict(b)
                                 ex["timestamp"] = e.get("timestamp")
+                                ex = _merge_breach_example(ex, units)
                                 breach_examples.append(ex)
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
@@ -419,9 +468,10 @@ class DataFormatter:
                             entry_bc["count"] += 1
                             if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
                                 entry_bc["severity"] = "unsafe"
-                            if len(breach_examples) < 3:
+                            if len(breach_examples) < max_breach_examples:
                                 ex = dict(b)
                                 ex["timestamp"] = e.get("timestamp")
+                                ex = _merge_breach_example(ex, units)
                                 breach_examples.append(ex)
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
@@ -449,7 +499,7 @@ class DataFormatter:
                     })
                     period_forecasts[date_key][pname] = summary
 
-        # enforce breach examples limit per expose_raw setting
+        # enforce breach examples limit per expose_raw setting (post-process safety)
         try:
             for date_key, pmap in period_forecasts.items():
                 for pname, pdata in pmap.items():

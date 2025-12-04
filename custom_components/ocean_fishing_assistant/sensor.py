@@ -492,6 +492,38 @@ class OFASensor(CoordinatorEntity):
         if safety_vals:
             current_copy["safety_values"] = safety_vals
 
+        # sanitize any breaches present in the current forecast by merging value+unit for display
+        try:
+            if isinstance(current_copy.get("breaches"), list):
+                sanitized = []
+                for b in current_copy.get("breaches") or []:
+                    ex = dict(b)
+                    u = ex.pop("unit", None)
+                    v = ex.get("value")
+                    if u and v is not None:
+                        try:
+                            num = float(v)
+                            if u == "m/s":
+                                # convert into display based on entry_units
+                                try:
+                                    disp, disp_unit = unit_helpers.wind_m_s_to_display(num, entry_units)
+                                    if disp is not None:
+                                        ex["value"] = f"{round(disp,2)} {disp_unit}"
+                                    else:
+                                        ex["value"] = f"{round(num,2)} {u}"
+                                except Exception:
+                                    ex["value"] = f"{round(num,2)} {u}"
+                            else:
+                                nd = 0 if "hour" in u else (1 if "°C" in u or "hPa" in u else 3)
+                                ex["value"] = f"{round(num, nd)} {u}"
+                        except Exception:
+                            ex["value"] = f"{v} {u}"
+                    sanitized.append(ex)
+                current_copy["breaches"] = sanitized
+        except Exception:
+            # best-effort only
+            pass
+
         attrs["current_forecast"] = current_copy
 
         # --- Grouped period views (remainder_of_today_periods, next_5_day_periods) ---
@@ -641,7 +673,7 @@ class OFASensor(CoordinatorEntity):
             def _build_tide_attr(tobj: dict) -> Optional[dict]:
                 """
                 Expect tobj to be {'timestamp': ISOZ, 'height_m': float}. Return
-                dict with timestamp, canonical height_m, and converted display height (merged).
+                dict with timestamp and converted display height (merged).
                 Return None if malformed (strict).
                 """
                 if not isinstance(tobj, dict):
@@ -669,7 +701,7 @@ class OFASensor(CoordinatorEntity):
                 if disp_val is not None:
                     disp_val = _round_opt(disp_val, 3)
 
-                return {"timestamp": dt.isoformat().replace("+00:00", "Z"), "height_m": round(h_m, 3), "height": _format_with_unit(disp_val, disp_unit, ndigits=3)}
+                return {"timestamp": dt.isoformat().replace("+00:00", "Z"), "height": _format_with_unit(disp_val, disp_unit, ndigits=3)}
 
             nh_attr = _build_tide_attr(tide_obj.get("next_high"))
             nl_attr = _build_tide_attr(tide_obj.get("next_low"))
