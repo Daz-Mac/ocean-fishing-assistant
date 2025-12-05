@@ -22,6 +22,8 @@ from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 import logging
 import copy
+import os
+import json
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -669,15 +671,47 @@ class OFASensor(CoordinatorEntity):
                 # Do not mutate original; work on a shallow copy for display augmentation
                 pu_copy = dict(pu) if isinstance(pu, dict) else pu
                 selected = getattr(self.coordinator, "species", None)
+
+                # Helper: resolve species profile if coordinator.species is a string id
+                def _resolve_species_profile(sel: Any) -> Optional[Dict[str, Any]]:
+                    """
+                    Accept either a dict or a species id string. If string, attempt to load
+                    the bundled species_profiles.json and return the species dict.
+                    Returns None if resolution fails.
+                    """
+                    if sel is None:
+                        return None
+                    if isinstance(sel, dict):
+                        return sel
+                    if isinstance(sel, str):
+                        try:
+                            base_dir = os.path.dirname(__file__)
+                            spath = os.path.join(base_dir, "species_profiles.json")
+                            with open(spath, "r", encoding="utf-8") as fh:
+                                payload = json.load(fh)
+                            species_map = payload.get("species", {}) if isinstance(payload, dict) else {}
+                            prof = species_map.get(sel)
+                            if prof and isinstance(prof, dict):
+                                return prof
+                            _LOGGER.debug("species resolution: species id %r not found in species_profiles.json", sel)
+                            return None
+                        except Exception as exc:
+                            _LOGGER.exception("Failed to resolve species profile for %r: %s", sel, exc)
+                            return None
+                    # unsupported type
+                    return None
+
+                resolved = _resolve_species_profile(selected)
+
                 # Only augment when the coordinator has a selected species profile that contains a scientific_name.
                 # General profiles are expected not to contain scientific_name; in that case we leave profile_used untouched.
-                if isinstance(pu_copy, dict) and isinstance(selected, dict) and selected.get("scientific_name"):
+                if isinstance(pu_copy, dict) and isinstance(resolved, dict) and resolved.get("scientific_name"):
                     try:
-                        pu_copy["scientific_name"] = selected.get("scientific_name", "")
-                        pu_copy["info"] = selected.get("info", "")
+                        pu_copy["scientific_name"] = resolved.get("scientific_name", "")
+                        pu_copy["info"] = resolved.get("info", "")
                     except Exception:
                         # Best-effort — if augmentation fails, fall back to original pu_copy without blocking.
-                        pass
+                        _LOGGER.debug("Failed to inject scientific_name/info into profile_used for display", exc_info=True)
                 attrs["profile_used"] = pu_copy
         except Exception:
             # If anything unexpected happens during profile augmentation, fallback to raw value (do not break attr construction)
