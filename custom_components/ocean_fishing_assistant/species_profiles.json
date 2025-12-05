@@ -17,7 +17,6 @@
     }
   },
   "regions": {
-    "global": {"id": "global", "name": "Global"},
     "gibraltar_strait": {"id": "gibraltar_strait", "name": "Gibraltar Strait"},
     "south_africa_kzn": {"id": "south_africa_kzn", "name": "South Africa KZN"}
   },

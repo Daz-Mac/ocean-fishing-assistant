@@ -660,7 +660,29 @@ class OFASensor(CoordinatorEntity):
         attrs["raw_output_enabled"] = bool(self._is_raw_enabled())
 
         # Top-level summary fields (simple, canonical)
-        attrs["profile_used"] = current.get("profile_used")
+        # Build profile_used and augment with scientific_name/info when a specific species was selected
+        pu = current.get("profile_used")
+        try:
+            if pu is None:
+                attrs["profile_used"] = None
+            else:
+                # Do not mutate original; work on a shallow copy for display augmentation
+                pu_copy = dict(pu) if isinstance(pu, dict) else pu
+                selected = getattr(self.coordinator, "species", None)
+                # Only augment when the coordinator has a selected species profile that contains a scientific_name.
+                # General profiles are expected not to contain scientific_name; in that case we leave profile_used untouched.
+                if isinstance(pu_copy, dict) and isinstance(selected, dict) and selected.get("scientific_name"):
+                    try:
+                        pu_copy["scientific_name"] = selected.get("scientific_name", "")
+                        pu_copy["info"] = selected.get("info", "")
+                    except Exception:
+                        # Best-effort — if augmentation fails, fall back to original pu_copy without blocking.
+                        pass
+                attrs["profile_used"] = pu_copy
+        except Exception:
+            # If anything unexpected happens during profile augmentation, fallback to raw value (do not break attr construction)
+            attrs["profile_used"] = pu
+
         attrs["units"] = entry_units
 
         # Strict tide handling (NO backwards-compat fallbacks)
