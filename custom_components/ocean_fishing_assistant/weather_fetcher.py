@@ -78,8 +78,10 @@ class WeatherFetcher:
 
     def __init__(self, hass, latitude: float, longitude: float, speed_unit: str, cache_ttl_seconds: Optional[int] = None) -> None:
         self.hass = hass
-        self.latitude = round(float(latitude), 6)
-        self.longitude = round(float(longitude), 6)
+        # Use centralized rounding precision for stored instance coords
+        lat_r, lon_r = unit_helpers.round_coords(latitude, longitude)
+        self.latitude = lat_r
+        self.longitude = lon_r
 
         if not speed_unit or str(speed_unit).strip().lower() not in ("km/h", "kph", "kmh", "mph", "m/s"):
             raise ValueError("WeatherFetcher requires explicit speed_unit ('km/h', 'mph' or 'm/s') (strict)")
@@ -93,7 +95,8 @@ class WeatherFetcher:
             # covers "m/s" and variants which fall through
             self.speed_unit = "m/s"
 
-        self._cache_key = f"{self.latitude}_{self.longitude}_om"
+        # canonical, deterministic cache key using centralized formatting (string)
+        self._cache_key = unit_helpers.format_coord_key(self.latitude, self.longitude) + "_om"
         # Allow external override via constructor; otherwise use integration default
         if cache_ttl_seconds is None:
             self._cache_duration = timedelta(seconds=WEATHER_FETCHER_CACHE_TTL_DEFAULT)
@@ -115,8 +118,7 @@ class WeatherFetcher:
         - Delegates to fetch_open_meteo_forecast_direct and returns the raw dict.
         """
         try:
-            lat_n = round(float(latitude), 6)
-            lon_n = round(float(longitude), 6)
+            lat_n, lon_n = unit_helpers.round_coords(latitude, longitude)
         except Exception:
             raise ValueError("Invalid latitude/longitude passed to fetch (strict)")
 

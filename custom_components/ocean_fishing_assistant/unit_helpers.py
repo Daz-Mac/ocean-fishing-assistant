@@ -274,3 +274,45 @@ def validate_and_normalize_safety_limits(safety_limits: Dict[str, Any], strict: 
         normalized[key] = float(val)
 
     return normalized, warnings
+
+
+# ---- New helpers: centralized coordinate rounding + canonical cache key formatting ----
+
+def round_coords(lat: Any, lon: Any, precision: Optional[int] = None) -> Tuple[float, float]:
+    """
+    Round lat/lon to the canonical number of decimal places used for caching/aggregation.
+
+    Returns a tuple of floats (lat_rounded, lon_rounded). Raises ValueError on invalid inputs.
+    """
+    try:
+        from .const import COORD_ROUND_DECIMALS
+    except Exception:
+        # fallback to safe default if const import fails (should not happen)
+        COORD_ROUND_DECIMALS = 5
+
+    prec = precision if precision is not None else COORD_ROUND_DECIMALS
+    try:
+        latf = float(lat)
+        lonf = float(lon)
+    except Exception:
+        raise ValueError(f"Invalid latitude/longitude values for rounding: {lat!r}, {lon!r}")
+    return round(latf, int(prec)), round(lonf, int(prec))
+
+
+def format_coord_key(lat: Any, lon: Any, precision: Optional[int] = None) -> str:
+    """
+    Return a canonical, fixed-decimal string for cache keys, e.g. '51.12345:-0.12345'
+    Ensures trailing zeros are preserved (deterministic string keys).
+    """
+    try:
+        from .const import COORD_ROUND_DECIMALS
+    except Exception:
+        COORD_ROUND_DECIMALS = 5
+
+    prec = precision if precision is not None else COORD_ROUND_DECIMALS
+    try:
+        latf = float(lat)
+        lonf = float(lon)
+    except Exception:
+        raise ValueError(f"Invalid latitude/longitude values for key formatting: {lat!r}, {lon!r}")
+    return f"{latf:.{int(prec)}f}:{lonf:.{int(prec)}f}"

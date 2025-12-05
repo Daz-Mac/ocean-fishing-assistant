@@ -107,7 +107,9 @@ class OFACoordinator(DataUpdateCoordinator):
             cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
             # Use an explicit 'days' variable — ensures cache key matches fetch parameters.
             days = 5
-            cache_key = (round(float(self.lat), 4), round(float(self.lon), 4), "hourly", int(days))
+            # Use centralized rounding helper so coordinate rounding precision is consistent across modules
+            lat_r, lon_r = unit_helpers.round_coords(self.lat, self.lon)
+            cache_key = (lat_r, lon_r, "hourly", int(days))
             cached = cache_dict.get(cache_key)
             raw = None
             if cached and (time.time() - float(cached.get("fetched_at", 0))) < self._fetch_cache_ttl:

@@ -38,6 +38,10 @@ FETCH_CACHE_TTL = DEFAULT_UPDATE_INTERVAL  # seconds (align with DEFAULT_UPDATE_
 TIDE_PROXY_TTL_DEFAULT = 30 * 60       # seconds (default 30 minutes)
 WEATHER_FETCHER_CACHE_TTL_DEFAULT = 30 * 60  # seconds (default 30 minutes)
 
+# ----- New: coordinate rounding precision used for cache keys and key-coalescing across components -----
+# Use a single canonical rounding precision everywhere to ensure consistent cache keys and predictable hits.
+COORD_ROUND_DECIMALS = 5  # recommended default: 5 decimals ≈ 1.1 meters
+
 # ----- Config keys used by the flow and entry options -----
 CONF_NAME = "name"
 CONF_LATITUDE = "latitude"
