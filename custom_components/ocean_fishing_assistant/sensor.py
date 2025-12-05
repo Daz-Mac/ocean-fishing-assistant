@@ -137,7 +137,6 @@ def _augment_components_with_values_simple(
       - Remove per-component 'score_10'
       - Inject the numeric display value used by scoring when available as merged display strings:
          wind -> wind_speed (e.g. "11.6 km/h")
-         tide -> tide_height (e.g. "1.23 m")
          waves -> wave_height (e.g. "1.23 m")
          pressure -> pressure_delta (e.g. "0.5 hPa")
          moon -> moon_phase (numeric) and moon_phase_name
@@ -254,10 +253,6 @@ def _augment_components_with_values_simple(
                 if raw.get("wind") is not None:
                     val, unit = unit_helpers.wind_m_s_to_display(raw.get("wind"), entry_units)
                     cc["wind_speed"] = _format_with_unit(val, unit, ndigits=2) if val is not None else None
-            elif cname == "tide":
-                if raw.get("tide") is not None:
-                    val, unit = unit_helpers.length_m_to_display(raw.get("tide"), entry_units)
-                    cc["tide_height"] = _format_with_unit(val, unit, ndigits=3) if val is not None else None
             elif cname == "waves":
                 if raw.get("wave") is not None:
                     val, unit = unit_helpers.length_m_to_display(raw.get("wave"), entry_units)
@@ -728,36 +723,23 @@ class OFASensor(CoordinatorEntity):
         else:
             def _build_tide_attr(tobj: dict) -> Optional[dict]:
                 """
-                Expect tobj to be {'timestamp': ISOZ, 'height_m': float}. Return
-                dict with timestamp and converted display height (merged).
-                Return None if malformed (strict).
+                Expect tobj to be {'timestamp': ISOZ} (height purposely omitted).
+                Return dict with timestamp only; if malformed timestamp present, return None (strict).
                 """
                 if not isinstance(tobj, dict):
                     _LOGGER.error("Tide entry malformed (expected dict): %r", tobj)
                     return None
                 ts = tobj.get("timestamp")
-                h_m = tobj.get("height_m")
-                if ts is None or h_m is None:
-                    _LOGGER.error("Tide entry missing required keys 'timestamp'/'height_m': %r", tobj)
+                if ts is None:
+                    _LOGGER.error("Tide entry missing required key 'timestamp': %r", tobj)
                     return None
                 # Ensure timestamp parses to ISOZ
                 dt = _parse_dt_isoz(ts)
                 if dt is None:
                     _LOGGER.error("Tide entry timestamp not ISOZ: %r", ts)
                     return None
-                # Canonical height (meters) — enforce float
-                try:
-                    h_m = float(h_m)
-                except Exception:
-                    _LOGGER.error("Tide entry height_m not numeric: %r", tobj.get("height_m"))
-                    return None
 
-                # Convert to display units using unit_helpers; will return (value, unit) or (None, None)
-                disp_val, disp_unit = unit_helpers.length_m_to_display(h_m, entry_units)
-                if disp_val is not None:
-                    disp_val = _round_opt(disp_val, 3)
-
-                return {"timestamp": dt.isoformat().replace("+00:00", "Z"), "height": _format_with_unit(disp_val, disp_unit, ndigits=3)}
+                return {"timestamp": dt.isoformat().replace("+00:00", "Z")}
 
             nh_attr = _build_tide_attr(tide_obj.get("next_high"))
             nl_attr = _build_tide_attr(tide_obj.get("next_low"))

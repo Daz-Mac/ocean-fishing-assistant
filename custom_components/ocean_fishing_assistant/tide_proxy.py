@@ -338,7 +338,6 @@ class TideProxy:
         if not timestamps:
             return {
                 "timestamps": [],
-                "tide_height_m": [],
                 "tide_phase": [],
                 "moon_phase": [],
                 "tide_strength": 0.0,
@@ -366,7 +365,7 @@ class TideProxy:
                     _LOGGER.error("Unable to parse timestamp for cache normalization: %s", ts)
                     return {
                         "timestamps": [str(t) for t in timestamps],
-                        "tide_height_m": [None] * len(timestamps),
+                        "tide_phase": [None] * len(timestamps),
                         "confidence": "bad_timestamps",
                         "source": "tide_proxy",
                     }
@@ -410,7 +409,7 @@ class TideProxy:
                 _LOGGER.error("Unable to parse timestamp: %s", ts)
                 return {
                     "timestamps": [str(t) for t in timestamps],
-                    "tide_height_m": [None] * len(timestamps),
+                    "tide_phase": [None] * len(timestamps),
                     "confidence": "bad_timestamps",
                     "source": "tide_proxy",
                 }
@@ -426,7 +425,7 @@ class TideProxy:
             _LOGGER.exception("Skyfield unavailable")
             return {
                 "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
-                "tide_height_m": [None] * len(dt_objs),
+                "tide_phase": [None] * len(dt_objs),
                 "confidence": "astronomical_unavailable",
                 "source": "astronomical_unavailable",
             }
@@ -518,12 +517,11 @@ class TideProxy:
             except Exception:
                 _LOGGER.exception("Error applying clamp/scale")
 
-        tide_heights = [round(float(v), 3) for v in pred.tolist()]
+        # do not publish tide heights anymore (per requested change). Heights are still used internally
+        # to find extrema/tide phase but we will not expose numeric height values in the returned payload.
 
         next_high: Optional[str] = None
         next_low: Optional[str] = None
-        next_high_height: Optional[float] = None
-        next_low_height: Optional[float] = None
 
         try:
             now_ts = now.timestamp()
@@ -718,13 +716,11 @@ class TideProxy:
                     next_low_tuple = (float(t_sorted[idx_sorted]), float(pred_sorted[idx_sorted]))
 
             if next_high_tuple is not None:
-                nh_ts, nh_h = next_high_tuple
+                nh_ts, _ = next_high_tuple
                 next_high = datetime.fromtimestamp(nh_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-                next_high_height = float(round(float(nh_h), 3))
             if next_low_tuple is not None:
-                nl_ts, nl_h = next_low_tuple
+                nl_ts, _ = next_low_tuple
                 next_low = datetime.fromtimestamp(nl_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-                next_low_height = float(round(float(nl_h), 3))
         except Exception:
             _LOGGER.debug("Failed to compute next_high/next_low", exc_info=True)
 
@@ -858,18 +854,18 @@ class TideProxy:
         next_low_obj = None
         if next_high is not None:
             try:
-                next_high_obj = {"timestamp": next_high, "height_m": next_high_height}
+                next_high_obj = {"timestamp": next_high}
             except Exception:
                 next_high_obj = None
         if next_low is not None:
             try:
-                next_low_obj = {"timestamp": next_low, "height_m": next_low_height}
+                next_low_obj = {"timestamp": next_low}
             except Exception:
                 next_low_obj = None
 
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
-            "tide_height_m": tide_heights,
+            # Removed tide_height_m per request
             # Add explicit numeric moon_phase separate from tide_phase strings
             "moon_phase": moon_phases,
             "tide_phase": tide_phase_list,

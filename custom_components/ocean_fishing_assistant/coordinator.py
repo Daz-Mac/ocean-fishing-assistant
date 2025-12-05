@@ -173,29 +173,24 @@ class OFACoordinator(DataUpdateCoordinator):
             try:
                 nh = tide.get("next_high")
                 nl = tide.get("next_low")
-                nh_h = tide.get("next_high_height_m")
-                nl_h = tide.get("next_low_height_m")
 
-                def _normalize_entry(entry, height_scalar):
-                    # If already dict, pass through
+                def _normalize_entry(entry):
+                    # If already dict, strip any height keys and pass through
                     if isinstance(entry, dict):
-                        return entry
-                    # If a simple timestamp string, convert to strict dict and attach possible height
+                        entry_copy = dict(entry)
+                        # Remove any height keys if present (tide heights intentionally removed)
+                        entry_copy.pop("height_m", None)
+                        entry_copy.pop("height", None)
+                        entry_copy.pop("height_meters", None)
+                        return entry_copy
+                    # If a simple timestamp string, convert -> strict dict with only timestamp
                     if isinstance(entry, str):
-                        try:
-                            h_val = None if height_scalar is None else float(height_scalar)
-                        except Exception:
-                            h_val = None
-                        return {"timestamp": entry, "height_m": h_val}
+                        return {"timestamp": entry}
                     # Unknown or missing -> None
                     return None
 
-                nh_obj = _normalize_entry(nh, nh_h)
-                nl_obj = _normalize_entry(nl, nl_h)
-
-                # Remove legacy separate height keys to avoid duplication/ambiguity downstream
-                tide.pop("next_high_height_m", None)
-                tide.pop("next_low_height_m", None)
+                nh_obj = _normalize_entry(nh)
+                nl_obj = _normalize_entry(nl)
 
                 # Overwrite canonical keys with normalized objects (may be None)
                 tide["next_high"] = nh_obj

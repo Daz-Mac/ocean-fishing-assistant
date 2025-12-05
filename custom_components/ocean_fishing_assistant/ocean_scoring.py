@@ -389,15 +389,6 @@ def compute_score(
         tide_score = _clamp_0_10(tide_score)
         comp_tide: Dict[str, Any] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
 
-        # include tide height/unit if present
-        try:
-            tide_h = _get_at("tide_height_m", use_index) if "tide_height_m" in data else None
-            if tide_h is not None:
-                comp_tide["tide_height"] = round(float(tide_h), 3)
-                comp_tide["tide_unit"] = "m"
-        except Exception:
-            pass
-
         PHASE_NAME_MAP = {
             "rising": "Rising",
             "falling": "Falling",
@@ -960,7 +951,7 @@ def compute_score(
         "score_100": overall_100,
         "components": comp,
         "raw": {
-            "tide": _get_at("tide_height_m", use_index) if "tide_height_m" in data else None,
+            # Removed tide height from raw output (tide heights intentionally omitted)
             "tide_phase_name": (data.get("tide_phase_name")[use_index] if isinstance(data.get("tide_phase_name"), (list, tuple)) and use_index < len(data.get("tide_phase_name")) else (data.get("tide_phase_name") if "tide_phase_name" in data else None)),
             "wind": wind,
             "wave": wave,
@@ -994,7 +985,6 @@ def compute_forecast(
     for idx, ts in enumerate(timestamps):
         try:
             res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
-            tide_height = payload.get("tide_height_m")[idx] if isinstance(payload.get("tide_height_m"), (list, tuple)) and idx < len(payload.get("tide_height_m")) else (payload.get("tide_height_m") if "tide_height_m" in payload else None)
             tide_phase_name = (payload.get("tide_phase_name")[idx] if isinstance(payload.get("tide_phase_name"), (list, tuple)) and idx < len(payload.get("tide_phase_name")) else (payload.get("tide_phase_name") if "tide_phase_name" in payload else None))
 
             formatted_swell = payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) and idx < len(payload.get("swell_period_s")) else (payload.get("swell_period_s") if "swell_period_s" in payload else None)
@@ -1009,7 +999,7 @@ def compute_forecast(
                     "pressure_hpa": payload.get("pressure_hpa")[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
                     "wave_height_m": payload.get("wave_height_m")[idx] if isinstance(payload.get("wave_height_m"), (list, tuple)) else payload.get("wave_height_m"),
                     "wave_period_s": formatted_wave_period,
-                    "tide_height_m": tide_height,
+                    # tide_height_m removed
                     "tide_phase_name": tide_phase_name,
                 },
                 "astro_used": {"moon_phase": (payload.get("moon_phase")[idx] if isinstance(payload.get("moon_phase"), (list, tuple)) and idx < len(payload.get("moon_phase")) else payload.get("moon_phase"))} if "moon_phase" in payload else None,

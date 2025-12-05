@@ -166,12 +166,16 @@ class DataFormatter:
 
         tide_obj = raw_payload.get("tide")
         if isinstance(tide_obj, dict):
+            # copy tide object but explicitly strip any tide height fields (tide heights are intentionally omitted)
             canonical["tide"] = tide_obj
             tide_ts = tide_obj.get("timestamps")
             if tide_ts and isinstance(tide_ts, (list, tuple)):
                 if len(tide_ts) == len(timestamps):
                     for k, v in tide_obj.items():
                         if k == "timestamps":
+                            continue
+                        # skip explicit tide height keys
+                        if k in ("tide_height_m", "next_high_height_m", "next_low_height_m"):
                             continue
                         if isinstance(v, (list, tuple)):
                             _ensure_list_length_equal(k, timestamps, list(v))
@@ -180,6 +184,8 @@ class DataFormatter:
                             canonical[k] = v
             else:
                 for k, v in tide_obj.items():
+                    if k in ("tide_height_m", "next_high_height_m", "next_low_height_m"):
+                        continue
                     if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
                         canonical[k] = list(v)
                     elif not isinstance(v, (list, tuple)):
