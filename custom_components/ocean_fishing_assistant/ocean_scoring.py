@@ -972,7 +972,8 @@ def compute_score(
             "swell_period_s": swell_period,
             "precipitation_probability": _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None,
         },
-        "profile_used": profile.get("common_name", "unknown"),
+        # Change: provide the resolved species profile as a dict so downstream display code can augment it.
+        "profile_used": dict(profile),
         "safety": safety,
         "breaches": breaches,
     }
