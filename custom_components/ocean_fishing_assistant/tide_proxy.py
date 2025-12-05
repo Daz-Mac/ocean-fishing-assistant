@@ -923,15 +923,18 @@ class TideProxy:
     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
         dt_objs: List[datetime] = []
         for ts in timestamps:
-            parsed = dt_util.parse_datetime(str(ts))
-            if parsed is None:
-                try:
-                    v = float(ts)
-                    if v > 1e12:
-                        v = v / 1000.0
-                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
-                except Exception:
-                    raise ValueError(f"Unable to parse timestamp '{ts}': {exc}") from exc
+            try:
+                parsed = dt_util.parse_datetime(str(ts))
+                if parsed is None:
+                    try:
+                        v = float(ts)
+                        if v > 1e12:
+                            v = v / 1000.0
+                        parsed = datetime.fromtimestamp(v, tz=timezone.utc)
+                    except Exception as exc:
+                        raise ValueError(f"Unable to parse timestamp '{ts}': {exc}") from exc
+            except Exception as exc:
+                raise ValueError(f"Unable to parse timestamp '{ts}': {exc}") from exc
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             else:
