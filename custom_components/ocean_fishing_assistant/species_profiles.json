@@ -1,5 +1,5 @@
 {
-  "version": "4",
+  "version": "1",
   "general_profiles": {
     "general_mixed_global": {
       "id": "general_mixed_global",
@@ -24,6 +24,8 @@
   "species": {
     "sea_bass": {
       "common_name": "Sea Bass",
+      "scientific_name": "Dicentrarchus labrax",
+      "info": "https://en.wikipedia.org/wiki/European_seabass",
       "emoji": "🐟",
       "regions": ["gibraltar_strait"],
       "preferred_months": [4, 5, 6, 7, 8, 9],
@@ -37,6 +39,8 @@
     },
     "mackerel": {
       "common_name": "Mackerel",
+      "scientific_name": "Scomber scombrus",
+      "info": "https://en.wikipedia.org/wiki/Atlantic_mackerel",
       "emoji": "🐠",
       "regions": ["gibraltar_strait"],
       "preferred_months": [5, 6, 7, 8, 9],
@@ -50,6 +54,8 @@
     },
     "shad": {
       "common_name": "Shad / Elf",
+      "scientific_name": "Pomatomus saltatrix",
+      "info": "https://en.wikipedia.org/wiki/Bluefish",
       "emoji": "🐟",
       "regions": ["south_africa_kzn"],
       "preferred_months": [5, 6, 7, 8],
@@ -62,7 +68,9 @@
       "moon_preference": []
     },
     "kob": {
-      "common_name": "Kob / Kabeljou",
+      "common_name": "Kob / Kabeljou / Daga Salmon",
+      "scientific_name": "Argyrosomus japonicus",
+      "info": "https://www.rushofblue.com/dusky-kob/",
       "emoji": "🪝",
       "regions": ["south_africa_kzn"],
       "preferred_months": [8, 9, 10, 11],
@@ -75,7 +83,9 @@
       "moon_preference": []
     },
     "natal_stumpnose": {
-      "common_name": "Natal Stumpnose",
+      "common_name": "Natal Stumpnose / Silver Bream / Yellowfin Bream",
+      "scientific_name": "Rhabdosargus sarba",
+      "info": "https://en.wikipedia.org/wiki/Rhabdosargus_sarba",
       "emoji": "🐠",
       "regions": ["south_africa_kzn"],
       "preferred_months": [5, 6, 7, 8, 9, 10],
@@ -89,6 +99,8 @@
     },
     "blacktail": {
       "common_name": "Blacktail / Rock Bream",
+      "scientific_name": "Diplodus capensis",
+      "info": "https://www.fishinginfo.co.za/blacktail.html",
       "emoji": "🪸",
       "regions": ["south_africa_kzn"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
@@ -102,6 +114,8 @@
     },
     "galjoen": {
       "common_name": "Galjoen",
+      "scientific_name": "Dichistius capensis",
+      "info": "https://en.wikipedia.org/wiki/Galjoen",
       "emoji": "🐡",
       "regions": ["south_africa_kzn"],
       "preferred_months": [4, 5, 6, 7, 8, 9, 10],
@@ -115,6 +129,8 @@
     },
     "mahi_mahi": {
       "common_name": "Mahi Mahi / Dorado",
+      "scientific_name": "Coryphaena hippurus",
+      "info": "https://en.wikipedia.org/wiki/Mahi-mahi",
       "emoji": "🐬",
       "regions": ["south_africa_kzn"],
       "preferred_months": [11, 12, 1, 2, 3, 4, 5],
@@ -128,6 +144,8 @@
     },
     "yellowfin_tuna": {
       "common_name": "Yellowfin Tuna",
+      "scientific_name": "Thunnus albacares",
+      "info": "https://en.wikipedia.org/wiki/Yellowfin_tuna",
       "emoji": "🐟",
       "regions": ["south_africa_kzn"],
       "preferred_months": [10, 11, 12, 1, 2, 3, 4],
@@ -141,6 +159,8 @@
     },
     "king_mackerel": {
       "common_name": "King Mackerel",
+      "scientific_name": "Scomberomorus cavalla",
+      "info": "https://en.wikipedia.org/wiki/King_mackerel",
       "emoji": "🐠",
       "regions": ["south_africa_kzn"],
       "preferred_months": [10, 11, 12, 1, 2, 3],
@@ -153,7 +173,9 @@
       "moon_preference": []
     },
     "wahoo": {
-      "common_name": "Wahoo / Bonito",
+      "common_name": "Wahoo",
+      "scientific_name": "Acanthocybium solandri",
+      "info": "https://en.wikipedia.org/wiki/Wahoo_(fish)",
       "emoji": "⚡️",
       "regions": ["south_africa_kzn"],
       "preferred_months": [11, 12, 1, 2, 3, 4],
@@ -167,6 +189,8 @@
     },
     "white_musselcracker": {
       "common_name": "White Musselcracker / Musselcracker Seabream",
+      "scientific_name": "Sparodon durbanensis",
+      "info": "https://www.marinelifeid.com/identification/musselcracker-seabream-sparodon-durbanensis/",
       "emoji": "🦀",
       "regions": ["south_africa_kzn"],
       "preferred_months": [11, 12, 1, 2, 3],
@@ -175,7 +199,7 @@
       "preferred_swell_period_s": [],
       "max_wave_height_m": 1.5,
       "preferred_tide_phase": ["rising", "high"],
-      "preferred_times": ["dawn","dusk"],
+      "preferred_times": ["dawn", "dusk"],
       "moon_preference": []
     }
   }
