@@ -1,6 +1,11 @@
 # custom_components/ocean_fishing_assistant/coordinator.py
 """
 Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
+
+This coordinator expects the selected species (if provided) to already be a resolved
+species dict (as returned by SpeciesLoader.get_species or get_general_profile).
+Per the project's strict policy: do not attempt on-the-fly lookups or fallbacks here —
+fail loudly if the contract is violated.
 """
 
 from datetime import timedelta
@@ -28,7 +33,7 @@ class OFACoordinator(DataUpdateCoordinator):
         lat: float,
         lon: float,
         update_interval: int,
-        species: Optional[str] = None,
+        species: Optional[dict] = None,
         units: str = "metric",
         safety_limits: Optional[dict] = None,
         time_periods_mode: str = "full_day",
@@ -42,6 +47,10 @@ class OFACoordinator(DataUpdateCoordinator):
         - time_periods_mode: one of the CONF_TIME_PERIODS values (full_day/dawn_dusk)
         - fetch_cache_ttl: per-entry override for the shared in-memory fetch cache TTL (seconds)
         - tide_ttl: TTL (seconds) to pass into TideProxy instance
+
+        Important: `species` MUST be either None or a resolved species dict (with at least an "id" key).
+        This enforces the project's strict no-fallback contract: coordinator will raise if species is
+        provided as anything other than a resolved dict.
         """
         super().__init__(
             hass,
@@ -54,7 +63,18 @@ class OFACoordinator(DataUpdateCoordinator):
         self.formatter = formatter
         self.lat = lat
         self.lon = lon
+
+        # Enforce strict contract for species: allow None or a resolved dict only.
         self.species = species
+        if self.species is not None:
+            if not isinstance(self.species, dict):
+                raise ValueError(
+                    "Coordinator requires 'species' to be a resolved dict (no fallbacks). "
+                    "Pass a species dict from SpeciesLoader.get_species or get_general_profile."
+                )
+            if "id" not in self.species:
+                raise ValueError("Provided species dict missing required 'id' key (strict)")
+
         self.units = units or "metric"
         # Normalize safety limits into canonical metric keys (e.g. max_wind_m_s, max_gust_m_s)
         # Accept either canonical keys (max_wind_m_s...) or legacy/display keys (safety_* from UI).
