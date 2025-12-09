@@ -377,8 +377,8 @@ class OFASensor(CoordinatorEntity):
                 self._attr_device_info = {
                     "identifiers": {(DOMAIN, entry_id)},           # stable per-config-entry identifier
                     "name": entry.data.get(CONF_NAME) or name,     # human-friendly device name
-                    "manufacturer": "Ocean Fishing Assistant",     # optional but useful
-                    "model": "ocean_fishing_assistant",            # optional
+                    "manufacturer": "Ocean Fishing Assistant",
+                    "model": "Fishing Score Sensor",
                 }
         except Exception:
             # non-fatal: don't prevent entity creation if device_info can't be built
