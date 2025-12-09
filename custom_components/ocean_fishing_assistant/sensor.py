@@ -368,6 +368,22 @@ class OFASensor(CoordinatorEntity):
         except Exception:
             self._attr_unique_id = None
 
+        # --- Device association: expose device_info so Home Assistant creates a Device
+        # Use the config entry id as a stable per-entry identifier so all entities from
+        # the same config entry attach to the same device in HA.
+        try:
+            entry_id = getattr(coordinator, "entry_id", None) or (entry.entry_id if entry is not None else None)
+            if entry_id:
+                self._attr_device_info = {
+                    "identifiers": {(DOMAIN, entry_id)},           # stable per-config-entry identifier
+                    "name": entry.data.get(CONF_NAME) or name,     # human-friendly device name
+                    "manufacturer": "Ocean Fishing Assistant",     # optional but useful
+                    "model": "ocean_fishing_assistant",            # optional
+                }
+        except Exception:
+            # non-fatal: don't prevent entity creation if device_info can't be built
+            _LOGGER.debug("Failed to set device_info for OFASensor", exc_info=True)
+
     def _is_raw_enabled(self) -> bool:
         """
         Read the ConfigEntry options to determine whether raw output is enabled.
@@ -441,6 +457,45 @@ class OFASensor(CoordinatorEntity):
         if sc is None:
             raise RuntimeError("Current forecast missing score_100 (strict)")
         return int(sc)
+
+    @property
+    def icon(self) -> str:
+        """
+        Dynamic icon selection based on the current score_100.
+        - >= 80: good -> mdi:fish
+        - >= 50: medium -> mdi:fish-off
+        - < 50 or missing: poor -> mdi:alert-circle-outline
+        This mirrors the state logic but is best-effort (exceptions return a default icon).
+        """
+        try:
+            forecast = None
+            try:
+                forecast = self._get_current_forecast()
+            except Exception:
+                # if strict lookup fails, try a forgiving lookup from coordinator data
+                data = getattr(self.coordinator, "data", {}) or {}
+                per_ts = data.get("per_timestamp_forecasts") or []
+                if isinstance(per_ts, list) and per_ts:
+                    forecast = per_ts[0]
+
+            if not forecast or not isinstance(forecast, dict):
+                return "mdi:fish"
+
+            sc = forecast.get("score_100")
+            if sc is None:
+                return "mdi:fish"
+            try:
+                sc_int = int(sc)
+            except Exception:
+                return "mdi:fish"
+
+            if sc_int >= 80:
+                return "mdi:fish"
+            if sc_int >= 50:
+                return "mdi:fish-off"
+            return "mdi:alert-circle-outline"
+        except Exception:
+            return "mdi:fish"
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
