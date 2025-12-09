@@ -462,7 +462,7 @@ class OFASensor(CoordinatorEntity):
     def icon(self) -> str:
         """
         Dynamic icon selection based on the current score_100.
-        - >= 80: good -> mdi:fish
+        - >= 70: good -> mdi:fish
         - >= 50: medium -> mdi:fish-off
         - < 50 or missing: poor -> mdi:alert-circle-outline
         This mirrors the state logic but is best-effort (exceptions return a default icon).
@@ -489,7 +489,7 @@ class OFASensor(CoordinatorEntity):
             except Exception:
                 return "mdi:fish"
 
-            if sc_int >= 80:
+            if sc_int >= 70:
                 return "mdi:fish"
             if sc_int >= 50:
                 return "mdi:fish-off"
