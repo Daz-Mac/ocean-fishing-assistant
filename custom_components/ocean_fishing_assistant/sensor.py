@@ -24,6 +24,7 @@ import logging
 import copy
 import os
 import json
+import re
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import ATTR_ATTRIBUTION
@@ -348,41 +349,33 @@ class OFASensor(CoordinatorEntity):
         expose_raw: bool = False,
         entry: Optional[ConfigEntry] = None,
     ):
+        # Strict: name must be present (async_setup_entry already validates CONF_NAME)
         if not name:
-            raise RuntimeError("Sensor name must be provided (strict simplified mode)")
+            raise RuntimeError("Sensor name must be provided")
 
         super().__init__(coordinator)
 
-        prefix = "ocean_fishing_assistant"
-        if not name.startswith(prefix):
-            name = f"{prefix}_{name}"
+        # Require a ConfigEntry with CONF_NAME for strict mode
+        if entry is None or not entry.data.get(CONF_NAME):
+            raise RuntimeError("ConfigEntry with CONF_NAME required for strict sensor initialization")
 
-        self._attr_name = name
-        # do not keep a constructor fallback for expose_raw; rely on live ConfigEntry options only
+        friendly_name = entry.data[CONF_NAME]
+        self._attr_name = friendly_name
         self._entry: Optional[ConfigEntry] = entry
 
-        # Unique id best-effort
-        try:
-            safe_name = name.replace(" ", "_")
-            self._attr_unique_id = f"{prefix}_{getattr(coordinator, 'entry_id', 'noentry')}_{safe_name}"
-        except Exception:
-            self._attr_unique_id = None
+        # Stable unique id: one sensor per config entry (slugged entry_id)
+        entry_id = entry.entry_id
+        import re
+        slug = re.sub(r"\W+", "_", entry_id).strip("_").lower()
+        self._attr_unique_id = f"ocean_fishing_assistant_{slug}_score"
 
-        # --- Device association: expose device_info so Home Assistant creates a Device
-        # Use the config entry id as a stable per-entry identifier so all entities from
-        # the same config entry attach to the same device in HA.
-        try:
-            entry_id = getattr(coordinator, "entry_id", None) or (entry.entry_id if entry is not None else None)
-            if entry_id:
-                self._attr_device_info = {
-                    "identifiers": {(DOMAIN, entry_id)},           # stable per-config-entry identifier
-                    "name": entry.data.get(CONF_NAME) or name,     # human-friendly device name
-                    "manufacturer": "Ocean Fishing Assistant",
-                    "model": "Fishing Score Sensor",
-                }
-        except Exception:
-            # non-fatal: don't prevent entity creation if device_info can't be built
-            _LOGGER.debug("Failed to set device_info for OFASensor", exc_info=True)
+        # Single device per config entry
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry_id)},
+            "name": friendly_name,
+            "manufacturer": "Ocean Fishing Assistant",
+            "model": "Fishing Score Sensor",
+        }
 
     def _is_raw_enabled(self) -> bool:
         """
@@ -645,10 +638,10 @@ class OFASensor(CoordinatorEntity):
                         # keys of interest: wind (m/s), tide (m), wave (m), pressure_delta (hPa),
                         # moon_phase, temperature, plus safety keys (wind_gust, visibility_km, swell_period_s, precipitation_probability)
                         for k, keyname in (("wind", "wind"), ("tide", "tide"), ("wave", "wave"),
-                                           ("pressure_delta", "pressure_delta"), ("moon_phase", "moon_phase"),
-                                           ("temperature", "temperature"), ("wind_gust", "wind_gust"),
-                                           ("visibility_km", "visibility_km"), ("swell_period_s", "swell_period_s"),
-                                           ("precipitation_probability", "precipitation_probability")):
+                                          ("pressure_delta", "pressure_delta"), ("moon_phase", "moon_phase"),
+                                          ("temperature", "temperature"), ("wind_gust", "wind_gust"),
+                                          ("visibility_km", "visibility_km"), ("swell_period_s", "swell_period_s"),
+                                          ("precipitation_probability", "precipitation_probability")):
                             if raw.get(keyname) is None:
                                 continue
                             try:
