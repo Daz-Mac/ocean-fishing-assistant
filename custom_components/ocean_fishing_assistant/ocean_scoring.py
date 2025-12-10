@@ -606,12 +606,16 @@ def compute_score(
                         time_score = 10.0
                     else:
                         min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
-                        if min_dist <= 3:
+                        if min_dist == 0:
                             time_score = 10.0
-                        elif min_dist >= 6:
-                            time_score = 0.0
+                        elif min_dist == 1:
+                            time_score = 8.0
+                        elif min_dist == 2:
+                            time_score = 5.0
+                        elif min_dist == 3:
+                            time_score = 2.0
                         else:
-                            time_score = 10.0 * (1.0 - ((min_dist - 3.0) / 3.0))
+                            time_score = 0.0
 
         time_score = _clamp_0_10(time_score)
         comp["time"] = {"score_10": round(time_score, 3), "score_100": int(round(time_score * 10))}
