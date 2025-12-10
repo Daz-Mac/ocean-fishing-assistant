@@ -12,5 +12,6 @@
   ],
   "config_flow": true,
   "dependencies": [],
-  "codeowners": ["@Daz-Mac"]
+  "codeowners": ["@Daz-Mac"],
+  "iot_class": "cloud_polling"
 }
