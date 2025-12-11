@@ -19,6 +19,9 @@ import skyfield
 
 import numpy as np
 
+# timezone conversion
+from zoneinfo import ZoneInfo
+
 _LOGGER = logging.getLogger(__name__)
 
 # constants
@@ -332,7 +335,16 @@ class TideProxy:
                 _LOGGER.exception("Failed to load Skyfield resources")
                 raise
 
-    async def get_tide_for_timestamps(self, timestamps: Sequence[Any]) -> Dict[str, Any]:
+    async def get_tide_for_timestamps(self, timestamps: Sequence[Any], *, location_tz: str) -> Dict[str, Any]:
+        """
+        Compute tide metadata aligned to the provided timestamps.
+
+        location_tz: required IANA timezone name (string). Strict: raise if missing/invalid.
+        """
+        if not location_tz:
+            raise ValueError("location_tz is required (strict)")
+
+        # We keep the existing UTC-based tide model outputs but require the tz param for callers.
         now = dt_util.now().astimezone(timezone.utc)
 
         if not timestamps:
@@ -916,7 +928,19 @@ class TideProxy:
         timestamps: Sequence[Any],
         mode: str = "full_day",
         dawn_window_hours: float = 1.0,
+        *,
+        location_tz: str,
     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """
+        Compute indices mapping for periods.
+
+        location_tz: required IANA timezone name (string). Strict: raise if missing/invalid.
+        Returns a dict keyed by local-date (YYYY-MM-DD) with period entries containing 'indices', 'start', 'end' (UTC ISO strings).
+        """
+        if not location_tz:
+            raise ValueError("location_tz is required (strict)")
+
+        # parse incoming timestamps to UTC datetimes (aligned to canonical arrays)
         dt_objs: List[datetime] = []
         for ts in timestamps:
             try:
@@ -939,16 +963,23 @@ class TideProxy:
         if not dt_objs:
             return {}
 
-        index_dt_pairs = list(enumerate(dt_objs))
-        dates_needed = sorted({dt.date() for dt in dt_objs})
+        # Build local-datetime list using ZoneInfo
+        try:
+            tzinfo_local = ZoneInfo(location_tz)
+        except Exception as exc:
+            raise ValueError(f"Invalid location_tz '{location_tz}': {exc}") from exc
+
+        local_dt_objs: List[datetime] = [dt.astimezone(tzinfo_local) for dt in dt_objs]
+        index_dt_pairs = list(enumerate(dt_objs))  # dt_objs are UTC (for index matching)
+        dates_needed = sorted({local_dt.date() for local_dt in local_dt_objs})
 
         await self._ensure_loaded()
         sf_ts = self._sf_ts
         sf_eph = self._sf_eph
         sf_wgs = self._sf_wgs
         sf_almanac = self._sf_almanac
-        earth = sf_eph["earth"]
-        topos = sf_wgs.latlon(self.latitude, self.longitude)
+        earth = sf_eph["earth"] if sf_eph is not None else None
+        topos = sf_wgs.latlon(self.latitude, self.longitude) if sf_wgs is not None else None
 
         result: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
@@ -961,73 +992,97 @@ class TideProxy:
 
         for d in dates_needed:
             try:
-                day_start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
-                day_end = day_start + timedelta(days=1)
+                # local day start/end in local tz
+                local_day_start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tzinfo_local)
+                local_day_end = local_day_start + timedelta(days=1)
 
                 if mode == "dawn_dusk":
+                    # Expand search window (local) for sunrise/sunset to ensure we capture events near midnight boundaries
                     expand = timedelta(hours=12)
-                    t0_exp = sf_ts.utc((day_start - expand).year, (day_start - expand).month, (day_start - expand).day, (day_start - expand).hour, (day_start - expand).minute, (day_start - expand).second)
-                    t1_exp = sf_ts.utc((day_end + expand).year, (day_end + expand).month, (day_end + expand).day, (day_end + expand).hour, (day_end + expand).minute, (day_end + expand).second)
+                    search_start_local = local_day_start - expand
+                    search_end_local = local_day_end + expand
+
+                    # convert local search bounds to UTC and to skyfield timescale
+                    search_start_utc = search_start_local.astimezone(timezone.utc)
+                    search_end_utc = search_end_local.astimezone(timezone.utc)
+                    t0_exp = sf_ts.utc(search_start_utc.year, search_start_utc.month, search_start_utc.day, search_start_utc.hour, search_start_utc.minute, search_start_utc.second)
+                    t1_exp = sf_ts.utc(search_end_utc.year, search_end_utc.month, search_end_utc.day, search_end_utc.hour, search_end_utc.minute, search_end_utc.second)
+
                     f = sf_almanac.sunrise_sunset(sf_eph, topos)
                     times, events = sf_almanac.find_discrete(t0_exp, t1_exp, f)
                     if not times:
-                        raise RuntimeError(f"No sunrise/sunset events found for date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}")
+                        raise RuntimeError(f"No sunrise/sunset events found for local date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}")
                     sunrise_candidates: List[datetime] = []
                     sunset_candidates: List[datetime] = []
                     for t, ev in zip(times, events):
                         try:
-                            evt_dt = t.utc_datetime().replace(tzinfo=timezone.utc)
+                            evt_dt_utc = t.utc_datetime().replace(tzinfo=timezone.utc)
                         except Exception:
-                            evt_dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
+                            evt_dt_utc = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
+                        # convert to local tz for selection
+                        evt_dt_local = evt_dt_utc.astimezone(tzinfo_local)
                         if bool(ev):
-                            sunrise_candidates.append(evt_dt)
+                            sunrise_candidates.append(evt_dt_local)
                         else:
-                            sunset_candidates.append(evt_dt)
+                            sunset_candidates.append(evt_dt_local)
                     if not sunrise_candidates or not sunset_candidates:
-                        raise RuntimeError(f"Unable to determine sunrise or sunset for date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
-                    morning_target = day_start + timedelta(hours=6)
-                    evening_target = day_start + timedelta(hours=18)
-                    sunrise_dt = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
-                    sunset_dt = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
-                    dawn_start = sunrise_dt - timedelta(hours=dawn_window_hours)
-                    dawn_end = sunrise_dt + timedelta(hours=dawn_window_hours)
-                    dusk_start = sunset_dt - timedelta(hours=dawn_window_hours)
-                    dusk_end = sunset_dt + timedelta(hours=dawn_window_hours)
+                        raise RuntimeError(f"Unable to determine sunrise or sunset for local date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+
+                    # choose sunrise closest to morning_target (local 06:00) and sunset closest to evening_target (local 18:00)
+                    morning_target = local_day_start + timedelta(hours=6)
+                    evening_target = local_day_start + timedelta(hours=18)
+                    sunrise_dt_local = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
+                    sunset_dt_local = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
+
+                    dawn_start_local = sunrise_dt_local - timedelta(hours=dawn_window_hours)
+                    dawn_end_local = sunrise_dt_local + timedelta(hours=dawn_window_hours)
+                    dusk_start_local = sunset_dt_local - timedelta(hours=dawn_window_hours)
+                    dusk_end_local = sunset_dt_local + timedelta(hours=dawn_window_hours)
+
+                    # convert local windows to UTC for index matching
+                    dawn_start_utc = dawn_start_local.astimezone(timezone.utc)
+                    dawn_end_utc = dawn_end_local.astimezone(timezone.utc)
+                    dusk_start_utc = dusk_start_local.astimezone(timezone.utc)
+                    dusk_end_utc = dusk_end_local.astimezone(timezone.utc)
+
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})
                     dawn_indices: List[int] = []
                     dusk_indices: List[int] = []
                     for idx, dt in index_dt_pairs:
-                        if dt >= dawn_start and dt < dawn_end:
+                        if dt >= dawn_start_utc and dt < dawn_end_utc:
                             dawn_indices.append(idx)
-                        if dt >= dusk_start and dt < dusk_end:
+                        if dt >= dusk_start_utc and dt < dusk_end_utc:
                             dusk_indices.append(idx)
-                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z_local(dawn_start), "end": _iso_z_local(dawn_end)}
-                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z_local(dusk_start), "end": _iso_z_local(dusk_end)}
+                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z_local(dawn_start_utc), "end": _iso_z_local(dawn_end_utc)}
+                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z_local(dusk_start_utc), "end": _iso_z_local(dusk_end_utc)}
                 else:
+                    # full_day mode: define local periods 00-06,06-12,12-18,18-24 and convert to UTC for index matching
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})
-                    p00_start = day_start
-                    p00_end = day_start + timedelta(hours=6)
-                    p06_start = p00_end
-                    p06_end = day_start + timedelta(hours=12)
-                    p12_start = p06_end
-                    p12_end = day_start + timedelta(hours=18)
-                    p18_start = p12_end
-                    p18_end = day_end
+                    p00_start_local = local_day_start
+                    p00_end_local = local_day_start + timedelta(hours=6)
+                    p06_start_local = p00_end_local
+                    p06_end_local = local_day_start + timedelta(hours=12)
+                    p12_start_local = p06_end_local
+                    p12_end_local = local_day_start + timedelta(hours=18)
+                    p18_start_local = p12_end_local
+                    p18_end_local = local_day_end
                     periods = [
-                        ("period_00_06", p00_start, p00_end),
-                        ("period_06_12", p06_start, p06_end),
-                        ("period_12_18", p12_start, p12_end),
-                        ("period_18_24", p18_start, p18_end),
+                        ("period_00_06", p00_start_local, p00_end_local),
+                        ("period_06_12", p06_start_local, p06_end_local),
+                        ("period_12_18", p12_start_local, p12_end_local),
+                        ("period_18_24", p18_start_local, p18_end_local),
                     ]
-                    for pname, pstart, pend in periods:
+                    for pname, pstart_local, pend_local in periods:
+                        pstart_utc = pstart_local.astimezone(timezone.utc)
+                        pend_utc = pend_local.astimezone(timezone.utc)
                         indices: List[int] = []
                         for idx, dt in index_dt_pairs:
-                            if dt >= pstart and dt < pend:
+                            if dt >= pstart_utc and dt < pend_utc:
                                 indices.append(idx)
-                        result[date_key][pname] = {"indices": indices, "start": _iso_z_local(pstart), "end": _iso_z_local(pend)}
+                        result[date_key][pname] = {"indices": indices, "start": _iso_z_local(pstart_utc), "end": _iso_z_local(pend_utc)}
             except Exception as exc:
-                _LOGGER.exception("compute_period_indices_for_timestamps failed for date %s: %s", d.isoformat(), exc)
+                _LOGGER.exception("compute_period_indices_for_timestamps failed for local date %s: %s", d.isoformat(), exc)
                 raise
         return result

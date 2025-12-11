@@ -72,7 +72,7 @@ class DataFormatter:
 
         The function will forward factor_weights (if provided) to ocean_scoring.compute_forecast.
         If factor_weights is None, it will attempt to use self._config_entry_data[CONF_FACTOR_WEIGHTS]
-        so that per-entry saved weights are applied without modifying other call sites.
+        so saved per-entry factor weights are applied without modifying other call sites.
         """
 
         if not isinstance(raw_payload, dict):
@@ -112,6 +112,15 @@ class DataFormatter:
 
         canonical: Dict[str, Any] = {}
         canonical["timestamps"] = timestamps
+
+        # If coordinator provided a location timezone, preserve it in canonical so scoring can use it
+        if isinstance(raw_payload.get("location_tz"), str):
+            canonical["location_tz"] = raw_payload.get("location_tz")
+
+        # If precomputed period indices were provided by coordinator, expose them to scoring as 'period_forecasts'
+        # so ocean_scoring can use dawn/dusk indices when computing per-timestamp scores.
+        if precomputed_period_indices is not None:
+            canonical["period_forecasts"] = precomputed_period_indices
 
         missing_required = []
         if "temperature_2m" not in hourly:
@@ -269,6 +278,7 @@ class DataFormatter:
         else:
             fw = self._extract_factor_weights_from_self()
 
+        # --- IMPORTANT: pass canonical (with location_tz and precomputed period indices if provided)
         per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(
             canonical, species_profile=species_profile, safety_limits=safety_limits, units=units, factor_weights=fw
         )

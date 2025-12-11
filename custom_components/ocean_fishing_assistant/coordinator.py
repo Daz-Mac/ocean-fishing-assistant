@@ -20,6 +20,9 @@ from .const import FETCH_CACHE_TTL, DOMAIN
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
+# new imports for timezone resolution
+from timezonefinder import TimezoneFinder
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -63,6 +66,17 @@ class OFACoordinator(DataUpdateCoordinator):
         self.formatter = formatter
         self.lat = lat
         self.lon = lon
+
+        # Resolve timezone strictly here (no fallback). Raise if resolution fails.
+        try:
+            tf = TimezoneFinder()
+            tz = tf.timezone_at(lat=self.lat, lng=self.lon)
+            if not tz:
+                raise ValueError(f"Unable to resolve IANA timezone for lat={self.lat}, lon={self.lon} (strict)")
+            self.location_tz = str(tz)
+        except Exception as exc:
+            _LOGGER.exception("Timezone resolution failed for %s,%s: %s", self.lat, self.lon, exc)
+            raise
 
         # Enforce strict contract for species: allow None or a resolved dict only.
         self.species = species
@@ -165,7 +179,8 @@ class OFACoordinator(DataUpdateCoordinator):
 
             # Attach tide strictly (tide proxy must return dict with arrays aligned to timestamps)
             timestamps = raw["hourly"]["time"]
-            tide = await self._tide_proxy.get_tide_for_timestamps(timestamps)
+            # pass location_tz into tide proxy calls
+            tide = await self._tide_proxy.get_tide_for_timestamps(timestamps, location_tz=self.location_tz)
             if not isinstance(tide, dict):
                 raise ValueError("TideProxy returned invalid shape (strict)")
 
@@ -215,6 +230,7 @@ class OFACoordinator(DataUpdateCoordinator):
                     timestamps,
                     mode=self.time_periods_mode,
                     dawn_window_hours=1.0,
+                    location_tz=self.location_tz,
                 )
             except Exception:
                 _LOGGER.exception("Failed to compute time-period indices from Skyfield (strict)")
@@ -250,6 +266,9 @@ class OFACoordinator(DataUpdateCoordinator):
                 raise RuntimeError(f"Constructed current snapshot missing required fields (strict): {missing_current}")
 
             raw["current"] = current
+
+            # Insert location_tz into raw so DataFormatter/canonical get access to it
+            raw["location_tz"] = self.location_tz
 
             # Run strict formatter (errors propagate). Pass precomputed period indices so DataFormatter uses them.
             data = self.formatter.validate(

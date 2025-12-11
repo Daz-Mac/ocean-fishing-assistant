@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 
 _LOGGER = logging.getLogger(__name__)
 
+from zoneinfo import ZoneInfo
+
 from . import unit_helpers
 from .moon_utils import coerce_phase, matches_moon_preference
 
@@ -267,6 +269,15 @@ def compute_score(
         # Fail fast — weight config invalid
         raise ValueError(f"Invalid factor_weights provided: {exc}")
 
+    # Location timezone is required (strict)
+    tz_str = data.get("location_tz")
+    if not isinstance(tz_str, str) or not tz_str:
+        raise MissingDataError("location_tz (IANA timezone string) is required in data for local time scoring (strict)")
+    try:
+        tzinfo_local = ZoneInfo(tz_str)
+    except Exception as exc:
+        raise MissingDataError(f"Invalid location_tz '{tz_str}': {exc}")
+
     # Helper to detect whether a profile preference is actually set (not None / not empty list)
     def _pref_is_set(x: Any) -> bool:
         return x is not None and not (isinstance(x, (list, tuple)) and len(x) == 0)
@@ -478,17 +489,16 @@ def compute_score(
     except Exception:
         _LOGGER.debug("Failed to compute waves component", exc_info=True)
 
-    # TIME component
+    # TIME component (use local time via location_tz)
     try:
         preferred_times_raw = profile.get("preferred_times", []) or []
 
         def _normalize_preferred_times(pref_times: List[Any]) -> List[int]:
             out_hours: List[int] = []
             token_map = {
-                "dawn": list(range(5, 7)),  # 05-06
-                "dusk": list(range(17, 19)),  # 17-18
+                # fallback token map for numeric tokens; dawn/dusk handled specially via period indices
                 "day": list(range(7, 17)),  # 07-16
-                "night": [h for h in range(0, 24) if h not in range(7, 17)],  # 19-06 roughly
+                "night": [h for h in range(0, 24) if h not in range(7, 17)],  # night
                 "all_day": list(range(0, 24)),
             }
             for it in pref_times:
@@ -566,15 +576,18 @@ def compute_score(
         except Exception:
             requested_special_tokens = set()
 
+        # precomputed_pf may be provided in data (canonical) by DataFormatter using coordinator-supplied indices
         precomputed_pf = data.get("period_forecasts") if isinstance(data.get("period_forecasts"), dict) else {}
         time_score = 10.0
         if not normalized_hours and not requested_special_tokens:
             time_score = 10.0
         else:
             try:
-                t_dt = _coerce_datetime(timestamps[use_index])
-                hour = t_dt.hour if t_dt else None
-                date_key = t_dt.date().isoformat() if t_dt else None
+                # convert current timestamp to UTC then to local tz
+                t_dt_utc = _coerce_datetime(timestamps[use_index])
+                local_dt = t_dt_utc.astimezone(ZoneInfo(tz_str)) if t_dt_utc else None
+                hour = local_dt.hour if local_dt else None
+                date_key = local_dt.date().isoformat() if local_dt else None
             except Exception:
                 hour = None
                 date_key = None
@@ -603,7 +616,8 @@ def compute_score(
                         return min(d, 24 - d)
 
                     if not normalized_hours:
-                        time_score = 10.0
+                        # if only requested special tokens but no matching precomputed_pf, fall back to neutral
+                        time_score = 10.0 if not requested_special_tokens else 5.0
                     else:
                         min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
                         if min_dist == 0:
@@ -644,8 +658,9 @@ def compute_score(
             season_score = 10.0
         else:
             try:
-                t_dt = _coerce_datetime(timestamps[use_index])
-                month = t_dt.month if t_dt else None
+                t_dt_utc = _coerce_datetime(timestamps[use_index])
+                local_dt = t_dt_utc.astimezone(ZoneInfo(tz_str)) if t_dt_utc else None
+                month = local_dt.month if local_dt else None
             except Exception:
                 month = None
             if month is None:
@@ -870,8 +885,9 @@ def compute_score(
         try:
             if profile.get("preferred_times"):
                 try:
-                    t_dt = _coerce_datetime(timestamps[use_index])
-                    hour = t_dt.hour if t_dt else None
+                    t_dt_utc = _coerce_datetime(timestamps[use_index])
+                    local_dt = t_dt_utc.astimezone(ZoneInfo(tz_str)) if t_dt_utc else None
+                    hour = local_dt.hour if local_dt else None
                 except Exception:
                     hour = None
                 if 'normalized_hours' in locals() and normalized_hours and hour is not None:
