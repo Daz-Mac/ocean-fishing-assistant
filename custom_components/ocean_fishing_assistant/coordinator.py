@@ -20,7 +20,7 @@ from .const import FETCH_CACHE_TTL, DOMAIN
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
-# new imports for timezone resolution
+# timezonefinder import is fine at module import time; the heavy work is in TimezoneFinder()
 from timezonefinder import TimezoneFinder
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,16 +67,10 @@ class OFACoordinator(DataUpdateCoordinator):
         self.lat = lat
         self.lon = lon
 
-        # Resolve timezone strictly here (no fallback). Raise if resolution fails.
-        try:
-            tf = TimezoneFinder()
-            tz = tf.timezone_at(lat=self.lat, lng=self.lon)
-            if not tz:
-                raise ValueError(f"Unable to resolve IANA timezone for lat={self.lat}, lon={self.lon} (strict)")
-            self.location_tz = str(tz)
-        except Exception as exc:
-            _LOGGER.exception("Timezone resolution failed for %s,%s: %s", self.lat, self.lon, exc)
-            raise
+        # Do NOT instantiate TimezoneFinder() synchronously here (it does blocking file I/O).
+        # Instead, create lazily in the executor via async_init() and resolve timezone via resolve_location_tz().
+        self._tf = None  # will hold TimezoneFinder instance (created in executor)
+        self.location_tz: Optional[str] = None  # resolved IANA timezone name (set during setup in async_setup_entry)
 
         # Enforce strict contract for species: allow None or a resolved dict only.
         self.species = species
@@ -135,6 +129,33 @@ class OFACoordinator(DataUpdateCoordinator):
         if fetcher_speed != expected_speed_unit:
             raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
 
+    # Async helper to instantiate heavy objects in executor
+    async def async_init(self) -> None:
+        """Instantiate blocking/time-consuming helper objects in the executor.
+
+        Call once from async_setup_entry (or lazily before first resolve_location_tz).
+        """
+        if self._tf is None:
+            # Create TimezoneFinder in executor to avoid blocking the event loop.
+            self._tf = await self.hass.async_add_executor_job(TimezoneFinder)
+
+    async def resolve_location_tz(self, lat: float, lon: float) -> Optional[str]:
+        """Resolve an IANA timezone name for lat/lon using TimezoneFinder in executor.
+
+        Returns timezone name string or None if resolution fails. This method
+        is strict — caller should decide how to handle a missing tz (we prefer fail-fast).
+        """
+        if self._tf is None:
+            await self.async_init()
+
+        # timezone_at is blocking IO/CPU — run in executor
+        try:
+            tz_name = await self.hass.async_add_executor_job(self._tf.timezone_at, lat, lon)
+            return str(tz_name) if tz_name else None
+        except Exception:
+            _LOGGER.exception("TimezoneFinder raised while resolving tz for %s,%s", lat, lon)
+            return None
+
     async def _async_update_data(self):
         """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
         async with async_timeout.timeout(60):
@@ -180,6 +201,8 @@ class OFACoordinator(DataUpdateCoordinator):
             # Attach tide strictly (tide proxy must return dict with arrays aligned to timestamps)
             timestamps = raw["hourly"]["time"]
             # pass location_tz into tide proxy calls
+            if not self.location_tz:
+                raise RuntimeError("Coordinator missing resolved location_tz (strict) - ensure async_init/resolve_location_tz was called during setup")
             tide = await self._tide_proxy.get_tide_for_timestamps(timestamps, location_tz=self.location_tz)
             if not isinstance(tide, dict):
                 raise ValueError("TideProxy returned invalid shape (strict)")

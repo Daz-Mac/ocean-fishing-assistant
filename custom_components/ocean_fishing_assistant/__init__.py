@@ -162,6 +162,19 @@ async def async_setup_entry(hass, entry):
     )
     _LOGGER.debug("OFACoordinator created for entry %s (fetch_cache_ttl=%s tide_ttl=%s)", entry.entry_id, fetch_cache_ttl, tide_ttl)
 
+    # Instantiate TimezoneFinder in executor and resolve the location timezone (strict)
+    try:
+        await coord.async_init()  # ensures TimezoneFinder is created off the event loop
+        tz_name = await coord.resolve_location_tz(lat, lon)
+        if not tz_name:
+            _LOGGER.error("Failed to resolve IANA timezone for lat=%s lon=%s (strict)", lat, lon)
+            return False
+        coord.location_tz = tz_name
+        _LOGGER.debug("Resolved location_tz=%s for entry %s", coord.location_tz, entry.entry_id)
+    except Exception as exc:
+        _LOGGER.exception("Timezone resolution failed during setup_entry for %s,%s: %s", lat, lon, exc)
+        return False
+
     # Request a fresh update (will run after any restored data is available)
     _LOGGER.debug("Requesting initial data refresh for entry %s", entry.entry_id)
     await coord.async_request_refresh()
