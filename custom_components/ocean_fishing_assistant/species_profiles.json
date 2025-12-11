@@ -59,7 +59,7 @@
       "info": "https://www.fishbase.se/summary/Sarda-sarda.html",
       "emoji": "🐟",
       "regions": ["gibraltar_strait"],
-      "preferred_months": [4, 5, 6, 7, 8, 9],
+      "preferred_months": [6, 7, 8, 9, 10, 11],
       "preferred_temp_c": [16, 24],
       "preferred_wind_m_s": [0, 8],
       "preferred_swell_period_s": [],
