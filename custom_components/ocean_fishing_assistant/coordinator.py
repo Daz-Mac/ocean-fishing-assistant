@@ -13,6 +13,7 @@ import async_timeout
 import logging
 import time
 from typing import Optional
+import functools
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -148,9 +149,10 @@ class OFACoordinator(DataUpdateCoordinator):
         if self._tf is None:
             await self.async_init()
 
-        # timezone_at is blocking IO/CPU — run in executor
+        # timezone_at is keyword-only in recent TimezoneFinder versions; use functools.partial
         try:
-            tz_name = await self.hass.async_add_executor_job(self._tf.timezone_at, lat, lon)
+            func = functools.partial(self._tf.timezone_at, lat=lat, lng=lon)
+            tz_name = await self.hass.async_add_executor_job(func)
             return str(tz_name) if tz_name else None
         except Exception:
             _LOGGER.exception("TimezoneFinder raised while resolving tz for %s,%s", lat, lon)
