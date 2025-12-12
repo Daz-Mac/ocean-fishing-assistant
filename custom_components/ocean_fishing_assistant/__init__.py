@@ -61,6 +61,7 @@ async def async_setup_entry(hass, entry):
         from .weather_fetcher import WeatherFetcher
         from .data_formatter import DataFormatter
         from .species_loader import SpeciesLoader
+        from .tide_proxy import TideProxy
     except Exception as exc:
         _LOGGER.exception(
             "Failed to import integration modules for entry %s: %s", entry.entry_id, exc
