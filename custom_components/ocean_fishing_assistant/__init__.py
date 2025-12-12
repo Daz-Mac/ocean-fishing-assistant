@@ -142,8 +142,13 @@ async def async_setup_entry(hass, entry):
     tide_ttl = int(entry.data.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
     weather_cache_ttl = int(entry.data.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
 
-    # Read configured tide phase offset minutes (strict storing of the value)
-    tide_phase_offset_minutes = int(entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))
+    # Read configured tide phase offset minutes (prefer options if present, fallback to entry.data)
+    tide_phase_offset_minutes = int(
+        entry.options.get(
+            CONF_TIDE_PHASE_OFFSET_MINUTES,
+            entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT),
+        )
+    )
 
     # Create WeatherFetcher and coordinator using values from entry.data
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit, cache_ttl_seconds=weather_cache_ttl)
