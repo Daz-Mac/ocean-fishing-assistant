@@ -20,7 +20,8 @@
           "expose_raw": "Expose raw data",
           "fetch_cache_ttl": "Fetch cache TTL (s)",
           "tide_ttl": "Tide TTL (s)",
-          "weather_cache_ttl": "Weather cache TTL (s)"
+          "weather_cache_ttl": "Weather cache TTL (s)",
+          "tide_phase_offset_minutes": "Tide phase offset (minutes)"
         }
       },
       "factor_weights": {
@@ -115,6 +116,7 @@
           "min_swell_period": "Min swell period",
           "min_visibility": "Min visibility",
           "expose_raw": "Expose raw data",
+          "tide_phase_offset_minutes": "Tide phase offset (minutes)",
           "factor_tide": "Tide",
           "factor_wind": "Wind",
           "factor_waves": "Waves",

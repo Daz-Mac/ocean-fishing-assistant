@@ -174,7 +174,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                             ),
                             vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=default_phase_offset): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="box")
+                                selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
                             ),
                         }
                     ),
@@ -212,7 +212,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.NumberSelectorConfig(min=30, max=86400, step=30, unit_of_measurement="s")
                     ),
                     vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=default_phase_offset): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="box")
+                        selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
                     ),
                 }
             ),
@@ -902,7 +902,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
                         # Include tide phase offset in options form (advanced tuning)
                         schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=self._config_entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))] = selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="box")
+                            selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
                         )
 
                         for k in FACTOR_WEIGHTS.keys():
@@ -975,7 +975,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         # Include tide phase offset in options UI
         schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=self._config_entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))] = selector.NumberSelector(
-            selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="box")
+            selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
         )
 
         for k in FACTOR_WEIGHTS.keys():
