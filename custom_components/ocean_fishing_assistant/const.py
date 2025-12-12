@@ -38,6 +38,9 @@ FETCH_CACHE_TTL = DEFAULT_UPDATE_INTERVAL  # seconds (align with DEFAULT_UPDATE_
 TIDE_PROXY_TTL_DEFAULT = 30 * 60       # seconds (default 30 minutes)
 WEATHER_FETCHER_CACHE_TTL_DEFAULT = 30 * 60  # seconds (default 30 minutes)
 
+# Tide phase offset default (minutes) — allows per-location tuning of tide predictions
+TIDE_PHASE_OFFSET_MINUTES_DEFAULT = 0
+
 # ----- New: coordinate rounding precision used for cache keys and key-coalescing across components -----
 # Use a single canonical rounding precision everywhere to ensure consistent cache keys and predictable hits.
 COORD_ROUND_DECIMALS = 5  # recommended default: 5 decimals ≈ 1.1 meters
@@ -62,6 +65,7 @@ CONF_FACTOR_WEIGHTS = "factor_weights"
 CONF_FETCH_CACHE_TTL = "fetch_cache_ttl"       # coordinator shared fetch cache TTL (seconds)
 CONF_TIDE_TTL = "tide_ttl"                     # tide proxy ttl (seconds)
 CONF_WEATHER_CACHE_TTL = "weather_cache_ttl"   # weather_fetcher internal cache duration (seconds)
+CONF_TIDE_PHASE_OFFSET_MINUTES = "tide_phase_offset_minutes"  # tide phase offset (minutes)
 
 # Time period options
 TIME_PERIODS_FULL_DAY = "full_day"

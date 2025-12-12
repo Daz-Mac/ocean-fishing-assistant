@@ -17,7 +17,7 @@ import functools
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import FETCH_CACHE_TTL, DOMAIN
+from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT, CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
@@ -44,6 +44,7 @@ class OFACoordinator(DataUpdateCoordinator):
         *,
         fetch_cache_ttl: Optional[int] = None,
         tide_ttl: Optional[int] = None,
+        tide_phase_offset_minutes: Optional[int] = None,
     ):
         """
         - fetcher must be constructed with the user-selected wind unit (strict).
@@ -51,6 +52,7 @@ class OFACoordinator(DataUpdateCoordinator):
         - time_periods_mode: one of the CONF_TIME_PERIODS values (full_day/dawn_dusk)
         - fetch_cache_ttl: per-entry override for the shared in-memory fetch cache TTL (seconds)
         - tide_ttl: TTL (seconds) to pass into TideProxy instance
+        - tide_phase_offset_minutes: optional integer minutes to apply as a manual phase tweak (positive shifts anchor forward)
 
         Important: `species` MUST be either None or a resolved species dict (with at least an "id" key).
         This enforces the project's strict no-fallback contract: coordinator will raise if species is
@@ -107,11 +109,15 @@ class OFACoordinator(DataUpdateCoordinator):
         # Instance-level TTLs (allow override from entry.data)
         self._fetch_cache_ttl = int(fetch_cache_ttl) if fetch_cache_ttl is not None else int(FETCH_CACHE_TTL)
 
-        # create TideProxy using provided tide_ttl (falls back to TideProxy default if None)
+        # Phase offset (minutes) to pass into TideProxy (convert to hours)
+        phase_offset_minutes = int(tide_phase_offset_minutes) if tide_phase_offset_minutes is not None else int(TIDE_PHASE_OFFSET_MINUTES_DEFAULT)
+        phase_offset_hours = float(phase_offset_minutes) / 60.0
+
+        # create TideProxy using provided tide_ttl and phase offset (falls back to TideProxy defaults if None)
         if tide_ttl is not None:
-            self._tide_proxy = TideProxy(hass, self.lat, self.lon, ttl=int(tide_ttl))
+            self._tide_proxy = TideProxy(hass, self.lat, self.lon, ttl=int(tide_ttl), phase_offset_hours=phase_offset_hours)
         else:
-            self._tide_proxy = TideProxy(hass, self.lat, self.lon)
+            self._tide_proxy = TideProxy(hass, self.lat, self.lon, phase_offset_hours=phase_offset_hours)
 
         self.time_periods_mode = time_periods_mode or "full_day"
 
@@ -304,5 +310,4 @@ class OFACoordinator(DataUpdateCoordinator):
                 precomputed_period_indices=period_indices,
             )
 
-            # No disk persistence anymore
             return data

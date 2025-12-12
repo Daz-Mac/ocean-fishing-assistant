@@ -16,7 +16,6 @@ from .const import (
     DEFAULT_SAFETY_LIMITS,
     CONF_SPECIES_ID,
     CONF_SPECIES_REGION,
-    # CONF_THRESHOLDS intentionally not used (no legacy)
     CONF_TIME_PERIODS,
     CONF_FETCH_CACHE_TTL,
     CONF_TIDE_TTL,
@@ -24,6 +23,9 @@ from .const import (
     FETCH_CACHE_TTL,
     TIDE_PROXY_TTL_DEFAULT,
     WEATHER_FETCHER_CACHE_TTL_DEFAULT,
+    # tide phase offset
+    CONF_TIDE_PHASE_OFFSET_MINUTES,
+    TIDE_PHASE_OFFSET_MINUTES_DEFAULT,
 )
 
 # import unit helpers to validate/convert options on updates
@@ -139,6 +141,9 @@ async def async_setup_entry(hass, entry):
     tide_ttl = int(entry.data.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
     weather_cache_ttl = int(entry.data.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
 
+    # Read configured tide phase offset minutes (strict storing of the value)
+    tide_phase_offset_minutes = int(entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))
+
     # Create WeatherFetcher and coordinator using values from entry.data
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit, cache_ttl_seconds=weather_cache_ttl)
     _LOGGER.debug("WeatherFetcher instantiated for entry %s (cache_ttl=%s)", entry.entry_id, weather_cache_ttl)
@@ -159,8 +164,9 @@ async def async_setup_entry(hass, entry):
         time_periods_mode=time_periods_mode,
         fetch_cache_ttl=fetch_cache_ttl,
         tide_ttl=tide_ttl,
+        tide_phase_offset_minutes=tide_phase_offset_minutes,
     )
-    _LOGGER.debug("OFACoordinator created for entry %s (fetch_cache_ttl=%s tide_ttl=%s)", entry.entry_id, fetch_cache_ttl, tide_ttl)
+    _LOGGER.debug("OFACoordinator created for entry %s (fetch_cache_ttl=%s tide_ttl=%s tide_phase_offset_minutes=%s)", entry.entry_id, fetch_cache_ttl, tide_ttl, tide_phase_offset_minutes)
 
     # Instantiate TimezoneFinder in executor and resolve the location timezone (strict)
     try:
@@ -210,6 +216,22 @@ async def async_setup_entry(hass, entry):
             normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
             coord_inner.safety_limits = normalized_limits or {}
             _LOGGER.debug("Applied new safety_limits to coordinator for entry %s: %s (warnings=%s)", entry_inner.entry_id, normalized_limits, warnings)
+
+            # Apply tide phase offset if provided in options: rebuild TideProxy with new offset
+            try:
+                new_phase_min = int(opts.get(CONF_TIDE_PHASE_OFFSET_MINUTES, entry_inner.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT)))
+            except Exception:
+                new_phase_min = int(TIDE_PHASE_OFFSET_MINUTES_DEFAULT)
+            try:
+                new_phase_hours = float(new_phase_min) / 60.0
+                # preserve tide_ttl from entry.data if present otherwise use existing _tide_proxy._ttl
+                tide_ttl_local = int(entry_inner.data.get(CONF_TIDE_TTL, getattr(coord_inner._tide_proxy, "_ttl", TIDE_PROXY_TTL_DEFAULT)))
+                coord_inner._tide_proxy = TideProxy(hass_inner, coord_inner.lat, coord_inner.lon, ttl=tide_ttl_local, phase_offset_hours=new_phase_hours)
+                _LOGGER.debug("Rebuilt TideProxy for entry %s with phase_offset_minutes=%s", entry_inner.entry_id, new_phase_min)
+            except Exception:
+                _LOGGER.exception("Failed to apply updated tide phase offset for entry %s", entry_inner.entry_id)
+                raise
+
             # Apply expose_raw top-level option into stored data/options if present (no migration)
             # (Note: options are already saved by HA; we just apply runtime effect)
             await coord_inner.async_request_refresh()

@@ -201,6 +201,7 @@ class TideProxy:
         auto_clamp_enabled: bool = False,
         min_height_floor: Optional[float] = None,
         max_amplitude_m: Optional[float] = None,
+        phase_offset_hours: float = 0.0,
     ):
         self.hass = hass
         self.latitude = float(latitude or 0.0)
@@ -214,6 +215,7 @@ class TideProxy:
         self._auto_clamp_enabled = bool(auto_clamp_enabled)
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
+        self._phase_offset_hours = float(phase_offset_hours)
 
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
@@ -263,12 +265,13 @@ class TideProxy:
             pass
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s",
+            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f",
             self.latitude,
             self.longitude,
             self._coef_vec.size,
             self._bias,
             self._auto_clamp_enabled,
+            self._phase_offset_hours,
         )
 
     def _build_default_coef_vec(self, m2_amp: float) -> np.ndarray:
@@ -462,6 +465,13 @@ class TideProxy:
             lon_shift = 0.0
             t_anchor = anchor_epoch
 
+        # Apply manual phase offset (hours) for empirical/site tuning (positive -> shift anchor forward)
+        try:
+            if float(self._phase_offset_hours) != 0.0:
+                t_anchor = float(t_anchor) + float(self._phase_offset_hours) * _SECONDS_PER_HOUR
+        except Exception:
+            pass
+
         periods_sec = {k: (CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR) for k in self._constituents}
         omegas = {k: 2.0 * math.pi / periods_sec[k] for k in periods_sec}
 
@@ -473,7 +483,7 @@ class TideProxy:
         B_orig = B.copy()
 
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
-        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s lon_shift=%s", t_anchor, jd_anchor, lon_shift)
+        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s lon_shift=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, lon_shift, self._phase_offset_hours)
 
         try:
             nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
@@ -890,6 +900,7 @@ class TideProxy:
                 "t_anchor": float(t_anchor),
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
+                "phase_offset_hours": float(self._phase_offset_hours),
             },
             "next_high": next_high_obj,
             "next_low": next_low_obj,
