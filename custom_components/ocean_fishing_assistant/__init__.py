@@ -149,6 +149,13 @@ async def async_setup_entry(hass, entry):
             entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT),
         )
     )
+    _LOGGER.debug(
+        "Resolved tide_phase_offset_minutes at startup for entry %s: options=%s data=%s chosen=%s",
+        entry.entry_id,
+        entry.options,
+        entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES),
+        tide_phase_offset_minutes,
+    )
 
     # Create WeatherFetcher and coordinator using values from entry.data
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit, cache_ttl_seconds=weather_cache_ttl)
@@ -200,6 +207,12 @@ async def async_setup_entry(hass, entry):
     async def _async_entry_options_updated(hass_inner, entry_inner):
         """Apply updated options into the running coordinator (strict)."""
         _LOGGER.debug("Applying updated options for entry %s", entry_inner.entry_id)
+        _LOGGER.debug(
+            "Options update callback invoked for entry %s: entry.options=%s entry.data_tide=%s",
+            entry_inner.entry_id,
+            entry_inner.options,
+            entry_inner.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES),
+        )
         coord_inner = hass_inner.data.get(DOMAIN, {}).get(entry_inner.entry_id)
         if coord_inner is None:
             _LOGGER.debug("Coordinator for entry %s not found when applying options", entry_inner.entry_id)
