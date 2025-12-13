@@ -456,7 +456,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     step_id="select_region",
                     data_schema=vol.Schema(
                         {
-                            vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
+                            vol.Required(CONF_SPECIES_REGION, default=self.ocean_config.get(CONF_SPECIES_REGION, "global")): selector.SelectSelector(
                                 selector.SelectSelectorConfig(
                                     options=[{"value": r["id"], "label": r.get("name", r["id"])} for r in regions],
                                     mode="dropdown",
@@ -476,7 +476,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="select_region",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_SPECIES_REGION): selector.SelectSelector(
+                    vol.Required(CONF_SPECIES_REGION, default=self.ocean_config.get(CONF_SPECIES_REGION, "global")): selector.SelectSelector(
                         selector.SelectSelectorConfig(options=region_options, mode="dropdown")
                     )
                 }
@@ -855,6 +855,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_ocean_options()
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        # Use options first, then data, then integration defaults
+        opts = self._config_entry.options or {}
+
         if user_input is not None:
             try:
                 weights_raw = {}
@@ -871,7 +874,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         stored_defaults = {k: int(round(weights_raw.get(k, 0))) for k in FACTOR_WEIGHTS.keys()}
                         schema_fields: dict = {}
 
-                        schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
+                        schema_fields[vol.Required(CONF_TIME_PERIODS, default=opts.get(CONF_TIME_PERIODS, self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=[
                                     {"value": TIME_PERIODS_FULL_DAY, "label": "Full Day (4 periods)"},
@@ -880,28 +883,28 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                                 mode="dropdown",
                             )
                         )
-                        schema_fields[vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25))] = selector.NumberSelector(
+                        schema_fields[vol.Required("max_wind_speed", default=opts.get("max_wind_speed", self._config_entry.data.get("max_wind_speed", 25)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
                         )
-                        schema_fields[vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40))] = selector.NumberSelector(
+                        schema_fields[vol.Required("max_gust_speed", default=opts.get("max_gust_speed", self._config_entry.data.get("max_gust_speed", 40)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement="km/h", mode="slider")
                         )
-                        schema_fields[vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0))] = selector.NumberSelector(
+                        schema_fields[vol.Required("max_wave_height", default=opts.get("max_wave_height", self._config_entry.data.get("max_wave_height", 2.0)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement="m", mode="slider")
                         )
-                        schema_fields[vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80))] = selector.NumberSelector(
+                        schema_fields[vol.Required("max_precip_chance", default=opts.get("max_precip_chance", self._config_entry.data.get("max_precip_chance", 80)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
                         )
-                        schema_fields[vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3))] = selector.NumberSelector(
+                        schema_fields[vol.Required("min_swell_period", default=opts.get("min_swell_period", self._config_entry.data.get("min_swell_period", 3)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                         )
-                        schema_fields[vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1))] = selector.NumberSelector(
+                        schema_fields[vol.Required("min_visibility", default=opts.get("min_visibility", self._config_entry.data.get("min_visibility", 1)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
                         )
-                        schema_fields[vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False))] = selector.BooleanSelector()
+                        schema_fields[vol.Required("expose_raw", default=opts.get("expose_raw", self._config_entry.data.get("expose_raw", False)))] = selector.BooleanSelector()
 
                         # Include tide phase offset in options form (advanced tuning)
-                        schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=self._config_entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))] = selector.NumberSelector(
+                        schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=opts.get(CONF_TIDE_PHASE_OFFSET_MINUTES, self._config_entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT)))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
                         )
 
@@ -928,12 +931,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             except Exception as exc:
                 _LOGGER.debug("Options flow factor weights normalization failed: %s", exc)
 
-        units = self._config_entry.data.get("units", "metric")
+        units = opts.get("units", self._config_entry.data.get("units", "metric"))
         wind_unit_label = "km/h" if units == "metric" else "mph"
         wave_unit_label = "m" if units == "metric" else "ft"
         vis_unit_label = "km" if units == "metric" else "miles"
 
-        stored_weights = self._config_entry.data.get(CONF_FACTOR_WEIGHTS)
+        stored_weights = opts.get(CONF_FACTOR_WEIGHTS, self._config_entry.data.get(CONF_FACTOR_WEIGHTS))
         try:
             normalized_defaults = stored_weights if isinstance(stored_weights, dict) else _validate_and_normalize_factor_weights(None)
         except Exception:
@@ -944,7 +947,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         total_default = sum(factor_defaults_percent.values())
 
         schema_fields: dict = {}
-        schema_fields[vol.Required(CONF_TIME_PERIODS, default=self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
+        schema_fields[vol.Required(CONF_TIME_PERIODS, default=opts.get(CONF_TIME_PERIODS, self._config_entry.data.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)))] = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
                     {"value": TIME_PERIODS_FULL_DAY, "label": "Full Day (4 periods)"},
@@ -953,28 +956,28 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 mode="dropdown",
             )
         )
-        schema_fields[vol.Required("max_wind_speed", default=self._config_entry.data.get("max_wind_speed", 25))] = selector.NumberSelector(
+        schema_fields[vol.Required("max_wind_speed", default=opts.get("max_wind_speed", self._config_entry.data.get("max_wind_speed", 25)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label, mode="slider")
         )
-        schema_fields[vol.Required("max_gust_speed", default=self._config_entry.data.get("max_gust_speed", 40))] = selector.NumberSelector(
+        schema_fields[vol.Required("max_gust_speed", default=opts.get("max_gust_speed", self._config_entry.data.get("max_gust_speed", 40)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label, mode="slider")
         )
-        schema_fields[vol.Required("max_wave_height", default=self._config_entry.data.get("max_wave_height", 2.0))] = selector.NumberSelector(
+        schema_fields[vol.Required("max_wave_height", default=opts.get("max_wave_height", self._config_entry.data.get("max_wave_height", 2.0)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label, mode="slider")
         )
-        schema_fields[vol.Required("max_precip_chance", default=self._config_entry.data.get("max_precip_chance", 80))] = selector.NumberSelector(
+        schema_fields[vol.Required("max_precip_chance", default=opts.get("max_precip_chance", self._config_entry.data.get("max_precip_chance", 80)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
         )
-        schema_fields[vol.Required("min_swell_period", default=self._config_entry.data.get("min_swell_period", 3))] = selector.NumberSelector(
+        schema_fields[vol.Required("min_swell_period", default=opts.get("min_swell_period", self._config_entry.data.get("min_swell_period", 3)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
         )
-        schema_fields[vol.Required("min_visibility", default=self._config_entry.data.get("min_visibility", 1))] = selector.NumberSelector(
+        schema_fields[vol.Required("min_visibility", default=opts.get("min_visibility", self._config_entry.data.get("min_visibility", 1)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
         )
-        schema_fields[vol.Required("expose_raw", default=self._config_entry.data.get("expose_raw", False))] = selector.BooleanSelector()
+        schema_fields[vol.Required("expose_raw", default=opts.get("expose_raw", self._config_entry.data.get("expose_raw", False)))] = selector.BooleanSelector()
 
-        # Include tide phase offset in options UI
-        schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=self._config_entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))] = selector.NumberSelector(
+        # Include tide phase offset in options UI (use options -> data -> default)
+        schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=opts.get(CONF_TIDE_PHASE_OFFSET_MINUTES, self._config_entry.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT)))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
         )
 
