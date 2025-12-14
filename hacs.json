@@ -1,6 +1,6 @@
 {
     "name": "Ocean Fishing Assistant",
     "content_in_root": false,
-    "homeassistant": "2025.10.1",
+    "homeassistant": "2025.12.2",
     "render_readme": false
   }
