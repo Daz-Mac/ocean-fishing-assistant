@@ -319,11 +319,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
-        schema_fields: dict = {
-            vol.Required("_factors_total", default=total_default): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-            )
-        }
+        schema_fields: dict = {}
+        schema_fields[vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
+        )]  # placeholder to keep the dict typed
+
         for k in FACTOR_WEIGHTS.keys():
             schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
@@ -724,6 +724,8 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 normalized_limits, warnings = validate_and_normalize_safety_limits(canonical, strict=True)
                 safety_limits = normalized_limits
 
+                # Build final_config (data). Keep canonical safety_limits here and
+                # keep other core static fields required at setup.
                 final_config = {
                     CONF_NAME: self.ocean_config.get(CONF_NAME, DEFAULT_NAME),
                     CONF_LATITUDE: latitude,
@@ -731,26 +733,21 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_SPECIES_ID: self.ocean_config.get(CONF_SPECIES_ID, "general_mixed_global"),
                     CONF_SPECIES_REGION: self.ocean_config.get(CONF_SPECIES_REGION, "global"),
                     CONF_HABITAT_PRESET: habitat_preset,
-                    CONF_TIME_PERIODS: self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY),
-                    CONF_AUTO_APPLY_THRESHOLDS: False,
-                    "max_wind_speed": user_input["max_wind_speed"],
-                    "max_gust_speed": user_input.get("max_gust_speed"),
-                    "max_wave_height": user_input["max_wave_height"],
-                    "min_visibility": user_input.get("min_visibility"),
-                    "min_temperature": user_input.get("min_temperature"),
-                    "max_temperature": user_input.get("max_temperature"),
-                    "min_swell_period": user_input.get("min_swell_period"),
-                    "max_precip_chance": user_input.get("max_precip_chance"),
-                    "expose_raw": bool(self.ocean_config.get("expose_raw", False)),
-                    "units": units,
-                    "wind_unit": wind_unit,
+                    # store canonical safety limits in data (used by coordinator at setup)
                     "safety_limits": safety_limits,
+                    # keep units (coordinator expects this in data)
+                    "units": units,
+                    # timezone and elevation
+                    CONF_TIMEZONE: str(self.hass.config.time_zone),
+                    CONF_ELEVATION: self.hass.config.elevation,
                 }
 
+                # Factor weights canonical stored in both data (for initial setup) and options
                 final_config[CONF_FACTOR_WEIGHTS] = self.ocean_config.get(
                     CONF_FACTOR_WEIGHTS, _validate_and_normalize_factor_weights(None)
                 )
 
+                # Keep update interval & TTLs in data (these are used at coordinator creation)
                 if "update_interval" in self.ocean_config:
                     final_config["update_interval"] = int(self.ocean_config.get("update_interval"))
 
@@ -758,11 +755,33 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 final_config[CONF_TIDE_TTL] = int(self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT))
                 final_config[CONF_WEATHER_CACHE_TTL] = int(self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT))
 
-                # Persist the chosen tide phase offset minutes into entry.data so it is available to coordinator/tide proxy
-                final_config[CONF_TIDE_PHASE_OFFSET_MINUTES] = int(self.ocean_config.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))
+                # Persist the chosen tide phase offset minutes in options (not data)
+                # Build an options dict so that entry.options will contain the UI-editable settings
+                options: dict[str, Any] = {}
 
-                final_config[CONF_TIMEZONE] = str(self.hass.config.time_zone)
-                final_config[CONF_ELEVATION] = self.hass.config.elevation
+                # time periods should be editable in options UI — write to options too
+                options[CONF_TIME_PERIODS] = self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)
+
+                # copy the threshold-display values into options (UI shows/edits these)
+                options["max_wind_speed"] = user_input["max_wind_speed"]
+                options["max_gust_speed"] = user_input.get("max_gust_speed")
+                options["max_wave_height"] = user_input["max_wave_height"]
+                options["min_visibility"] = user_input.get("min_visibility")
+                options["min_temperature"] = user_input.get("min_temperature")
+                options["max_temperature"] = user_input.get("max_temperature")
+                options["min_swell_period"] = user_input.get("min_swell_period")
+                options["max_precip_chance"] = user_input.get("max_precip_chance")
+
+                # expose_raw is configured earlier (advanced) — include in options
+                options["expose_raw"] = bool(self.ocean_config.get("expose_raw", False))
+
+                # add tide phase offset into options (so options UI shows it)
+                options[CONF_TIDE_PHASE_OFFSET_MINUTES] = int(
+                    self.ocean_config.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT)
+                )
+
+                # store normalized factor weights in options as well (UI uses factor_* sliders)
+                options[CONF_FACTOR_WEIGHTS] = final_config[CONF_FACTOR_WEIGHTS]
 
                 # Duplicate title check
                 existing_entries = self.hass.config_entries.async_entries(DOMAIN)
@@ -778,10 +797,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
 
                 _LOGGER.debug(
-                    "Creating ocean config entry with data keys: %s (unique_id=%s)", list(final_config.keys()), unique_id
+                    "Creating ocean config entry with data keys: %s (unique_id=%s) and options keys: %s",
+                    list(final_config.keys()),
+                    unique_id,
+                    list(options.keys()),
                 )
 
-                return self.async_create_entry(title=final_config[CONF_NAME], data=final_config)
+                # Create the config entry with both data and options so Options UI immediately reflects setup values.
+                return self.async_create_entry(title=final_config[CONF_NAME], data=final_config, options=options)
             except KeyError as ke:
                 _LOGGER.exception("Missing expected key when building final ocean config: %s", ke)
                 return self._show_ocean_thresholds_form(errors={"base": "unknown"})
@@ -856,10 +879,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
 
-        # NOTE: This options flow intentionally reads/writes only from entry.options
-        # and uses hardcoded defaults if options are not present. No fallback to
-        # entry.data is performed (per user's instruction - no backward compatibility needed).
-
+        # Options flow reads/writes only from entry.options (no fallbacks/migrations here).
         current_opts = dict(self._config_entry.options or {})
 
         if user_input is not None:
