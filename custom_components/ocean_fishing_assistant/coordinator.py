@@ -21,9 +21,8 @@ from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAUL
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
-# timezonefinder import is fine at module import time; the heavy work is in TimezoneFinder()
-from timezonefinder import TimezoneFinder
-
+# We'll instantiate TimezoneFinder lazily inside the executor to avoid blocking the event loop
+# (importing TimezoneFinder at module import time can trigger package metadata I/O).
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -143,8 +142,13 @@ class OFACoordinator(DataUpdateCoordinator):
         Call once from async_setup_entry (or lazily before first resolve_location_tz).
         """
         if self._tf is None:
-            # Create TimezoneFinder in executor to avoid blocking the event loop.
-            self._tf = await self.hass.async_add_executor_job(TimezoneFinder)
+            # Import and instantiate TimezoneFinder inside a worker thread to avoid blocking the event loop.
+            def _make_timezonefinder():
+                # local import to avoid doing file I/O at module import time
+                from timezonefinder import TimezoneFinder
+                return TimezoneFinder()
+
+            self._tf = await self.hass.async_add_executor_job(_make_timezonefinder)
 
     async def resolve_location_tz(self, lat: float, lon: float) -> Optional[str]:
         """Resolve an IANA timezone name for lat/lon using TimezoneFinder in executor.
