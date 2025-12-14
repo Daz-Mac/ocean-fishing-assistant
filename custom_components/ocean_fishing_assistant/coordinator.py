@@ -113,7 +113,7 @@ class OFACoordinator(DataUpdateCoordinator):
         phase_offset_hours = float(phase_offset_minutes) / 60.0
 
         # create TideProxy using provided tide_ttl and phase offset (falls back to TideProxy defaults if None)
-        # NOTE: force_lon_shift=True set for diagnostic testing to force the longitude-derived phase shift.
+        # NOTE: pass correct diagnostic kwarg name expected by TideProxy
         if tide_ttl is not None:
             self._tide_proxy = TideProxy(
                 hass,
@@ -121,7 +121,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lon,
                 ttl=int(tide_ttl),
                 phase_offset_hours=phase_offset_hours,
-                force_lon_shift=True,
+                force_apply_longitude_phase_shift=True,
             )
         else:
             self._tide_proxy = TideProxy(
@@ -129,7 +129,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lat,
                 self.lon,
                 phase_offset_hours=phase_offset_hours,
-                force_lon_shift=True,
+                force_apply_longitude_phase_shift=True,
             )
 
         self.time_periods_mode = time_periods_mode or "full_day"
