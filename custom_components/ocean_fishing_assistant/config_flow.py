@@ -319,10 +319,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
+        # Build the default schema for the factor weights form
         schema_fields: dict = {}
-        schema_fields[vol.Required("_factors_total", default=total_default): selector.NumberSelector(
+        schema_fields[vol.Required("_factors_total", default=total_default)] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0, max=1000, step=1, unit_of_measurement="%", mode="box")
-        )]  # placeholder to keep the dict typed
+        )
 
         for k in FACTOR_WEIGHTS.keys():
             schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
