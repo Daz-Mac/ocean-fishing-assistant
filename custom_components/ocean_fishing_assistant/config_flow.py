@@ -437,7 +437,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ---- Remaining steps unchanged (habitat, time periods, units, thresholds) ----
-    # (The rest of this file has not been changed except for ensuring final_config stores the new CONF_TIDE_PHASE_OFFSET_MINUTES)
+    # (The rest of this file has not been changed except for ensuring final_config stores the new CONF_TIDE_PHASE_OFFSET_MINUTES and unit strings)
     async def async_step_select_region(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Let the user pick a region first, then show species available in that region."""
         if self.species_loader is None:
@@ -742,6 +742,11 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_TIMEZONE: str(self.hass.config.time_zone),
                     CONF_ELEVATION: self.hass.config.elevation,
                 }
+
+                # Add unit strings expected downstream (wind_unit is required by coordinator)
+                final_config["wind_unit"] = wind_unit
+                final_config["wave_unit"] = "m" if units == "metric" else "ft"
+                final_config["temp_unit"] = "°C" if units == "metric" else "°F"
 
                 # Factor weights canonical stored in both data (for initial setup) and options
                 final_config[CONF_FACTOR_WEIGHTS] = self.ocean_config.get(
