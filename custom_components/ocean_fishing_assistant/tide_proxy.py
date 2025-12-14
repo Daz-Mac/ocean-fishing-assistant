@@ -1,5 +1,4 @@
-# (Full file content — replace your existing tide_proxy.py with the contents below)
-
+# custom_components/ocean_fishing_assistant/tide_proxy.py
 from __future__ import annotations
 import logging
 import math
@@ -202,6 +201,8 @@ class TideProxy:
         min_height_floor: Optional[float] = None,
         max_amplitude_m: Optional[float] = None,
         phase_offset_hours: float = 0.0,
+        # New diagnostic/experimental option:
+        force_apply_longitude_phase_shift: bool = False,
     ):
         self.hass = hass
         self.latitude = float(latitude or 0.0)
@@ -216,6 +217,7 @@ class TideProxy:
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
         self._phase_offset_hours = float(phase_offset_hours)
+        self._force_apply_longitude_phase_shift = bool(force_apply_longitude_phase_shift)
 
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
@@ -265,13 +267,14 @@ class TideProxy:
             pass
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f",
+            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f force_lon_shift=%s",
             self.latitude,
             self.longitude,
             self._coef_vec.size,
             self._bias,
             self._auto_clamp_enabled,
             self._phase_offset_hours,
+            self._force_apply_longitude_phase_shift,
         )
 
     def _build_default_coef_vec(self, m2_amp: float) -> np.ndarray:
@@ -458,17 +461,33 @@ class TideProxy:
         anchor_dt = moon_transit_dt or (dt_objs[0] if dt_objs else now)
         anchor_epoch = anchor_dt.timestamp() if anchor_dt else now.timestamp()
         period_seconds = _TIDE_HALF_DAY_HOURS * _SECONDS_PER_HOUR
+
+        # If no moon transit, use simplistic longitude-derived shift; optionally allow forcing lon shift even if transit found (experimental)
         if moon_transit_dt is None:
             lon_shift = (self.longitude / 360.0) * period_seconds
             t_anchor = anchor_epoch - lon_shift
+            _LOGGER.debug("Moon transit not found; applying lon_shift fallback. lon_shift=%.3fs t_anchor=%s", lon_shift, datetime.fromtimestamp(t_anchor, tz=timezone.utc).isoformat().replace("+00:00", "Z"))
         else:
             lon_shift = 0.0
             t_anchor = anchor_epoch
+            # Experimental: apply longitude phase shift even when transit is found (helps if coefficients assume a different reference)
+            if self._force_apply_longitude_phase_shift:
+                computed_lon_shift = (self.longitude / 360.0) * period_seconds
+                _LOGGER.debug(
+                    "Force-applying computed longitude phase shift even though moon_transit_dt found. computed_lon_shift=%.3fs",
+                    computed_lon_shift,
+                )
+                t_anchor = float(t_anchor) - float(computed_lon_shift)
+            _LOGGER.debug("Moon transit found: transit=%s anchor_epoch=%s (UTC) phase_offset_hours=%.3f",
+                          moon_transit_dt.isoformat().replace("+00:00", "Z") if moon_transit_dt else "None",
+                          anchor_epoch,
+                          self._phase_offset_hours)
 
         # Apply manual phase offset (hours) for empirical/site tuning (positive -> shift anchor forward)
         try:
             if float(self._phase_offset_hours) != 0.0:
                 t_anchor = float(t_anchor) + float(self._phase_offset_hours) * _SECONDS_PER_HOUR
+                _LOGGER.debug("Applied manual phase_offset_hours: %.3f -> new t_anchor=%s", self._phase_offset_hours, datetime.fromtimestamp(t_anchor, tz=timezone.utc).isoformat().replace("+00:00", "Z"))
         except Exception:
             pass
 
@@ -483,7 +502,7 @@ class TideProxy:
         B_orig = B.copy()
 
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
-        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s lon_shift=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, lon_shift, self._phase_offset_hours)
+        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s lon_shift=%s phase_offset_hours=%.3f force_lon_shift=%s", t_anchor, jd_anchor, lon_shift, self._phase_offset_hours, self._force_apply_longitude_phase_shift)
 
         try:
             nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
@@ -743,6 +762,19 @@ class TideProxy:
             if next_low_tuple is not None:
                 nl_ts, _ = next_low_tuple
                 next_low = datetime.fromtimestamp(nl_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+            # Add helpful debug about selected extrema
+            try:
+                _LOGGER.debug(
+                    "Selected next extrema: next_high=%s next_low=%s (first_future_idx_sorted=%s scan_range=%s->%s)",
+                    next_high,
+                    next_low,
+                    first_future_idx_sorted,
+                    datetime.fromtimestamp(scan_start, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                    datetime.fromtimestamp(scan_end, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                )
+            except Exception:
+                pass
         except Exception:
             _LOGGER.debug("Failed to compute next_high/next_low", exc_info=True)
 
@@ -901,6 +933,7 @@ class TideProxy:
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
                 "phase_offset_hours": float(self._phase_offset_hours),
+                "force_apply_longitude_phase_shift": bool(self._force_apply_longitude_phase_shift),
             },
             "next_high": next_high_obj,
             "next_low": next_low_obj,
