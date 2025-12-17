@@ -121,7 +121,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lon,
                 ttl=int(tide_ttl),
                 phase_offset_hours=phase_offset_hours,
-                force_apply_longitude_phase_shift=True,
+                force_apply_longitude_phase_shift=False,
             )
         else:
             self._tide_proxy = TideProxy(
@@ -129,7 +129,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lat,
                 self.lon,
                 phase_offset_hours=phase_offset_hours,
-                force_apply_longitude_phase_shift=True,
+                force_apply_longitude_phase_shift=False,
             )
 
         self.time_periods_mode = time_periods_mode or "full_day"
