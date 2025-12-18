@@ -1,11 +1,6 @@
 # custom_components/ocean_fishing_assistant/coordinator.py
 """
 Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
-
-This coordinator expects the selected species (if provided) to already be a resolved
-species dict (as returned by SpeciesLoader.get_species or get_general_profile).
-Per the project's strict policy: do not attempt on-the-fly lookups or fallbacks here —
-fail loudly if the contract is violated.
 """
 
 from datetime import timedelta
@@ -45,18 +40,6 @@ class OFACoordinator(DataUpdateCoordinator):
         tide_ttl: Optional[int] = None,
         tide_phase_offset_minutes: Optional[int] = None,
     ):
-        """
-        - fetcher must be constructed with the user-selected wind unit (strict).
-        - coordinator validates fetcher.speed_unit matches options.
-        - time_periods_mode: one of the CONF_TIME_PERIODS values (full_day/dawn_dusk)
-        - fetch_cache_ttl: per-entry override for the shared in-memory fetch cache TTL (seconds)
-        - tide_ttl: TTL (seconds) to pass into TideProxy instance
-        - tide_phase_offset_minutes: optional integer minutes to apply as a manual phase tweak (positive shifts anchor forward)
-
-        Important: `species` MUST be either None or a resolved species dict (with at least an "id" key).
-        This enforces the project's strict no-fallback contract: coordinator will raise if species is
-        provided as anything other than a resolved dict.
-        """
         super().__init__(
             hass,
             _LOGGER,
@@ -113,7 +96,6 @@ class OFACoordinator(DataUpdateCoordinator):
         phase_offset_hours = float(phase_offset_minutes) / 60.0
 
         # create TideProxy using provided tide_ttl and phase offset (falls back to TideProxy defaults if None)
-        # NOTE: pass correct diagnostic kwarg name expected by TideProxy
         if tide_ttl is not None:
             self._tide_proxy = TideProxy(
                 hass,
@@ -121,7 +103,6 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lon,
                 ttl=int(tide_ttl),
                 phase_offset_hours=phase_offset_hours,
-                force_apply_longitude_phase_shift=False,
             )
         else:
             self._tide_proxy = TideProxy(
@@ -129,7 +110,6 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lat,
                 self.lon,
                 phase_offset_hours=phase_offset_hours,
-                force_apply_longitude_phase_shift=False,
             )
 
         self.time_periods_mode = time_periods_mode or "full_day"
