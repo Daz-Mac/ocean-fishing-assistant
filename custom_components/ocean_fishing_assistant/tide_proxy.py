@@ -32,7 +32,7 @@ _ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
 # numeric tolerances
 EPS_DERIV = 1e-10
 EPS_ROOT = 1e-9
-BISECT_TOL_SEC = 1e-3  # stopping tolerance for root bisection (seconds)
+BISECT_TOL_SEC = 1e-1  # stopping tolerance for root bisection (seconds)
 GRID_SECONDS_DEFAULT = 60  # 1 minute grid for better extrema resolution
 
 CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
