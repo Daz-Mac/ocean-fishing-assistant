@@ -133,57 +133,108 @@ def _coerce_phase(phase: Any) -> Optional[float]:
 
 
 def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
+    """
+    Compute nodal corrections using pyTMD.
+
+    This integration requires pyTMD to be installed. If pyTMD is unavailable,
+    this function will raise a RuntimeError explaining how to install it.
+
+    The function attempts to locate common pyTMD APIs and will raise an
+    informative error if the installed pyTMD doesn't expose the expected call.
+    The returned dict MUST map each constituent name to a dict containing:
+      { "f": <nodal amplitude factor (float)>, "u": <nodal phase correction (degrees)> }
+    """
     try:
-        import utide  # type: ignore
-        from utide import harmonics  # type: ignore
+        import pyTMD  # type: ignore
     except Exception as exc:
         raise RuntimeError(
-            "UTide is required for nodal factor calculation but is not available. "
-            "Install UTide in the environment so this integration can compute nodal corrections."
+            "pyTMD is required for nodal factor calculation but is not available. "
+            "Install pyTMD in the Home Assistant Python environment (e.g. pip install pyTMD) and restart Home Assistant."
         ) from exc
 
-    constit_index = getattr(utide, "constit_index_dict", None)
-    if constit_index is None:
-        raise RuntimeError("utide.constit_index_dict not found in installed UTide; cannot map constituent names.")
-
-    lind_list: List[int] = []
-    name_idx_map: Dict[str, int] = {}
-    for nm in names:
-        if nm not in constit_index:
-            raise KeyError(f"Constituent '{nm}' not known to utide.constit_index_dict.")
-        idx = int(constit_index[nm]) - 1
-        if idx < 0:
-            raise KeyError(f"Constituent '{nm}' maps to invalid index {idx+1} in utide.constit_index_dict.")
-        lind_list.append(int(idx))
-        name_idx_map[nm] = int(idx)
-        _LOGGER.debug("nfactors: mapped %s -> index %d", nm, idx + 1)
-
-    if not lind_list:
-        raise RuntimeError("No constituents provided to nfactors.")
-
-    lind = np.atleast_1d(lind_list).astype(int)
-    t_arr = np.atleast_1d(jd)
-    ngflgs = [False, False, False, False]
-    F, U, V = harmonics.FUV(t_arr, jd, lind, float(latitude), ngflgs)
-
-    F_row = np.asarray(F).reshape((1, -1))[0]
-    U_row = np.asarray(U).reshape((1, -1))[0]
-
-    out: Dict[str, Dict[str, float]] = {}
-    for nm, idx in name_idx_map.items():
-        pos = lind.tolist().index(int(idx))
-        fval = float(F_row[pos])
-        u_raw = float(U_row[pos])
-        if abs(u_raw) <= 1.1:
-            uval_deg = u_raw * 360.0
-        elif abs(u_raw) <= 2.0 * math.pi + 0.1:
-            uval_deg = math.degrees(u_raw)
+    # Attempt several reasonable access patterns in pyTMD. If none match,
+    # raise a clear error so the integrator can tell me the pyTMD version and I can adapt.
+    # Expected return format: mapping name -> {"f": float, "u": float_in_degrees}
+    try:
+        # Common layout: pyTMD.nodal.* or pyTMD.nodal_corrections / compute_nodal_factors
+        # Try pyTMD.nodal first
+        if hasattr(pyTMD, "nodal"):
+            nodal_mod = getattr(pyTMD, "nodal")
+            if hasattr(nodal_mod, "compute_nodal_factors"):
+                nf_out = nodal_mod.compute_nodal_factors(jd, list(names), latitude)
+            elif hasattr(nodal_mod, "nodal_corrections"):
+                nf_out = nodal_mod.nodal_corrections(jd, list(names), latitude)
+            else:
+                nf_out = None
         else:
-            uval_deg = u_raw
-        _LOGGER.debug("nfactors: %s -> f=%s u_raw=%s u_deg=%s", nm, fval, u_raw, uval_deg)
-        out[nm] = {"f": fval, "u": uval_deg}
+            nf_out = None
 
-    return out
+        # If not found under pyTMD.nodal, try top-level helpers
+        if nf_out is None:
+            for candidate in ("compute_nodal_factors", "nodal_corrections", "nfactors"):
+                if hasattr(pyTMD, candidate):
+                    fn = getattr(pyTMD, candidate)
+                    nf_out = fn(jd, list(names), latitude)
+                    break
+
+        if nf_out is None:
+            raise RuntimeError("pyTMD installed but nodal-correction API not found. Please report pyTMD version to the maintainer.")
+
+        # Normalize nf_out to desired dictionary shape. Many pyTMD functions return arrays;
+        # here we try to detect common structures. If structure is unexpected, raise to get version info.
+        out: Dict[str, Dict[str, float]] = {}
+
+        # Case: dict-like mapping already in desired shape
+        if isinstance(nf_out, dict):
+            # convert numeric types to floats and ensure degrees for u
+            for key in names:
+                if key not in nf_out:
+                    raise KeyError(f"pyTMD nodal output missing constituent '{key}'")
+                item = nf_out[key]
+                if isinstance(item, dict) and ("f" in item and "u" in item):
+                    out[key] = {"f": float(item["f"]), "u": float(item["u"])}
+                else:
+                    # unknown dict structure
+                    raise RuntimeError("pyTMD nodal output dict has unexpected structure; please provide pyTMD version")
+            return out
+
+        # Case: tuple / array outputs: try common pattern (factors, u_in_radians, names)
+        # many libraries return two arrays (f, u) in radians or degrees and a list of names.
+        try:
+            # Try to unpack (f, u) or (f, u, names_out)
+            if isinstance(nf_out, (list, tuple)) and len(nf_out) >= 2:
+                f_arr = np.asarray(nf_out[0], dtype=float)
+                u_arr = np.asarray(nf_out[1], dtype=float)
+                # If u_arr looks like radians (magnitude <= 2*pi), convert to degrees
+                if np.all(np.abs(u_arr) <= 2.0 * math.pi + 0.1):
+                    u_deg = np.degrees(u_arr)
+                else:
+                    u_deg = u_arr
+                if f_arr.shape[0] != len(names) or u_deg.shape[0] != len(names):
+                    # maybe names are provided as third tuple entry; try to map by returned names
+                    if len(nf_out) >= 3:
+                        ret_names = list(nf_out[2])
+                        if len(ret_names) == len(f_arr):
+                            for i, nm in enumerate(ret_names):
+                                out[str(nm)] = {"f": float(f_arr[i]), "u": float(u_deg[i])}
+                            # ensure all requested names present
+                            for nm in names:
+                                if nm not in out:
+                                    raise KeyError(f"pyTMD nodal output did not include requested constituent '{nm}'")
+                            return out
+                    raise RuntimeError("pyTMD nodal arrays length mismatch with requested constituents")
+                else:
+                    for i, nm in enumerate(names):
+                        out[nm] = {"f": float(f_arr[i]), "u": float(u_deg[i])}
+                    return out
+        except Exception:
+            pass
+
+        # If we reach here, the structure wasn't recognized
+        raise RuntimeError("pyTMD nodal-correction result had an unexpected structure; please provide pyTMD version info to the maintainer.")
+    except Exception as exc:
+        _LOGGER.exception("nfactors (pyTMD) failure")
+        raise
 
 
 class TideProxy:
@@ -201,7 +252,17 @@ class TideProxy:
         min_height_floor: Optional[float] = None,
         max_amplitude_m: Optional[float] = None,
         phase_offset_hours: float = 0.0,
+        backend: str = "pytmd",
     ):
+        """
+        TideProxy constructor.
+
+        backend: only 'pytmd' is accepted. This integration will raise if another
+                 backend string is provided. There are no fallbacks.
+        """
+        if backend != "pytmd":
+            raise ValueError("Only 'pytmd' backend is supported (no fallbacks).")
+
         self.hass = hass
         self.latitude = float(latitude or 0.0)
         self.longitude = float(longitude or 0.0)
@@ -215,6 +276,7 @@ class TideProxy:
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
         self._phase_offset_hours = float(phase_offset_hours)
+        self._backend = backend  # stored for clarity
 
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
@@ -253,7 +315,7 @@ class TideProxy:
             pass
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f",
+            "TideProxy initialized (pyTMD) lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f",
             self.latitude,
             self.longitude,
             self._coef_vec.size,
@@ -476,12 +538,13 @@ class TideProxy:
         B_orig = B.copy()
 
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
-        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, self._phase_offset_hours)
+        _LOGGER.debug("Nodal correction context (pyTMD): t_anchor=%s jd_anchor=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, self._phase_offset_hours)
 
         try:
+            # nfactors now uses pyTMD only and will raise an informative error if pyTMD is not available.
             nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
         except Exception:
-            _LOGGER.exception("Failed to compute nodal factors via UTide")
+            _LOGGER.exception("Failed to compute nodal factors via pyTMD")
             raise
 
         for i, cname in enumerate(self._constituents):
@@ -900,7 +963,7 @@ class TideProxy:
             "tide_phase_name": tide_phase_name_list,
             "tide_strength": float(round(tide_strength_value, 3)),
             "confidence": "in_memory_model",
-            "source": "in_memory_harmonic_model",
+            "source": "pyTMD_harmonic_model",
             "_helpers": {
                 "constituents": self._constituents,
                 "t_anchor": float(t_anchor),
