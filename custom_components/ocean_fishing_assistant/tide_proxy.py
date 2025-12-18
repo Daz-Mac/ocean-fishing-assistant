@@ -33,7 +33,7 @@ _ALMANAC_SEARCH_DAYS = 3  # window to search for next transit with skyfield
 EPS_DERIV = 1e-10
 EPS_ROOT = 1e-9
 BISECT_TOL_SEC = 1e-3  # stopping tolerance for root bisection (seconds)
-GRID_SECONDS_DEFAULT = 300  # 5 minutes
+GRID_SECONDS_DEFAULT = 60  # 1 minute grid for better extrema resolution
 
 CONSTITUENT_PERIOD_HOURS: Dict[str, float] = {
     "M2": 12.4206,
@@ -195,8 +195,8 @@ class TideProxy:
         ttl: int = _DEFAULT_TTL,
         *,
         coef_vec: Optional[Sequence[float]] = None,
-        default_m2_amp: float = 1.0,
-        bias: float = 0.575626550188,
+        default_m2_amp: float = 0.3,
+        bias: float = 0.0,
         auto_clamp_enabled: bool = False,
         min_height_floor: Optional[float] = None,
         max_amplitude_m: Optional[float] = None,
@@ -236,22 +236,11 @@ class TideProxy:
             else:
                 _LOGGER.warning("coef_vec length mismatch; using default built-ins")
                 self._coef_vec = self._build_default_coef_vec(default_m2_amp)
+                _LOGGER.info("Using default zero-phase coefficients (built-in) with default_m2_amp=%.3f m", default_m2_amp)
         else:
-            self._coef_vec = np.array(
-                [
-                    0.14933269066304247, 0.010009545158976542,
-                    0.03765626189307662, 0.0,
-                    0.02691040385059728, -0.007448362858614585,
-                    0.09114141349666417, -0.006648863533063331,
-                    0.040636828184277544, -0.006469123241951175,
-                    0.018067509184960646, 0.00014078559909538,
-                    0.01228376821279643, -0.0021918338626263174,
-                    0.009033366895446204, 0.00010934048412071753,
-                    0.00903734454535999, -0.002196710150478214,
-                    0.0030277812797246343, -0.0006224212199091476,
-                ],
-                dtype=float,
-            )
+            # Use zero-phase default coefficients so t_anchor controls timing predictably.
+            self._coef_vec = self._build_default_coef_vec(default_m2_amp)
+            _LOGGER.info("Using default zero-phase coefficients (built-in) with default_m2_amp=%.3f m", default_m2_amp)
 
         try:
             mean_abs_A = float(np.mean(np.abs(self._coef_vec[0::2])))
