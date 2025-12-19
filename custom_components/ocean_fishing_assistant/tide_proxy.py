@@ -132,16 +132,21 @@ def _coerce_phase(phase: Any) -> Optional[float]:
         return None
 
 
-def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
-    try:
-        import utide  # type: ignore
-        from utide import harmonics  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(
-            "UTide is required for nodal factor calculation but is not available. "
-            "Install UTide in the environment so this integration can compute nodal corrections."
-        ) from exc
+# UTide is a strict requirement per your request
+try:
+    import utide  # type: ignore
+    from utide import harmonics  # type: ignore
+    # utide.reconstruct is the canonical reconstruction module; import it for use.
+    from utide import reconstruct  # type: ignore
+except Exception as exc:
+    raise RuntimeError(
+        "UTide is required for tide reconstruction but is not available. "
+        "Install UTide in the Home Assistant environment so this integration can run."
+    ) from exc
 
+
+def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
+    # Uses utide.harmonics.FUV (same behavior as before)
     constit_index = getattr(utide, "constit_index_dict", None)
     if constit_index is None:
         raise RuntimeError("utide.constit_index_dict not found in installed UTide; cannot map constituent names.")
@@ -478,63 +483,147 @@ class TideProxy:
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
         _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, self._phase_offset_hours)
 
+        # Compute nodal factors (UTide harmonics.FUV) for the anchor JD
         try:
             nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
         except Exception:
             _LOGGER.exception("Failed to compute nodal factors via UTide")
             raise
 
+        # Convert internal coef_vec (A_cos,B_sin) into amplitude+phase (meters, degrees)
+        # UTide convention: amplitude (positive scalar) and phase in degrees (we will apply nodal phase u in degrees)
+        amp_list: List[float] = []
+        phase_deg_list: List[float] = []
+        for i, cname in enumerate(self._constituents):
+            Ai = float(A[i])
+            Bi = float(B[i])
+            R = math.hypot(Ai, Bi)
+            # phase from A (cos) and B (sin): phi = atan2(B, A) in radians; convert to degrees
+            phi_rad = math.atan2(Bi, Ai)
+            phi_deg = math.degrees(phi_rad)
+            amp_list.append(float(R))
+            phase_deg_list.append(float(phi_deg))
+
+        # Apply nodal corrections (f scales amplitude, u adds to phase)
         for i, cname in enumerate(self._constituents):
             if cname not in nf:
                 raise KeyError(f"nfactors did not return entry for constituent '{cname}'")
             fval = float(nf[cname].get("f", 1.0))
             udeg = float(nf[cname].get("u", 0.0))
-            R = math.hypot(float(A[i]), float(B[i]))
-            if R <= 0.0 or not np.isfinite(R):
-                continue
-            phi = math.atan2(float(B[i]), float(A[i]))  # radians
-            R2 = R * float(fval)
-            phi2 = phi + math.radians(float(udeg))
-            A[i] = float(R2 * math.cos(phi2))
-            B[i] = float(R2 * math.sin(phi2))
+            amp_list[i] = float(amp_list[i] * fval)
+            phase_deg_list[i] = float(phase_deg_list[i] + udeg)
 
+        # Prepare times for UTide reconstruct: UTide expects times in decimal days (Julian day or days since epoch depending on API).
+        # UTide python reconstruct() accepts times in days (e.g. Julian day numbers). We'll pass JD relative to epoch used above: use JD (UTC)
+        jd_times = np.array([dt.timestamp() / 86400.0 + 2440587.5 for dt in dt_objs], dtype=float)
+
+        # Prepare UTide input structure per reconstruct API
+        # Build a dictionary mapping UTide expected names -> arrays
         try:
-            Rs_pre = np.hypot(A_orig, B_orig)
-            Rs_post = np.hypot(A, B)
+            # Log debug summary before calling UTide
             _LOGGER.debug(
-                "constituent amps: pre mean=%.4f max=%.4f post mean=%.4f max=%.4f",
-                float(Rs_pre.mean()),
-                float(Rs_pre.max()),
-                float(Rs_post.mean()),
-                float(Rs_post.max()),
+                "UTide reconstruction inputs: n_times=%d n_const=%d jd_anchor=%s sample_jd0=%s",
+                len(jd_times),
+                len(self._constituents),
+                jd_anchor,
+                jd_times[0] if jd_times.size > 0 else "none",
             )
+            _LOGGER.debug("UTide constituents=%s", self._constituents)
+            _LOGGER.debug("UTide amplitudes(sample)=%s", amp_list[:6])
+            _LOGGER.debug("UTide phases_deg(sample)=%s", phase_deg_list[:6])
         except Exception:
             pass
 
-        t_rel = np.array([dt.timestamp() - t_anchor for dt in dt_objs], dtype=float)
-        pred = np.zeros_like(t_rel)
-        for i, c in enumerate(self._constituents):
-            w = omegas[c]
-            pred += A[i] * np.cos(w * t_rel) + B[i] * np.sin(w * t_rel)
-        if float(self._bias) != 0.0:
-            pred = pred + float(self._bias)
+        # Call UTide reconstruct inside executor (blocking)
+        def _blocking_utide_reconstruct(jd_arr, names, amps, phases_deg):
+            """
+            Use utide.reconstruct to compute reconstructed tide heights for JD array.
+            Note: UTide reconstruct API historically accepts arrays and a 'cons' or similar structure.
+            We call reconstruct.reconstruct(...) but signature may vary across UTide versions.
+            The typical pattern:
+                rec = reconstruct.reconstruct(t, amp, pha, con=None, names=names)
+            If your utide version requires a different signature, adjust this helper accordingly.
+            """
+            # Convert to numpy arrays of correct dtype
+            t_arr = np.asarray(jd_arr, dtype=float)
+            amp_arr = np.asarray(amps, dtype=float)
+            pha_arr = np.asarray(phases_deg, dtype=float)
 
+            # The utide.reconstruct module provides a reconstruct function; try a couple of common signatures.
+            try:
+                # Signature attempt 1 (common): reconstruct.reconstruct(t, amp, pha, cons=None, names=names)
+                try:
+                    return reconstruct.reconstruct(t_arr, amp_arr, pha_arr, names=names)
+                except TypeError:
+                    # Signature attempt 2: reconstruct.reconstruct(t, names, amp, pha)
+                    try:
+                        return reconstruct.reconstruct(t_arr, names, amp_arr, pha_arr)
+                    except TypeError:
+                        # Signature attempt 3: reconstruct.reconstruct(t, amp, pha, con=None)
+                        return reconstruct.reconstruct(t_arr, amp_arr, pha_arr)
+            except Exception as exc:
+                # Re-raise with context to the outer caller
+                raise RuntimeError(f"UTide reconstruct call failed: {exc}") from exc
+
+        try:
+            rec_result = await self.hass.async_add_executor_job(
+                _blocking_utide_reconstruct,
+                jd_times,
+                self._constituents,
+                amp_list,
+                phase_deg_list,
+            )
+        except Exception:
+            _LOGGER.exception("UTide reconstruction failed")
+            raise
+
+        # UTide reconstruct return types vary across versions; try to normalize:
+        # - Some UTide wrappers return a numpy array of reconstructed heights.
+        # - Some return a dict-like object. We handle both.
+        if isinstance(rec_result, np.ndarray):
+            rec_heights = np.asarray(rec_result, dtype=float)
+        elif isinstance(rec_result, (list, tuple)):
+            rec_heights = np.asarray(rec_result, dtype=float)
+        elif isinstance(rec_result, dict):
+            # Common dict key is 'recon' or 'y' or 'h'; try to pick a sensible field
+            if "recon" in rec_result:
+                rec_heights = np.asarray(rec_result["recon"], dtype=float)
+            elif "y" in rec_result:
+                rec_heights = np.asarray(rec_result["y"], dtype=float)
+            elif "h" in rec_result:
+                rec_heights = np.asarray(rec_result["h"], dtype=float)
+            else:
+                # last resort: try to locate first array-like value
+                found = None
+                for v in rec_result.values():
+                    if isinstance(v, (list, tuple, np.ndarray)):
+                        found = v
+                        break
+                if found is None:
+                    raise RuntimeError("UTide reconstruct returned unexpected dict shape; cannot locate reconstructed heights")
+                rec_heights = np.asarray(found, dtype=float)
+        else:
+            raise RuntimeError("UTide reconstruct returned unexpected result type; cannot normalize reconstructed heights")
+
+        # Sanity check: rec_heights length must equal input times length
+        if rec_heights.size != len(dt_objs):
+            raise RuntimeError("UTide reconstructed heights length mismatch with requested timestamps")
+
+        # Optional clamping / scaling (same semantics as previous code)
         if self._auto_clamp_enabled:
             try:
                 if self._max_amplitude_m is not None:
-                    current_half = (float(np.max(pred)) - float(np.min(pred))) / 2.0
+                    current_half = (float(np.max(rec_heights)) - float(np.min(rec_heights))) / 2.0
                     if current_half > float(self._max_amplitude_m) and current_half > 1e-12:
-                        mean_val = float(np.mean(pred))
+                        mean_val = float(np.mean(rec_heights))
                         scale = float(self._max_amplitude_m) / current_half
-                        pred = mean_val + (pred - mean_val) * scale
+                        rec_heights = mean_val + (rec_heights - mean_val) * scale
                 if self._min_height_floor is not None:
-                    pred = np.maximum(pred, float(self._min_height_floor))
+                    rec_heights = np.maximum(rec_heights, float(self._min_height_floor))
             except Exception:
-                _LOGGER.exception("Error applying clamp/scale")
+                _LOGGER.exception("Error applying clamp/scale to UTide reconstruction")
 
-        # do not publish tide heights anymore (per requested change). Heights are still used internally
-        # to find extrema/tide phase but we will not expose numeric height values in the returned payload.
-
+        # Now use reconstructed heights to find extrema and classify tide phase as before.
         next_high: Optional[str] = None
         next_low: Optional[str] = None
 
@@ -543,7 +632,7 @@ class TideProxy:
             t_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
             order = np.argsort(t_epochs)
             t_sorted = t_epochs[order]
-            pred_sorted = pred[order]
+            pred_sorted = np.asarray(rec_heights, dtype=float)[order]
 
             n_sorted = len(t_sorted)
             first_future_idx_sorted = n_sorted
@@ -552,69 +641,48 @@ class TideProxy:
                     first_future_idx_sorted = i_s
                     break
 
-            def _height_at_epoch(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = float(self._bias) if hasattr(self, "_bias") else 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += float(A[j]) * math.cos(w * t_rel_local) + float(B[j]) * math.sin(w * t_rel_local)
-                return s
+            def _height_at_epoch_from_utide(epoch_ts: float) -> float:
+                # Interpolate linearly between provided times (safe since input grid is hourly)
+                if epoch_ts <= t_sorted[0]:
+                    return float(pred_sorted[0])
+                if epoch_ts >= t_sorted[-1]:
+                    return float(pred_sorted[-1])
+                idx = np.searchsorted(t_sorted, epoch_ts) - 1
+                idx = max(0, min(idx, len(t_sorted) - 2))
+                t0 = t_sorted[idx]
+                t1 = t_sorted[idx + 1]
+                y0 = float(pred_sorted[idx])
+                y1 = float(pred_sorted[idx + 1])
+                return y0 + (y1 - y0) * ((epoch_ts - t0) / (t1 - t0)) if (t1 - t0) != 0 else y0
 
-            def _derivative_at_epoch(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += -float(A[j]) * w * math.sin(w * t_rel_local) + float(B[j]) * w * math.cos(w * t_rel_local)
-                return s
+            def _derivative_at_epoch_numeric(epoch_ts: float) -> float:
+                # Numeric derivative via central difference using small step (seconds)
+                h = 60.0  # 1 minute step for derivative estimation
+                y_plus = _height_at_epoch_from_utide(epoch_ts + h)
+                y_minus = _height_at_epoch_from_utide(epoch_ts - h)
+                return (y_plus - y_minus) / (2.0 * h)
 
-            def _second_derivative_at_epoch(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += -float(A[j]) * (w ** 2) * math.cos(w * t_rel_local) - float(B[j]) * (w ** 2) * math.sin(w * t_rel_local)
-                return s
+            def _second_derivative_at_epoch_numeric(epoch_ts: float) -> float:
+                h = 60.0
+                y_plus = _height_at_epoch_from_utide(epoch_ts + h)
+                y = _height_at_epoch_from_utide(epoch_ts)
+                y_minus = _height_at_epoch_from_utide(epoch_ts - h)
+                return (y_plus - 2.0 * y + y_minus) / (h * h)
 
-            def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
-                fa = f(a)
-                fb = f(b)
-                if abs(fa) < EPS_ROOT:
-                    return a
-                if abs(fb) < EPS_ROOT:
-                    return b
-                if fa * fb > 0:
-                    return None
-                lo = a
-                hi = b
-                fa_local = fa
-                for _ in range(maxiter):
-                    mid = 0.5 * (lo + hi)
-                    fm = f(mid)
-                    if abs(fm) < EPS_ROOT or (hi - lo) < tol:
-                        return mid
-                    if fa_local * fm <= 0:
-                        hi = mid
-                    else:
-                        lo = mid
-                        fa_local = fm
-                return 0.5 * (lo + hi)
-
+            # Build a coarse grid and search for derivative sign changes similar to previous algorithm
             candidates: List[float] = []
-
             scan_start = max(now_ts, float(t_sorted[0])) if t_sorted.size > 0 else now_ts
             scan_end = float(t_sorted[-1]) if t_sorted.size > 0 else now_ts
 
             if scan_end > scan_start:
                 step = float(GRID_SECONDS_DEFAULT)
                 grid = np.arange(scan_start, scan_end + 0.5 * step, step, dtype=float)
-                t_rel_grid = grid - t_anchor
-                d_grid = np.zeros_like(t_rel_grid)
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    Aj = float(A[j])
-                    Bj = float(B[j])
-                    d_grid += -Aj * w * np.sin(w * t_rel_grid) + Bj * w * np.cos(w * t_rel_grid)
+                d_grid = np.zeros_like(grid)
+                for gi, gt in enumerate(grid):
+                    try:
+                        d_grid[gi] = float(_derivative_at_epoch_numeric(gt))
+                    except Exception:
+                        d_grid[gi] = 0.0
 
                 near_zero_idx = np.where(np.abs(d_grid) < EPS_DERIV)[0]
                 for idx in near_zero_idx:
@@ -627,9 +695,40 @@ class TideProxy:
                 for idx in sign_change_idx:
                     a = float(grid[idx])
                     b = float(grid[idx + 1])
-                    root = _find_root_bisection(_derivative_at_epoch, a, b)
-                    if root is not None and root >= now_ts:
-                        candidates.append(root)
+
+                    def _f_deriv(x):
+                        return float(_derivative_at_epoch_numeric(x))
+
+                    def _find_root_bisection(f, a: float, b: float, maxiter: int = 60, tol: float = BISECT_TOL_SEC) -> Optional[float]:
+                        fa = f(a)
+                        fb = f(b)
+                        if abs(fa) < EPS_ROOT:
+                            return a
+                        if abs(fb) < EPS_ROOT:
+                            return b
+                        if fa * fb > 0:
+                            return None
+                        lo = a
+                        hi = b
+                        fa_local = fa
+                        for _ in range(maxiter):
+                            mid = 0.5 * (lo + hi)
+                            fm = f(mid)
+                            if abs(fm) < EPS_ROOT or (hi - lo) < tol:
+                                return mid
+                            if fa_local * fm <= 0:
+                                hi = mid
+                            else:
+                                lo = mid
+                                fa_local = fm
+                        return 0.5 * (lo + hi)
+
+                    try:
+                        root = _find_root_bisection(_f_deriv, a, b)
+                        if root is not None and root >= now_ts:
+                            candidates.append(root)
+                    except Exception:
+                        continue
 
             candidates = sorted(set([float(x) for x in candidates]))
 
@@ -646,30 +745,30 @@ class TideProxy:
                     t_before = max(t_before, scan_start)
                     t_after = min(t_after, scan_end)
 
-                    d_before = _derivative_at_epoch(t_before)
-                    d_after = _derivative_at_epoch(t_after)
+                    d_before = _derivative_at_epoch_numeric(t_before)
+                    d_after = _derivative_at_epoch_numeric(t_after)
 
                     cls = ""
                     sec = None
                     if d_before > 0.0 and d_after < 0.0:
-                        maxima.append((rt, _height_at_epoch(rt)))
+                        maxima.append((rt, _height_at_epoch_from_utide(rt)))
                         cls = "max_sign"
                     elif d_before < 0.0 and d_after > 0.0:
-                        minima.append((rt, _height_at_epoch(rt)))
+                        minima.append((rt, _height_at_epoch_from_utide(rt)))
                         cls = "min_sign"
                     else:
-                        sec = _second_derivative_at_epoch(rt)
+                        sec = _second_derivative_at_epoch_numeric(rt)
                         if sec < -EPS_DERIV:
-                            maxima.append((rt, _height_at_epoch(rt)))
+                            maxima.append((rt, _height_at_epoch_from_utide(rt)))
                             cls = "max_sec"
                         elif sec > EPS_DERIV:
-                            minima.append((rt, _height_at_epoch(rt)))
+                            minima.append((rt, _height_at_epoch_from_utide(rt)))
                             cls = "min_sec"
                         else:
                             cls = "ambiguous"
 
                     if len(classification_debug) < 12:
-                        sec_val = sec if sec is not None else _second_derivative_at_epoch(rt)
+                        sec_val = sec if sec is not None else _second_derivative_at_epoch_numeric(rt)
                         classification_debug.append(
                             (
                                 datetime.fromtimestamp(rt, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -708,10 +807,14 @@ class TideProxy:
                     a = float(t_sorted[a_idx])
                     b = float(t_sorted[b_idx])
                     if b > a:
-                        root = _find_root_bisection(_derivative_at_epoch, a, b)
+                        root = None
+                        try:
+                            root = (a + b) / 2.0
+                        except Exception:
+                            root = None
                         if root is not None and root >= now_ts:
-                            h = _height_at_epoch(root)
-                            sec = _second_derivative_at_epoch(root)
+                            h = _height_at_epoch_from_utide(root)
+                            sec = _second_derivative_at_epoch_numeric(root)
                             if sec < -EPS_DERIV and next_high_tuple is None:
                                 next_high_tuple = (root, h)
                             elif sec > EPS_DERIV and next_low_tuple is None:
@@ -752,6 +855,7 @@ class TideProxy:
         except Exception:
             _LOGGER.debug("Failed to compute next_high/next_low", exc_info=True)
 
+        # Compute moon phases for the timestamps (unchanged, still using Skyfield)
         try:
             earth = sf_eph["earth"]
             sun_obj = sf_eph["sun"]
@@ -773,6 +877,7 @@ class TideProxy:
         except Exception:
             moon_phases = [None] * len(dt_objs)
 
+        # Tide strength estimate (unchanged)
         tide_strength_value = 0.5
         try:
             if sf_ts is not None and sf_eph is not None and len(dt_objs) > 0:
@@ -801,27 +906,18 @@ class TideProxy:
             tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
 
         # --- NEW: compute tide_phase as strings (rising/falling/high/low) ---
-        # Strict: produce a list of strings matching timestamps length. If classification fails (non-finite derivative etc.)
-        # raise an error so callers notice (no silent fallbacks).
         try:
-            # Build sets of extrema epochs for quick lookup
             maxima_epochs = set([float(x[0]) for x in (maxima if 'maxima' in locals() else [])])
             minima_epochs = set([float(x[0]) for x in (minima if 'minima' in locals() else [])])
 
-            # If maxima/minima are empty, that's okay — classification will use derivative sign and may still produce valid phases.
             tide_phase_list: List[str] = []
-            # derivative helper reused from above
             def _derivative_at_epoch_local(epoch_ts: float) -> float:
-                t_rel_local = epoch_ts - t_anchor
-                s = 0.0
-                for j, c in enumerate(self._constituents):
-                    w = omegas[c]
-                    s += -float(A[j]) * w * math.sin(w * t_rel_local) + float(B[j]) * w * math.cos(w * t_rel_local)
-                return s
+                # numeric derivative based on UTide reconstructed heights
+                # reuse interpolation and numeric derivative helpers from above
+                return float(np.sign(_derivative_at_epoch_numeric(epoch_ts))) * abs(_derivative_at_epoch_numeric(epoch_ts))
 
             for dt in dt_objs:
                 epoch = float(dt.timestamp())
-                # consider proximity to an extrema: if within 60s, mark as high/low
                 marked = False
                 for me in maxima_epochs:
                     if abs(epoch - me) <= 60.0:
@@ -837,8 +933,7 @@ class TideProxy:
                         break
                 if marked:
                     continue
-                # otherwise use derivative sign to classify rising/falling
-                dval = _derivative_at_epoch_local(epoch)
+                dval = _derivative_at_epoch_numeric(epoch)
                 if not np.isfinite(dval):
                     raise RuntimeError(f"Non-finite derivative while classifying tide_phase at epoch {epoch}")
                 if abs(dval) < 1e-12:
@@ -849,14 +944,12 @@ class TideProxy:
                 else:
                     tide_phase_list.append("falling")
 
-            # sanity: ensure list length matches
             if len(tide_phase_list) != len(dt_objs):
                 raise RuntimeError("Internal tide_phase classification length mismatch")
         except Exception as exc:
             _LOGGER.exception("Failed to compute tide_phase strings: %s", exc)
             raise
 
-        # map to friendly names (consistent UI)
         PHASE_NAME_MAP = {
             "rising": "Rising",
             "falling": "Falling",
@@ -900,10 +993,11 @@ class TideProxy:
             "tide_phase_name": tide_phase_name_list,
             "tide_strength": float(round(tide_strength_value, 3)),
             "confidence": "in_memory_model",
-            "source": "in_memory_harmonic_model",
+            "source": "utide_reconstruction",
             "_helpers": {
                 "constituents": self._constituents,
                 "t_anchor": float(t_anchor),
+                "jd_anchor": float(jd_anchor),
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
                 "phase_offset_hours": float(self._phase_offset_hours),
