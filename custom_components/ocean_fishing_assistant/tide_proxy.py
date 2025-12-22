@@ -192,6 +192,149 @@ def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str
     return out
 
 
+def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, latitude=0.0):
+    """
+    Reconstruct tidal heights using UTide.reconstruct exclusively (no fallback).
+
+    Parameters
+    - t_arr: array-like of datetimes or numeric timestamps (seconds since epoch)
+    - amp_arr: 1-D array of amplitudes (meters) ordered to match `names`
+    - pha_arr: 1-D array of phases (degrees) ordered to match `names`
+    - names: list of constituent short names (e.g., ['M2','S2',...])
+    - reftime_dt: reference datetime (anchor) used for UTide reftime (datetime or numeric epoch seconds)
+    - latitude: site latitude in degrees (used by UTide aux.lat)
+
+    Returns
+    - 1-D numpy array of reconstructed heights (float) same length as t_arr
+
+    Raises
+    - RuntimeError if UTide is not available or reconstruct fails
+    """
+    try:
+        import utide  # type: ignore
+        from utide.utilities import Bunch  # type: ignore
+        from utide import harmonics  # type: ignore
+        from utide import _time_conversion as tc  # type: ignore
+    except Exception as exc:
+        _LOGGER.exception("UTide import failed: %s", exc)
+        raise RuntimeError("UTide not available in Python environment") from exc
+
+    # Normalize arrays
+    t_np = np.atleast_1d(t_arr)
+    amps = np.atleast_1d(amp_arr).astype(float)
+    phas = np.atleast_1d(pha_arr).astype(float)
+    names_list = list(names)
+
+    if not (amps.size == phas.size == len(names_list)):
+        raise ValueError("amp/phase/names length mismatch")
+
+    # Convert numeric timestamps -> datetimes (UTC); keep datetimes as-is
+    t_datetime_list = []
+    if np.issubdtype(t_np.dtype, np.number):
+        for v in t_np:
+            t_datetime_list.append(datetime.fromtimestamp(float(v), tz=timezone.utc))
+    else:
+        for v in t_np:
+            if isinstance(v, datetime):
+                dt = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+                t_datetime_list.append(dt)
+            else:
+                parsed = dt_util.parse_datetime(str(v))
+                if parsed is None:
+                    raise ValueError(f"Unsupported time element in t_arr: {v!r}")
+                t_datetime_list.append(parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc))
+
+    # Ensure reftime_dt is a datetime (UTC)
+    if not isinstance(reftime_dt, datetime):
+        try:
+            reftime_dt = datetime.fromtimestamp(float(reftime_dt), tz=timezone.utc)
+        except Exception as e:
+            raise ValueError("reftime_dt must be datetime or numeric timestamp") from e
+    if reftime_dt.tzinfo is None:
+        reftime_dt = reftime_dt.replace(tzinfo=timezone.utc)
+    else:
+        reftime_dt = reftime_dt.astimezone(timezone.utc)
+
+    # Compute UTide's python-gregorian datenum for reftime
+    try:
+        reftime_num = tc._python_gregorian_datenum(reftime_dt)
+    except Exception as exc:
+        _LOGGER.exception("Failed to compute UTide reftime datenum: %s", exc)
+        raise RuntimeError("UTide time conversion failed") from exc
+
+    # Map constituent names -> UTide lind indices (0-based)
+    constit_index = getattr(utide, "constit_index_dict", None)
+    if constit_index is None:
+        raise RuntimeError("utide.constit_index_dict not found; cannot map constituent names")
+
+    lind_list = []
+    for nm in names_list:
+        if nm not in constit_index:
+            raise KeyError(f"Constituent '{nm}' not known to UTide.constit_index_dict")
+        lind_idx = int(constit_index[nm]) - 1  # UTide mapping is 1-based -> convert to 0-based
+        lind_list.append(int(lind_idx))
+    lind_arr = np.atleast_1d(lind_list).astype(int)
+
+    # Build frequency array for these constituents using UTide's linearized_freqs
+    freq_full = harmonics.linearized_freqs(reftime_num)
+    frq_sel = np.asarray(freq_full[lind_arr], dtype=float)
+
+    # Build minimal coef Bunch expected by utide.reconstruct
+    coef = Bunch()
+    coef["name"] = np.asarray(names_list, dtype=object)
+    coef["A"] = np.asarray(amps, dtype=float)
+    coef["g"] = np.asarray(phas, dtype=float)
+    coef["mean"] = 0.0
+
+    aux = Bunch()
+    aux["reftime"] = float(reftime_num)
+    aux["frq"] = np.asarray(frq_sel, dtype=float)
+    aux["lind"] = np.asarray(lind_arr, dtype=int)
+    aux["lat"] = float(latitude)
+
+    opt = Bunch()
+    opt["twodim"] = False
+    opt["nodiagn"] = False
+    opt["nodsatlint"] = False
+    opt["nodsatnone"] = False
+    opt["gwchlint"] = False
+    opt["gwchnone"] = False
+    opt["prefilt"] = Bunch()
+    opt["notrend"] = True  # avoid requiring slope fields
+    aux["opt"] = opt
+
+    coef["aux"] = aux
+
+    # Call utide.reconstruct with datetime list (reconstruct will normalize)
+    try:
+        tide_bunch = utide.reconstruct(np.array(t_datetime_list, dtype=object), coef, epoch=None, verbose=False)
+    except Exception as exc:
+        _LOGGER.exception("UTide.reconstruct failed (names=%s reftime=%s): %s", names_list, reftime_dt, exc)
+        raise RuntimeError(f"UTide.reconstruct failed: {exc}") from exc
+
+    # Extract heights (tide.h) or return 'u' if 2D output present
+    h_out = None
+    if hasattr(tide_bunch, "h"):
+        h_out = getattr(tide_bunch, "h")
+    elif isinstance(tide_bunch, dict) and "h" in tide_bunch:
+        h_out = tide_bunch["h"]
+    elif hasattr(tide_bunch, "u"):
+        h_out = getattr(tide_bunch, "u")
+    elif isinstance(tide_bunch, dict) and "u" in tide_bunch:
+        h_out = tide_bunch["u"]
+
+    if h_out is None:
+        _LOGGER.error("UTide.reconstruct returned no heights ('h'/'u' missing)")
+        raise RuntimeError("UTide.reconstruct did not return heights")
+
+    h_arr = np.asarray(h_out, dtype=float)
+    if h_arr.shape[0] != len(t_datetime_list):
+        _LOGGER.error("UTide.reconstruct returned unexpected shape %s (expected %d)", h_arr.shape, len(t_datetime_list))
+        raise RuntimeError("UTide.reconstruct returned unexpected output length")
+
+    return h_arr
+
+
 class TideProxy:
     def __init__(
         self,
@@ -484,15 +627,7 @@ class TideProxy:
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
         _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, self._phase_offset_hours)
 
-        # Compute nodal factors (UTide harmonics.FUV) for the anchor JD
-        try:
-            nf = await self.hass.async_add_executor_job(nfactors, jd_anchor, self._constituents, float(self.latitude))
-        except Exception:
-            _LOGGER.exception("Failed to compute nodal factors via UTide")
-            raise
-
         # Convert internal coef_vec (A_cos,B_sin) into amplitude+phase (meters, degrees)
-        # UTide convention: amplitude (positive scalar) and phase in degrees (we will apply nodal phase u in degrees)
         amp_list: List[float] = []
         phase_deg_list: List[float] = []
         for i, cname in enumerate(self._constituents):
@@ -505,158 +640,26 @@ class TideProxy:
             amp_list.append(float(R))
             phase_deg_list.append(float(phi_deg))
 
-        # Apply nodal corrections (f scales amplitude, u adds to phase)
-        for i, cname in enumerate(self._constituents):
-            if cname not in nf:
-                raise KeyError(f"nfactors did not return entry for constituent '{cname}'")
-            fval = float(nf[cname].get("f", 1.0))
-            udeg = float(nf[cname].get("u", 0.0))
-            amp_list[i] = float(amp_list[i] * fval)
-            phase_deg_list[i] = float(phase_deg_list[i] + udeg)
-
-        # Prepare times for UTide reconstruct: UTide expects times in decimal days (Julian day or days since epoch depending on API).
-        # UTide python reconstruct() accepts times in days (e.g. Julian day numbers). We'll pass JD relative to epoch used above: use JD (UTC)
-        jd_times = np.array([dt.timestamp() / 86400.0 + 2440587.5 for dt in dt_objs], dtype=float)
-
-        # Prepare UTide input structure per reconstruct API
-        # Build a dictionary mapping UTide expected names -> arrays
+        # --- UTide reconstruct path (UTide only; no fallback) ---
         try:
-            # Log debug summary before calling UTide
-            _LOGGER.debug(
-                "UTide reconstruction inputs: n_times=%d n_const=%d jd_anchor=%s sample_jd0=%s",
-                len(jd_times),
-                len(self._constituents),
-                jd_anchor,
-                jd_times[0] if jd_times.size > 0 else "none",
-            )
-            _LOGGER.debug("UTide constituents=%s", self._constituents)
-            _LOGGER.debug("UTide amplitudes(sample)=%s", amp_list[:6])
-            _LOGGER.debug("UTide phases_deg(sample)=%s", phase_deg_list[:6])
-        except Exception:
-            pass
-
-        # Call UTide reconstruct inside executor (blocking)
-        def _blocking_utide_reconstruct(jd_arr, names, amps, phases_deg):
-            """
-            Use UTide to compute reconstructed tide heights for JD array.
-            Imports and detection of reconstruct callable are done here (executor thread), avoiding event-loop blocking.
-            """
-            # Local import in executor
-            try:
-                import utide as _utide  # type: ignore
-            except Exception as exc:
-                raise RuntimeError(
-                    "UTide is required for tide reconstruction but is not available in this environment."
-                ) from exc
-
-            # Try to locate a reconstruct callable in a robust way across UTide versions:
-            # - utide.reconstruct might be a module (with reconstruct.reconstruct)
-            # - utide.reconstruct might be a function (callable)
-            # - utide.reconstruct could be absent; try import utide.reconstruct module explicitly
-            rec_candidate = getattr(_utide, "reconstruct", None)
-
-            def _invoke_reconstruct(*args, **kwargs):
-                # If candidate is a callable function, call it directly.
-                if callable(rec_candidate) and not hasattr(rec_candidate, "reconstruct"):
-                    return rec_candidate(*args, **kwargs)
-                # If candidate is a module-like object with a reconstruct attribute, use that.
-                if rec_candidate is not None and hasattr(rec_candidate, "reconstruct") and callable(getattr(rec_candidate, "reconstruct")):
-                    return rec_candidate.reconstruct(*args, **kwargs)
-                # Fallback: try import utide.reconstruct module explicitly
-                try:
-                    import importlib
-                    recon_mod = importlib.import_module("utide.reconstruct")
-                    if hasattr(recon_mod, "reconstruct") and callable(getattr(recon_mod, "reconstruct")):
-                        return recon_mod.reconstruct(*args, **kwargs)
-                except Exception:
-                    pass
-                raise RuntimeError("Could not locate a usable 'reconstruct' callable in installed UTide package.")
-
-            # Convert to numpy arrays of correct dtype
-            t_arr = np.asarray(jd_arr, dtype=float)
-            amp_arr = np.asarray(amps, dtype=float)
-            pha_arr = np.asarray(phases_deg, dtype=float)
-
-            # Try common signatures in a safe order
-            try:
-                # Attempt common signature: reconstruct(t, amp, pha, names=names)
-                try:
-                    return _invoke_reconstruct(t_arr, amp_arr, pha_arr, names=names)
-                except TypeError:
-                    # Attempt alternative ordering: reconstruct(t, names, amp, pha)
-                    try:
-                        return _invoke_reconstruct(t_arr, names, amp_arr, pha_arr)
-                    except TypeError:
-                        # Final fallback: reconstruct(t, amp, pha)
-                        return _invoke_reconstruct(t_arr, amp_arr, pha_arr)
-            except Exception as exc:
-                raise RuntimeError(f"UTide reconstruct call failed: {exc}") from exc
-
-        try:
+            # Call the blocking UTide reconstruct in executor
             rec_result = await self.hass.async_add_executor_job(
                 _blocking_utide_reconstruct,
-                jd_times,
+                dt_objs,
+                np.asarray(amp_list, dtype=float),
+                np.asarray(phase_deg_list, dtype=float),
                 self._constituents,
-                amp_list,
-                phase_deg_list,
+                datetime.fromtimestamp(t_anchor, tz=timezone.utc),
+                float(self.latitude),
             )
-        except Exception:
-            _LOGGER.exception("UTide reconstruction failed")
-            raise
-
-        # UTide reconstruct return types vary across versions; try to normalize:
-        # - Some UTide wrappers return a numpy array of reconstructed heights.
-        # - Some return a dict-like object. We handle both.
-        if isinstance(rec_result, np.ndarray):
             rec_heights = np.asarray(rec_result, dtype=float)
-        elif isinstance(rec_result, (list, tuple)):
-            rec_heights = np.asarray(rec_result, dtype=float)
-        elif isinstance(rec_result, dict):
-            # Common dict key is 'recon' or 'y' or 'h'; try to pick a sensible field
-            if "recon" in rec_result:
-                rec_heights = np.asarray(rec_result["recon"], dtype=float)
-            elif "y" in rec_result:
-                rec_heights = np.asarray(rec_result["y"], dtype=float)
-            elif "h" in rec_result:
-                rec_heights = np.asarray(rec_result["h"], dtype=float)
-            else:
-                # last resort: try to locate first array-like value
-                found = None
-                for v in rec_result.values():
-                    if isinstance(v, (list, tuple, np.ndarray)):
-                        found = v
-                        break
-                if found is None:
-                    raise RuntimeError("UTide reconstruct returned unexpected dict shape; cannot locate reconstructed heights")
-                rec_heights = np.asarray(found, dtype=float)
-        else:
-            raise RuntimeError("UTide reconstruct returned unexpected result type; cannot normalize reconstructed heights")
+        except Exception as exc:
+            _LOGGER.exception("UTide reconstruction failed: %s", exc)
+            raise RuntimeError(f"UTide reconstruct call failed: {exc}") from exc
 
         # Sanity check: rec_heights length must equal input times length
         if rec_heights.size != len(dt_objs):
-            raise RuntimeError("UTide reconstructed heights length mismatch with requested timestamps")
-
-        # Debug: log a short summary of the UTide reconstruction results (min/max/mean and sample timestamps)
-        try:
-            if rec_heights.size > 0:
-                min_idx = int(np.argmin(rec_heights))
-                max_idx = int(np.argmax(rec_heights))
-                _LOGGER.debug(
-                    "UTide reconstruct: samples=%d min=%.6f at %s max=%.6f at %s mean=%.6f",
-                    int(rec_heights.size),
-                    float(np.min(rec_heights)),
-                    dt_objs[min_idx].isoformat().replace('+00:00', 'Z') if min_idx < len(dt_objs) else 'n/a',
-                    float(np.max(rec_heights)),
-                    dt_objs[max_idx].isoformat().replace('+00:00', 'Z') if max_idx < len(dt_objs) else 'n/a',
-                    float(np.mean(rec_heights)),
-                )
-                n_show = min(12, int(rec_heights.size))
-                sample_lines = []
-                for i in range(n_show):
-                    sample_lines.append(f"{dt_objs[i].isoformat().replace('+00:00','Z')}:{rec_heights[i]:.6f}")
-                _LOGGER.debug("UTide reconstruct sample first %d: %s", n_show, sample_lines)
-        except Exception:
-            _LOGGER.debug("Failed to log UTide reconstruct summary", exc_info=True)
+            raise RuntimeError("Reconstructed heights length mismatch with requested timestamps")
 
         # Optional clamping / scaling (same semantics as previous code)
         if self._auto_clamp_enabled:
@@ -670,7 +673,7 @@ class TideProxy:
                 if self._min_height_floor is not None:
                     rec_heights = np.maximum(rec_heights, float(self._min_height_floor))
             except Exception:
-                _LOGGER.exception("Error applying clamp/scale to UTide reconstruction")
+                _LOGGER.exception("Error applying clamp/scale to reconstruction")
 
         # Now use reconstructed heights to find extrema and classify tide phase as before.
         next_high: Optional[str] = None
@@ -679,6 +682,7 @@ class TideProxy:
         try:
             now_ts = now.timestamp()
             t_epochs = np.array([dt.timestamp() for dt in dt_objs], dtype=float)
+            t_rel = t_epochs - float(t_anchor)
             order = np.argsort(t_epochs)
             t_sorted = t_epochs[order]
             pred_sorted = np.asarray(rec_heights, dtype=float)[order]
@@ -690,8 +694,8 @@ class TideProxy:
                     first_future_idx_sorted = i_s
                     break
 
-            def _height_at_epoch_from_utide(epoch_ts: float) -> float:
-                # Interpolate linearly between provided times (safe since input grid is hourly)
+            def _height_at_epoch_from_rec(epoch_ts: float) -> float:
+                # Interpolate linearly between provided times
                 if epoch_ts <= t_sorted[0]:
                     return float(pred_sorted[0])
                 if epoch_ts >= t_sorted[-1]:
@@ -705,20 +709,19 @@ class TideProxy:
                 return y0 + (y1 - y0) * ((epoch_ts - t0) / (t1 - t0)) if (t1 - t0) != 0 else y0
 
             def _derivative_at_epoch_numeric(epoch_ts: float) -> float:
-                # Numeric derivative via central difference using small step (seconds)
-                h = 60.0  # 1 minute step for derivative estimation
-                y_plus = _height_at_epoch_from_utide(epoch_ts + h)
-                y_minus = _height_at_epoch_from_utide(epoch_ts - h)
+                h = 60.0  # 1 minute step
+                y_plus = _height_at_epoch_from_rec(epoch_ts + h)
+                y_minus = _height_at_epoch_from_rec(epoch_ts - h)
                 return (y_plus - y_minus) / (2.0 * h)
 
             def _second_derivative_at_epoch_numeric(epoch_ts: float) -> float:
                 h = 60.0
-                y_plus = _height_at_epoch_from_utide(epoch_ts + h)
-                y = _height_at_epoch_from_utide(epoch_ts)
-                y_minus = _height_at_epoch_from_utide(epoch_ts - h)
+                y_plus = _height_at_epoch_from_rec(epoch_ts + h)
+                y = _height_at_epoch_from_rec(epoch_ts)
+                y_minus = _height_at_epoch_from_rec(epoch_ts - h)
                 return (y_plus - 2.0 * y + y_minus) / (h * h)
 
-            # Build a coarse grid and search for derivative sign changes similar to previous algorithm
+            # Build coarse grid and search for derivative sign changes
             candidates: List[float] = []
             scan_start = max(now_ts, float(t_sorted[0])) if t_sorted.size > 0 else now_ts
             scan_end = float(t_sorted[-1]) if t_sorted.size > 0 else now_ts
@@ -800,18 +803,18 @@ class TideProxy:
                     cls = ""
                     sec = None
                     if d_before > 0.0 and d_after < 0.0:
-                        maxima.append((rt, _height_at_epoch_from_utide(rt)))
+                        maxima.append((rt, _height_at_epoch_from_rec(rt)))
                         cls = "max_sign"
                     elif d_before < 0.0 and d_after > 0.0:
-                        minima.append((rt, _height_at_epoch_from_utide(rt)))
+                        minima.append((rt, _height_at_epoch_from_rec(rt)))
                         cls = "min_sign"
                     else:
                         sec = _second_derivative_at_epoch_numeric(rt)
                         if sec < -EPS_DERIV:
-                            maxima.append((rt, _height_at_epoch_from_utide(rt)))
+                            maxima.append((rt, _height_at_epoch_from_rec(rt)))
                             cls = "max_sec"
                         elif sec > EPS_DERIV:
-                            minima.append((rt, _height_at_epoch_from_utide(rt)))
+                            minima.append((rt, _height_at_epoch_from_rec(rt)))
                             cls = "min_sec"
                         else:
                             cls = "ambiguous"
@@ -862,7 +865,7 @@ class TideProxy:
                         except Exception:
                             root = None
                         if root is not None and root >= now_ts:
-                            h = _height_at_epoch_from_utide(root)
+                            h = _height_at_epoch_from_rec(root)
                             sec = _second_derivative_at_epoch_numeric(root)
                             if sec < -EPS_DERIV and next_high_tuple is None:
                                 next_high_tuple = (root, h)
@@ -954,15 +957,14 @@ class TideProxy:
             _LOGGER.debug("Physical tide_strength proxy failed, falling back to phase heuristic: %s", e, exc_info=True)
             tide_strength_value = float(_compute_tide_strength_phase_heuristic(_coerce_phase(moon_phases[0] if moon_phases else None)))
 
-        # --- NEW: compute tide_phase as strings (rising/falling/high/low) ---
+        # --- compute tide_phase as strings (rising/falling/high/low) ---
         try:
             maxima_epochs = set([float(x[0]) for x in (maxima if 'maxima' in locals() else [])])
             minima_epochs = set([float(x[0]) for x in (minima if 'minima' in locals() else [])])
 
             tide_phase_list: List[str] = []
             def _derivative_at_epoch_local(epoch_ts: float) -> float:
-                # numeric derivative based on UTide reconstructed heights
-                # reuse interpolation and numeric derivative helpers from above
+                # numeric derivative based on reconstructed heights
                 return float(np.sign(_derivative_at_epoch_numeric(epoch_ts))) * abs(_derivative_at_epoch_numeric(epoch_ts))
 
             for dt in dt_objs:
@@ -1035,14 +1037,13 @@ class TideProxy:
 
         raw_tide: Dict[str, Any] = {
             "timestamps": [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs],
-            # Removed tide_height_m per request
             # Add explicit numeric moon_phase separate from tide_phase strings
             "moon_phase": moon_phases,
             "tide_phase": tide_phase_list,
             "tide_phase_name": tide_phase_name_list,
             "tide_strength": float(round(tide_strength_value, 3)),
             "confidence": "in_memory_model",
-            "source": "utide_reconstruction",
+            "source": "utide_reconstruct",
             "_helpers": {
                 "constituents": self._constituents,
                 "t_anchor": float(t_anchor),
