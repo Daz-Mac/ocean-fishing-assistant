@@ -196,21 +196,11 @@ def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, lati
     """
     Reconstruct tidal heights using UTide.reconstruct exclusively (no fallback).
 
-    Parameters
-    - t_arr: array-like of datetimes or numeric timestamps (seconds since epoch)
-    - amp_arr: 1-D array of amplitudes (meters) ordered to match `names`
-    - pha_arr: 1-D array of phases (degrees) ordered to match `names`
-    - names: list of constituent short names (e.g., ['M2','S2',...])
-    - reftime_dt: reference datetime (anchor) used for UTide reftime (datetime or numeric epoch seconds)
-    - latitude: site latitude in degrees (used by UTide aux.lat)
-
-    Returns
-    - 1-D numpy array of reconstructed heights (float) same length as t_arr
-
-    Raises
-    - RuntimeError if UTide is not available or reconstruct fails
+    Changes vs previous: ensure non-zero confidence arrays (A_ci/g_ci) and pass naive UTC datetimes
+    to avoid divide-by-zero and timezone warnings from UTide internals.
     """
     try:
+        import warnings
         import utide  # type: ignore
         from utide.utilities import Bunch  # type: ignore
         from utide import harmonics  # type: ignore
@@ -228,36 +218,38 @@ def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, lati
     if not (amps.size == phas.size == len(names_list)):
         raise ValueError("amp/phase/names length mismatch")
 
-    # Convert numeric timestamps -> datetimes (UTC); keep datetimes as-is
+    # Convert numeric timestamps -> datetimes (UTC); keep datetimes as-is otherwise.
+    # IMPORTANT: convert to naive UTC datetimes (tzinfo=None) because UTide's numpy conversion
+    # emits a timezone-related warning when fed timezone-aware datetimes.
     t_datetime_list = []
     if np.issubdtype(t_np.dtype, np.number):
         for v in t_np:
-            t_datetime_list.append(datetime.fromtimestamp(float(v), tz=timezone.utc))
+            dt_utc = datetime.fromtimestamp(float(v), tz=timezone.utc)
+            t_datetime_list.append(dt_utc.replace(tzinfo=None))
     else:
         for v in t_np:
             if isinstance(v, datetime):
                 dt = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
-                t_datetime_list.append(dt)
+                dt_utc = dt.astimezone(timezone.utc)
+                t_datetime_list.append(dt_utc.replace(tzinfo=None))
             else:
                 parsed = dt_util.parse_datetime(str(v))
                 if parsed is None:
                     raise ValueError(f"Unsupported time element in t_arr: {v!r}")
-                t_datetime_list.append(parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc))
+                dt_utc = parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                t_datetime_list.append(dt_utc.replace(tzinfo=None))
 
-    # Ensure reftime_dt is a datetime (UTC)
+    # Ensure reftime_dt is a datetime (UTC), but keep tzinfo (UTide expects a reftime datenum - we'll convert it below)
     if not isinstance(reftime_dt, datetime):
         try:
             reftime_dt = datetime.fromtimestamp(float(reftime_dt), tz=timezone.utc)
         except Exception as e:
             raise ValueError("reftime_dt must be datetime or numeric timestamp") from e
-    if reftime_dt.tzinfo is None:
-        reftime_dt = reftime_dt.replace(tzinfo=timezone.utc)
-    else:
-        reftime_dt = reftime_dt.astimezone(timezone.utc)
+    reftime_dt_utc = reftime_dt.astimezone(timezone.utc).replace(tzinfo=None)
 
     # Compute UTide's python-gregorian datenum for reftime
     try:
-        reftime_num = tc._python_gregorian_datenum(reftime_dt)
+        reftime_num = tc._python_gregorian_datenum(reftime_dt_utc)
     except Exception as exc:
         _LOGGER.exception("Failed to compute UTide reftime datenum: %s", exc)
         raise RuntimeError("UTide time conversion failed") from exc
@@ -270,7 +262,7 @@ def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, lati
     lind_list = []
     for nm in names_list:
         if nm not in constit_index:
-            raise KeyError(f"Constituent '{nm}' not known to UTide.constit_index_dict")
+            raise KeyError(f"Constituent '{nm}' not known to Utide.constit_index_dict")
         lind_idx = int(constit_index[nm]) - 1  # UTide mapping is 1-based -> convert to 0-based
         lind_list.append(int(lind_idx))
     lind_arr = np.atleast_1d(lind_list).astype(int)
@@ -305,21 +297,31 @@ def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, lati
 
     coef["aux"] = aux
 
-    # --- Ensure UTide fields expected by reconstruct exist ---
-    # UTide.reconstruct expects confidence-interval arrays such as 'A_ci' (and may access 'g_ci').
-    # Provide minimal zero-valued arrays of the correct shape to satisfy reconstruct.
+    # Provide tiny non-zero confidence arrays to avoid divide-by-zero in UTide internals.
+    # Scale the A_ci by the amplitude magnitude to keep SNR numerically stable.
     try:
-        coef["A_ci"] = np.zeros_like(coef["A"], dtype=float)
-        coef["g_ci"] = np.zeros_like(coef["g"], dtype=float)
+        eps_rel = 1e-6
+        eps_abs_min = 1e-8
+        A_abs = np.abs(coef["A"])
+        coef["A_ci"] = np.maximum(A_abs * eps_rel, eps_abs_min).astype(float)
+        coef["g_ci"] = np.full_like(coef["g"], fill_value=1e-3, dtype=float)  # small phase CI (degrees)
+        # UTide sometimes expects additional fields; provide them as minimal safe placeholders.
+        try:
+            coef["A_ci_full"] = np.tile(coef["A_ci"], (1,))  # harmless placeholder if ignored
+        except Exception:
+            pass
     except Exception:
-        # If adding these fields fails for some reason, log and let reconstruct raise a clear error.
-        _LOGGER.debug("Failed to attach A_ci/g_ci defaults to coef; reconstruct may error", exc_info=True)
+        _LOGGER.debug("Failed to attach non-zero A_ci/g_ci defaults to coef; reconstruct may warn", exc_info=True)
 
     # Call utide.reconstruct with datetime list (reconstruct will normalize)
     try:
-        tide_bunch = utide.reconstruct(np.array(t_datetime_list, dtype=object), coef, epoch=None, verbose=False)
+        # suppress the specific RuntimeWarning from divide-by-zero inside UTide's internals (we provided A_ci so should not happen,
+        # but be defensive). Do not silence other warnings.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            tide_bunch = utide.reconstruct(np.array(t_datetime_list, dtype=object), coef, epoch=None, verbose=False)
     except Exception as exc:
-        _LOGGER.exception("UTide.reconstruct failed (names=%s reftime=%s): %s", names_list, reftime_dt, exc)
+        _LOGGER.exception("UTide.reconstruct failed (names=%s reftime=%s): %s", names_list, reftime_dt_utc, exc)
         raise RuntimeError(f"UTide.reconstruct failed: {exc}") from exc
 
     # Extract heights (tide.h) or return 'u' if 2D output present
