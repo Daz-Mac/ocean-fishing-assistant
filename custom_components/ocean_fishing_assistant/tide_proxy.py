@@ -305,6 +305,16 @@ def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, lati
 
     coef["aux"] = aux
 
+    # --- Ensure UTide fields expected by reconstruct exist ---
+    # UTide.reconstruct expects confidence-interval arrays such as 'A_ci' (and may access 'g_ci').
+    # Provide minimal zero-valued arrays of the correct shape to satisfy reconstruct.
+    try:
+        coef["A_ci"] = np.zeros_like(coef["A"], dtype=float)
+        coef["g_ci"] = np.zeros_like(coef["g"], dtype=float)
+    except Exception:
+        # If adding these fields fails for some reason, log and let reconstruct raise a clear error.
+        _LOGGER.debug("Failed to attach A_ci/g_ci defaults to coef; reconstruct may error", exc_info=True)
+
     # Call utide.reconstruct with datetime list (reconstruct will normalize)
     try:
         tide_bunch = utide.reconstruct(np.array(t_datetime_list, dtype=object), coef, epoch=None, verbose=False)
