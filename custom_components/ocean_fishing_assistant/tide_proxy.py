@@ -132,21 +132,22 @@ def _coerce_phase(phase: Any) -> Optional[float]:
         return None
 
 
-# UTide is a strict requirement per your request
-try:
-    import utide  # type: ignore
-    from utide import harmonics  # type: ignore
-    # utide.reconstruct is the canonical reconstruction module; import it for use.
-    from utide import reconstruct  # type: ignore
-except Exception as exc:
-    raise RuntimeError(
-        "UTide is required for tide reconstruction but is not available. "
-        "Install UTide in the Home Assistant environment so this integration can run."
-    ) from exc
-
-
 def nfactors(jd: float, names: Sequence[str], latitude: float = 0.0) -> Dict[str, Dict[str, float]]:
-    # Uses utide.harmonics.FUV (same behavior as before)
+    """
+    Compute nodal correction factors using UTide.harmonics.FUV.
+
+    NOTE: UTide is imported here (inside this function) so the import runs in the executor
+    (nfactors is called via hass.async_add_executor_job), avoiding blocking imports at module load.
+    """
+    try:
+        import utide  # type: ignore
+        from utide import harmonics  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "UTide is required for nfactors but is not available in this environment. "
+            "Install UTide into Home Assistant's Python environment."
+        ) from exc
+
     constit_index = getattr(utide, "constit_index_dict", None)
     if constit_index is None:
         raise RuntimeError("utide.constit_index_dict not found in installed UTide; cannot map constituent names.")
@@ -537,32 +538,58 @@ class TideProxy:
         # Call UTide reconstruct inside executor (blocking)
         def _blocking_utide_reconstruct(jd_arr, names, amps, phases_deg):
             """
-            Use utide.reconstruct to compute reconstructed tide heights for JD array.
-            Note: UTide reconstruct API historically accepts arrays and a 'cons' or similar structure.
-            We call reconstruct.reconstruct(...) but signature may vary across UTide versions.
-            The typical pattern:
-                rec = reconstruct.reconstruct(t, amp, pha, con=None, names=names)
-            If your utide version requires a different signature, adjust this helper accordingly.
+            Use UTide to compute reconstructed tide heights for JD array.
+            Imports and detection of reconstruct callable are done here (executor thread), avoiding event-loop blocking.
             """
+            # Local import in executor
+            try:
+                import utide as _utide  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(
+                    "UTide is required for tide reconstruction but is not available in this environment."
+                ) from exc
+
+            # Try to locate a reconstruct callable in a robust way across UTide versions:
+            # - utide.reconstruct might be a module (with reconstruct.reconstruct)
+            # - utide.reconstruct might be a function (callable)
+            # - utide.reconstruct could be absent; try import utide.reconstruct module explicitly
+            rec_candidate = getattr(_utide, "reconstruct", None)
+
+            def _invoke_reconstruct(*args, **kwargs):
+                # If candidate is a callable function, call it directly.
+                if callable(rec_candidate) and not hasattr(rec_candidate, "reconstruct"):
+                    return rec_candidate(*args, **kwargs)
+                # If candidate is a module-like object with a reconstruct attribute, use that.
+                if rec_candidate is not None and hasattr(rec_candidate, "reconstruct") and callable(getattr(rec_candidate, "reconstruct")):
+                    return rec_candidate.reconstruct(*args, **kwargs)
+                # Fallback: try import utide.reconstruct module explicitly
+                try:
+                    import importlib
+                    recon_mod = importlib.import_module("utide.reconstruct")
+                    if hasattr(recon_mod, "reconstruct") and callable(getattr(recon_mod, "reconstruct")):
+                        return recon_mod.reconstruct(*args, **kwargs)
+                except Exception:
+                    pass
+                raise RuntimeError("Could not locate a usable 'reconstruct' callable in installed UTide package.")
+
             # Convert to numpy arrays of correct dtype
             t_arr = np.asarray(jd_arr, dtype=float)
             amp_arr = np.asarray(amps, dtype=float)
             pha_arr = np.asarray(phases_deg, dtype=float)
 
-            # The utide.reconstruct module provides a reconstruct function; try a couple of common signatures.
+            # Try common signatures in a safe order
             try:
-                # Signature attempt 1 (common): reconstruct.reconstruct(t, amp, pha, cons=None, names=names)
+                # Attempt common signature: reconstruct(t, amp, pha, names=names)
                 try:
-                    return reconstruct.reconstruct(t_arr, amp_arr, pha_arr, names=names)
+                    return _invoke_reconstruct(t_arr, amp_arr, pha_arr, names=names)
                 except TypeError:
-                    # Signature attempt 2: reconstruct.reconstruct(t, names, amp, pha)
+                    # Attempt alternative ordering: reconstruct(t, names, amp, pha)
                     try:
-                        return reconstruct.reconstruct(t_arr, names, amp_arr, pha_arr)
+                        return _invoke_reconstruct(t_arr, names, amp_arr, pha_arr)
                     except TypeError:
-                        # Signature attempt 3: reconstruct.reconstruct(t, amp, pha, con=None)
-                        return reconstruct.reconstruct(t_arr, amp_arr, pha_arr)
+                        # Final fallback: reconstruct(t, amp, pha)
+                        return _invoke_reconstruct(t_arr, amp_arr, pha_arr)
             except Exception as exc:
-                # Re-raise with context to the outer caller
                 raise RuntimeError(f"UTide reconstruct call failed: {exc}") from exc
 
         try:
