@@ -609,6 +609,28 @@ class TideProxy:
         if rec_heights.size != len(dt_objs):
             raise RuntimeError("UTide reconstructed heights length mismatch with requested timestamps")
 
+        # Debug: log a short summary of the UTide reconstruction results (min/max/mean and sample timestamps)
+        try:
+            if rec_heights.size > 0:
+                min_idx = int(np.argmin(rec_heights))
+                max_idx = int(np.argmax(rec_heights))
+                _LOGGER.debug(
+                    "UTide reconstruct: samples=%d min=%.6f at %s max=%.6f at %s mean=%.6f",
+                    int(rec_heights.size),
+                    float(np.min(rec_heights)),
+                    dt_objs[min_idx].isoformat().replace('+00:00', 'Z') if min_idx < len(dt_objs) else 'n/a',
+                    float(np.max(rec_heights)),
+                    dt_objs[max_idx].isoformat().replace('+00:00', 'Z') if max_idx < len(dt_objs) else 'n/a',
+                    float(np.mean(rec_heights)),
+                )
+                n_show = min(12, int(rec_heights.size))
+                sample_lines = []
+                for i in range(n_show):
+                    sample_lines.append(f"{dt_objs[i].isoformat().replace('+00:00','Z')}:{rec_heights[i]:.6f}")
+                _LOGGER.debug("UTide reconstruct sample first %d: %s", n_show, sample_lines)
+        except Exception:
+            _LOGGER.debug("Failed to log UTide reconstruct summary", exc_info=True)
+
         # Optional clamping / scaling (same semantics as previous code)
         if self._auto_clamp_enabled:
             try:
