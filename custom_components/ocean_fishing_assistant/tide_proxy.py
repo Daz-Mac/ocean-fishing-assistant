@@ -364,8 +364,8 @@ class TideProxy:
         phase_offset_hours: float = 0.0,
         # new flags for diagnostics / tests:
         apply_nodal_corrections: bool = True,
-        phase_sign_flip: bool = True,
-        force_apply_longitude_phase_shift: bool = False,
+        phase_sign_flip: bool = False,
+        force_apply_longitude_phase_shift: bool = True,
     ):
         self.hass = hass
         self.latitude = float(latitude or 0.0)
