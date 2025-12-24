@@ -683,7 +683,9 @@ class TideProxy:
                 # Try use nfactors helper to compute f/u for our constituents at jd_anchor
                 nf = None
                 try:
-                    nf = nfactors(jd_anchor, self._constituents, self.latitude)
+                    nf = await self.hass.async_add_executor_job(
+                        nfactors, jd_anchor, self._constituents, self.latitude
+                    )
                 except Exception:
                     _LOGGER.debug("nfactors helper failed or not available; skipping nodal application", exc_info=True)
                     nf = None
