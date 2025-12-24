@@ -362,6 +362,10 @@ class TideProxy:
         min_height_floor: Optional[float] = None,
         max_amplitude_m: Optional[float] = None,
         phase_offset_hours: float = 0.0,
+        # new flags for diagnostics / tests:
+        apply_nodal_corrections: bool = True,
+        phase_sign_flip: bool = False,
+        force_apply_longitude_phase_shift: bool = False,
     ):
         self.hass = hass
         self.latitude = float(latitude or 0.0)
@@ -376,6 +380,11 @@ class TideProxy:
         self._min_height_floor = None if min_height_floor is None else float(min_height_floor)
         self._max_amplitude_m = None if max_amplitude_m is None else float(max_amplitude_m)
         self._phase_offset_hours = float(phase_offset_hours)
+
+        # new diagnostic flags
+        self.apply_nodal_corrections = bool(apply_nodal_corrections)
+        self.phase_sign_flip = bool(phase_sign_flip)
+        self.force_apply_longitude_phase_shift = bool(force_apply_longitude_phase_shift)
 
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
@@ -414,13 +423,16 @@ class TideProxy:
             pass
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f",
+            "TideProxy initialized lat=%s lon=%s coef_len=%d bias=%.6f clamp=%s phase_offset_hours=%.3f apply_nodal=%s phase_flip=%s force_lon_shift=%s",
             self.latitude,
             self.longitude,
             self._coef_vec.size,
             self._bias,
             self._auto_clamp_enabled,
             self._phase_offset_hours,
+            self.apply_nodal_corrections,
+            self.phase_sign_flip,
+            self.force_apply_longitude_phase_shift,
         )
 
     def _build_default_coef_vec(self, m2_amp: float) -> np.ndarray:
@@ -608,7 +620,7 @@ class TideProxy:
         anchor_epoch = anchor_dt.timestamp() if anchor_dt else now.timestamp()
         period_seconds = _TIDE_HALF_DAY_HOURS * _SECONDS_PER_HOUR
 
-        # Do NOT apply any longitude-derived phase shift here.
+        # t_anchor initial selection and logging
         t_anchor = anchor_epoch
         if moon_transit_dt is None:
             _LOGGER.debug("Moon transit not found; using anchor_epoch without longitude-derived phase shift")
@@ -617,6 +629,16 @@ class TideProxy:
                           moon_transit_dt.isoformat().replace("+00:00", "Z") if moon_transit_dt else "None",
                           anchor_epoch,
                           self._phase_offset_hours)
+
+        # Optionally force apply a longitude-derived phase shift (experimental)
+        lon_shift = 0.0
+        if self.force_apply_longitude_phase_shift:
+            try:
+                lon_shift = float(self.longitude) / 15.0
+                t_anchor = float(t_anchor) + lon_shift * _SECONDS_PER_HOUR
+                _LOGGER.debug("Force-applied longitude phase shift: lon=%s -> %.3f hours; new t_anchor=%s", self.longitude, lon_shift, datetime.fromtimestamp(t_anchor, tz=timezone.utc).isoformat().replace("+00:00", "Z"))
+            except Exception:
+                _LOGGER.exception("Failed to apply longitude-derived phase shift")
 
         # Apply manual phase offset (hours) for empirical/site tuning (positive -> shift anchor forward)
         try:
@@ -637,7 +659,8 @@ class TideProxy:
         B_orig = B.copy()
 
         jd_anchor = float(t_anchor) / 86400.0 + 2440587.5
-        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s phase_offset_hours=%.3f", t_anchor, jd_anchor, self._phase_offset_hours)
+        _LOGGER.debug("Nodal correction context: t_anchor=%s jd_anchor=%s phase_offset_hours=%.3f force_lon_shift=%s",
+                      t_anchor, jd_anchor, self._phase_offset_hours, self.force_apply_longitude_phase_shift)
 
         # Convert internal coef_vec (A_cos,B_sin) into amplitude+phase (meters, degrees)
         amp_list: List[float] = []
@@ -649,8 +672,34 @@ class TideProxy:
             # phase from A (cos) and B (sin): phi = atan2(B, A) in radians; convert to degrees
             phi_rad = math.atan2(Bi, Ai)
             phi_deg = math.degrees(phi_rad)
+            if self.phase_sign_flip:
+                phi_deg = -phi_deg
             amp_list.append(float(R))
             phase_deg_list.append(float(phi_deg))
+
+        # If nodal corrections should be applied, attempt a conservative approach:
+        if self.apply_nodal_corrections:
+            try:
+                # Try use nfactors helper to compute f/u for our constituents at jd_anchor
+                nf = None
+                try:
+                    nf = nfactors(jd_anchor, self._constituents, self.latitude)
+                except Exception:
+                    _LOGGER.debug("nfactors helper failed or not available; skipping nodal application", exc_info=True)
+                    nf = None
+                if nf:
+                    # apply f (scale amplitude) and u (deg) to phase
+                    for idx, cname in enumerate(self._constituents):
+                        entry = nf.get(cname)
+                        if entry is None:
+                            continue
+                        fval = float(entry.get("f", 1.0))
+                        udeg = float(entry.get("u", 0.0))
+                        amp_list[idx] = float(amp_list[idx] * fval)
+                        phase_deg_list[idx] = float((phase_deg_list[idx] + udeg) % 360.0)
+                    _LOGGER.debug("Applied nodal corrections from nfactors at jd_anchor=%s", jd_anchor)
+            except Exception:
+                _LOGGER.exception("Applying nodal corrections failed; continuing without them")
 
         # --- UTide reconstruct path (UTide only; no fallback) ---
         try:
@@ -668,6 +717,14 @@ class TideProxy:
         except Exception as exc:
             _LOGGER.exception("UTide reconstruction failed: %s", exc)
             raise RuntimeError(f"UTide reconstruct call failed: {exc}") from exc
+
+        # Apply vertical bias if configured
+        try:
+            if float(self._bias) != 0.0:
+                rec_heights = rec_heights + float(self._bias)
+                _LOGGER.debug("Applied vertical bias to reconstruction: %s m", self._bias)
+        except Exception:
+            _LOGGER.exception("Failed applying vertical bias", exc_info=True)
 
         # Sanity check: rec_heights length must equal input times length
         if rec_heights.size != len(dt_objs):
@@ -907,12 +964,13 @@ class TideProxy:
             # Add helpful debug about selected extrema
             try:
                 _LOGGER.debug(
-                    "Selected next extrema: next_high=%s next_low=%s (first_future_idx_sorted=%s scan_range=%s->%s)",
+                    "Selected next extrema: next_high=%s next_low=%s (first_future_idx_sorted=%s scan_range=%s->%s) classification_debug_sample=%s",
                     next_high,
                     next_low,
                     first_future_idx_sorted,
                     datetime.fromtimestamp(scan_start, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
                     datetime.fromtimestamp(scan_end, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                    classification_debug,
                 )
             except Exception:
                 pass
@@ -975,13 +1033,11 @@ class TideProxy:
             minima_epochs = set([float(x[0]) for x in (minima if 'minima' in locals() else [])])
 
             tide_phase_list: List[str] = []
-            def _derivative_at_epoch_local(epoch_ts: float) -> float:
-                # numeric derivative based on reconstructed heights
-                return float(np.sign(_derivative_at_epoch_numeric(epoch_ts))) * abs(_derivative_at_epoch_numeric(epoch_ts))
 
             for dt in dt_objs:
                 epoch = float(dt.timestamp())
                 marked = False
+                # label if within 60s of a detected extrema
                 for me in maxima_epochs:
                     if abs(epoch - me) <= 60.0:
                         tide_phase_list.append("high")
@@ -998,10 +1054,13 @@ class TideProxy:
                     continue
                 dval = _derivative_at_epoch_numeric(epoch)
                 if not np.isfinite(dval):
-                    raise RuntimeError(f"Non-finite derivative while classifying tide_phase at epoch {epoch}")
-                if abs(dval) < 1e-12:
-                    # treat near-zero derivative as ambiguous and fail strictly
-                    raise RuntimeError(f"Zero/ambiguous derivative while classifying tide_phase at epoch {epoch}")
+                    # fallback to flat
+                    tide_phase_list.append("flat")
+                    continue
+                # Relax the near-zero test: treat very small slopes as flat rather than raising
+                if abs(dval) < 1e-9:
+                    tide_phase_list.append("flat")
+                    continue
                 if dval > 0.0:
                     tide_phase_list.append("rising")
                 else:
@@ -1018,6 +1077,7 @@ class TideProxy:
             "falling": "Falling",
             "high": "High Tide",
             "low": "Low Tide",
+            "flat": "Flat",
         }
         tide_phase_name_list: List[str] = []
         try:
@@ -1063,6 +1123,10 @@ class TideProxy:
                 "period_seconds": float(period_seconds),
                 "coef_vec_len": int(self._coef_vec.size),
                 "phase_offset_hours": float(self._phase_offset_hours),
+                "force_lon_shift": bool(self.force_apply_longitude_phase_shift),
+                "lon_shift_hours": float(lon_shift),
+                "apply_nodal_corrections": bool(self.apply_nodal_corrections),
+                "phase_sign_flip": bool(self.phase_sign_flip),
             },
             "next_high": next_high_obj,
             "next_low": next_low_obj,
