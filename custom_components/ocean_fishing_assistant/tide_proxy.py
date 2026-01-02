@@ -396,6 +396,9 @@ class TideProxy:
         # mapping of constituent -> period hours when adopting from port (computed via UTide)
         self._constituent_period_hours: Dict[str, float] = {}
 
+        # store the JD (float) that coefficients were referenced to; REQUIRED for strict UTide.reconstruct usage.
+        self._coef_reftime_jd: Optional[float] = None
+
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
         except Exception:
@@ -466,7 +469,14 @@ class TideProxy:
             vals.extend([a, b])
         return np.asarray(vals, dtype=float)
 
-    def set_coefficients(self, coef_vec: Sequence[float], bias: Optional[float] = None) -> bool:
+    def set_coefficients(self, coef_vec: Sequence[float], bias: Optional[float] = None, reftime_jd: Optional[float] = None) -> bool:
+        """
+        Set coefficient vector (A_cos, B_sin). Optionally set bias and the coefficient reference JD.
+
+        Important: if reftime_jd is provided it will be stored and later used as the strict epoch
+        for UTide.reconstruct. If you want TideProxy to reconstruct strictly, supply the JD epoch
+        that the phases in coef_vec correspond to.
+        """
         try:
             arr = np.asarray(coef_vec, dtype=float)
             if arr.size != 2 * len(self._constituents):
@@ -477,6 +487,15 @@ class TideProxy:
             self._coef_vec = arr.copy()
             if bias is not None:
                 self._bias = float(bias)
+            # only update reftime_jd when explicitly provided
+            if reftime_jd is not None:
+                try:
+                    self._coef_reftime_jd = float(reftime_jd)
+                    _LOGGER.info("set_coefficients applied and coef_reftime_jd set to %s", self._coef_reftime_jd)
+                except Exception:
+                    _LOGGER.warning("set_coefficients: invalid reftime_jd provided; ignoring")
+            else:
+                _LOGGER.info("set_coefficients applied (reftime_jd unchanged)")
             self._cache = None
             try:
                 mean_abs_A = float(np.mean(np.abs(self._coef_vec[0::2])))
@@ -720,8 +739,10 @@ class TideProxy:
                 self._constituents = list(constituent_order)
                 # store constituent period hours for local use
                 self._constituent_period_hours = dict(periods_map)
-                # set coefficients (this validates length)
-                applied = self.set_coefficients(coef_vals)
+
+                # IMPORTANT (strict): set coefficients AND store the JD the coefficients are referenced to.
+                # Pass the jd_ref into set_coefficients so instance._coef_reftime_jd is set atomically with the coefficients.
+                applied = self.set_coefficients(coef_vals, reftime_jd=jd_ref)
                 if not applied:
                     _LOGGER.error("set_coefficients rejected coefficients built from port %s", best.get("name"))
                     return None
@@ -732,7 +753,7 @@ class TideProxy:
                 except Exception:
                     pass
 
-                _LOGGER.info("Applied constituents from port '%s' (id=%s) dist=%.3f km; constituents=%s", best.get("name"), best.get("id"), best_dist, ",".join(self._constituents))
+                _LOGGER.info("Applied constituents from port '%s' (id=%s) dist=%.3f km; constituents=%s coef_reftime_jd=%s", best.get("name"), best.get("id"), best_dist, ",".join(self._constituents), self._coef_reftime_jd)
                 return best
             except Exception:
                 _LOGGER.exception("Failed to apply port constituents for port %s", best.get("name"))
@@ -967,14 +988,22 @@ class TideProxy:
 
         # --- UTide reconstruct path (UTide only; no fallback) ---
         try:
-            # Call the blocking UTide reconstruct in executor
+            # STRICT: require known coefficient reference epoch (JD). If not set, abort.
+            if self._coef_reftime_jd is None:
+                _LOGGER.error("Coefficient reference epoch (JD) is not set on TideProxy; cannot perform strict UTide.reconstruct. Aborting.")
+                raise RuntimeError("Coefficient reference epoch (JD) not set; cannot reconstruct tides strictly.")
+
+            # convert stored coef_reftime_jd -> epoch seconds and datetime UTC
+            rf_epoch_s = (float(self._coef_reftime_jd) - 2440587.5) * 86400.0
+            reftime_dt = datetime.fromtimestamp(rf_epoch_s, tz=timezone.utc)
+
             rec_result = await self.hass.async_add_executor_job(
                 _blocking_utide_reconstruct,
                 dt_objs,
                 np.asarray(amp_list, dtype=float),
                 np.asarray(phase_deg_list, dtype=float),
                 self._constituents,
-                datetime.fromtimestamp(t_anchor, tz=timezone.utc),
+                reftime_dt,
                 float(self.latitude),
             )
             rec_heights = np.asarray(rec_result, dtype=float)
@@ -1391,6 +1420,8 @@ class TideProxy:
                 "lon_shift_hours": float(lon_shift),
                 "apply_nodal_corrections": bool(self.apply_nodal_corrections),
                 "phase_sign_flip": bool(self.phase_sign_flip),
+                # include the JD the coefficients were referenced to (strict)
+                "coef_reftime_jd": float(self._coef_reftime_jd) if self._coef_reftime_jd is not None else None,
             },
             "next_high": next_high_obj,
             "next_low": next_low_obj,
