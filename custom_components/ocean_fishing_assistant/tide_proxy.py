@@ -272,6 +272,12 @@ def _blocking_utide_reconstruct(t_arr, amp_arr, pha_arr, names, reftime_dt, lati
     freq_full = harmonics.linearized_freqs(reftime_num)
     frq_sel = np.asarray(freq_full[lind_arr], dtype=float)
 
+    # Validate frq_sel: no zeros or non-finite values allowed
+    if not np.all(np.isfinite(frq_sel)) or np.any(np.abs(frq_sel) < 1e-15):
+        bad_idx = np.where((~np.isfinite(frq_sel)) | (np.abs(frq_sel) < 1e-15))[0].tolist()
+        bad_names = [names_list[i] for i in bad_idx]
+        raise RuntimeError(f"UTide returned zero/invalid frequency for constituents: {bad_names}")
+
     # Build minimal coef Bunch expected by utide.reconstruct
     coef = Bunch()
     coef["name"] = np.asarray(names_list, dtype=object)
@@ -533,7 +539,7 @@ class TideProxy:
         """
         Use UTide harmonics.linearized_freqs to compute constituent periods (hours) for the given names.
         Runs in executor because UTide is a blocking import.
-        Raises on missing UTide or unknown constituent names.
+        Raises on missing UTide or unknown constituent names or zero/invalid frequencies.
         """
         def _blocking(names_local, reftime_jd_local):
             import utide  # type: ignore
@@ -550,6 +556,13 @@ class TideProxy:
             import numpy as _np
             lind_arr = _np.atleast_1d(lind_list).astype(int)
             frq_sel = _np.asarray(freq_full[lind_arr], dtype=float)  # cycles per day
+
+            # Validate frq_sel
+            if not _np.all(_np.isfinite(frq_sel)) or _np.any(_np.abs(frq_sel) < 1e-15):
+                bad_idx = _np.where((~_np.isfinite(frq_sel)) | (_np.abs(frq_sel) < 1e-15))[0].tolist()
+                bad_names = [names_local[i] for i in bad_idx]
+                raise RuntimeError(f"UTide returned zero/invalid frequency for constituents: {bad_names}")
+
             periods_days = 1.0 / frq_sel
             periods_hours = periods_days * 24.0
             out = {}
@@ -618,6 +631,7 @@ class TideProxy:
         then replace this TideProxy's constituent list and coefficients with those from the port.
 
         Returns the matched port dict on success, or None on failure / no match.
+        This implementation reads the file in an executor to avoid blocking the event loop.
         """
         try:
             try:
@@ -631,8 +645,22 @@ class TideProxy:
                 _LOGGER.debug("ports file not found at %s", path)
                 return None
 
-            with open(path, "r", encoding="utf-8") as fh:
-                obj = json.load(fh)
+            # Read file contents in executor to avoid blocking the event loop
+            def _read_file(p):
+                with open(p, "r", encoding="utf-8") as fh:
+                    return fh.read()
+
+            try:
+                text = await self.hass.async_add_executor_job(_read_file, path)
+            except Exception as exc:
+                _LOGGER.exception("Failed to read ports file %s in executor: %s", path, exc)
+                return None
+
+            try:
+                obj = json.loads(text)
+            except Exception as exc:
+                _LOGGER.exception("Failed to parse JSON from ports file %s: %s", path, exc)
+                return None
 
             ports = obj.get("ports", [])
             if not ports:
@@ -871,6 +899,9 @@ class TideProxy:
                 if ph is None:
                     _LOGGER.error("Missing period hours for constituent '%s' in instance mapping", k)
                     raise RuntimeError(f"Missing period mapping for constituent '{k}'")
+                if not math.isfinite(ph) or ph <= 0.0:
+                    _LOGGER.error("Invalid period hours for constituent '%s': %s", k, ph)
+                    raise RuntimeError(f"Invalid period hours for constituent '{k}': {ph}")
                 periods_sec[k] = float(ph) * _SECONDS_PER_HOUR
         else:
             # fallback to global mapping (old behaviour) but if a constituent is missing -> raise
