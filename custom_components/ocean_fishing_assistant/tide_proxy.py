@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncio
+import json
 
 from homeassistant.util import dt as dt_util
 
@@ -386,6 +387,9 @@ class TideProxy:
         self.phase_sign_flip = bool(phase_sign_flip)
         self.force_apply_longitude_phase_shift = bool(force_apply_longitude_phase_shift)
 
+        # mapping of constituent -> period hours when adopting from port (computed via UTide)
+        self._constituent_period_hours: Dict[str, float] = {}
+
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
         except Exception:
@@ -434,6 +438,18 @@ class TideProxy:
             self.phase_sign_flip,
             self.force_apply_longitude_phase_shift,
         )
+
+        # Attempt to load nearest port constituents in the background (non-blocking).
+        # If you prefer synchronous application, call await tide_proxy.load_nearest_port_constituents(...) from setup code.
+        try:
+            loop = getattr(self.hass, "loop", None)
+            if loop is not None:
+                loop.create_task(self.load_nearest_port_constituents("ports_constituents_sample.json"))
+            else:
+                # best-effort scheduling if hass.loop not present
+                asyncio.create_task(self.load_nearest_port_constituents("ports_constituents_sample.json"))
+        except Exception:
+            _LOGGER.debug("Scheduling load_nearest_port_constituents failed", exc_info=True)
 
     def _build_default_coef_vec(self, m2_amp: float) -> np.ndarray:
         vals: List[float] = []
@@ -498,6 +514,205 @@ class TideProxy:
             except Exception:
                 _LOGGER.exception("Failed to load Skyfield resources")
                 raise
+
+    # -------------------------
+    # New helpers for port constituents adoption
+    # -------------------------
+    def _haversine_km(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        # Returns distance in kilometers
+        R = 6371.0  # Earth radius km
+        lat1r = math.radians(lat1)
+        lat2r = math.radians(lat2)
+        dlat = lat2r - lat1r
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2.0) ** 2 + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2.0) ** 2
+        c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+        return R * c
+
+    async def _compute_constituent_period_hours_utide(self, names: Sequence[str], reftime_jd: float) -> Dict[str, float]:
+        """
+        Use UTide harmonics.linearized_freqs to compute constituent periods (hours) for the given names.
+        Runs in executor because UTide is a blocking import.
+        Raises on missing UTide or unknown constituent names.
+        """
+        def _blocking(names_local, reftime_jd_local):
+            import utide  # type: ignore
+            from utide import harmonics  # type: ignore
+            constit_index = getattr(utide, "constit_index_dict", None)
+            if constit_index is None:
+                raise RuntimeError("utide.constit_index_dict not available")
+            lind_list = []
+            for nm in names_local:
+                if nm not in constit_index:
+                    raise KeyError(f"Constituent '{nm}' not known to utide.constit_index_dict")
+                lind_list.append(int(constit_index[nm]) - 1)
+            freq_full = harmonics.linearized_freqs(float(reftime_jd_local))
+            import numpy as _np
+            lind_arr = _np.atleast_1d(lind_list).astype(int)
+            frq_sel = _np.asarray(freq_full[lind_arr], dtype=float)  # cycles per day
+            periods_days = 1.0 / frq_sel
+            periods_hours = periods_days * 24.0
+            out = {}
+            for i, nm in enumerate(names_local):
+                out[nm] = float(periods_hours[i])
+            return out
+
+        return await self.hass.async_add_executor_job(_blocking, list(names), float(reftime_jd))
+
+    def _build_coef_vec_from_port(self, port_consts: Dict[str, Any], constituent_order: Sequence[str], meta: Dict[str, Any]) -> List[float]:
+        """
+        Build coef vec [A_cos,B_sin,...] for given constituent order from the port constituents entry.
+        Expects amplitudes in meters and phases in degrees (but checks metadata).
+        """
+        amp_units = (meta.get("amp_units", "") or "").lower()
+        phase_units = (meta.get("phase_units", "") or "").lower()
+
+        def _amp_to_m(v):
+            if v is None:
+                return None
+            try:
+                a = float(v)
+            except Exception:
+                return None
+            if amp_units in ("cm", "centimeters"):
+                return a / 100.0
+            # assume meters otherwise
+            return a
+
+        def _phase_to_deg(v):
+            if v is None:
+                return None
+            try:
+                p = float(v)
+            except Exception:
+                return None
+            if phase_units in ("rad", "radians"):
+                return math.degrees(p)
+            return p
+
+        coef_vals: List[float] = [0.0] * (2 * len(constituent_order))
+        for i, cname in enumerate(constituent_order):
+            entry = port_consts.get(cname)
+            if entry is None:
+                # skip (no value); remain zero
+                continue
+            # common keys in sample: amp_m, phase_deg
+            amp_key = "amp_m" if "amp_m" in entry else ("amp" if "amp" in entry else None)
+            phase_key = "phase_deg" if "phase_deg" in entry else ("phase" if "phase" in entry else None)
+            amp_val = entry.get(amp_key) if amp_key is not None else None
+            phase_val = entry.get(phase_key) if phase_key is not None else None
+            amp_m = _amp_to_m(amp_val)
+            phase_deg = _phase_to_deg(phase_val)
+            if amp_m is None or phase_deg is None:
+                continue
+            phi_rad = math.radians(float(phase_deg))
+            A_cos = float(amp_m * math.cos(phi_rad))
+            B_sin = float(amp_m * math.sin(phi_rad))
+            coef_vals[2 * i] = A_cos
+            coef_vals[2 * i + 1] = B_sin
+        return coef_vals
+
+    async def load_nearest_port_constituents(self, filename: str = "ports_constituents_sample.json", max_distance_km: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """
+        Async: Load port constituents file from the integration data dir, find the nearest port to self.latitude/self.longitude,
+        then replace this TideProxy's constituent list and coefficients with those from the port.
+
+        Returns the matched port dict on success, or None on failure / no match.
+        """
+        try:
+            try:
+                data_dir = self.hass.config.path("custom_components", "ocean_fishing_assistant", "data")
+            except Exception:
+                from homeassistant.const import CONFIG_DIR  # type: ignore
+                data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
+
+            path = os.path.join(data_dir, filename)
+            if not os.path.isfile(path):
+                _LOGGER.debug("ports file not found at %s", path)
+                return None
+
+            with open(path, "r", encoding="utf-8") as fh:
+                obj = json.load(fh)
+
+            ports = obj.get("ports", [])
+            if not ports:
+                _LOGGER.debug("No ports entries in %s", path)
+                return None
+
+            # find nearest port
+            best = None
+            best_dist = float("inf")
+            for p in ports:
+                plat = p.get("lat")
+                plon = p.get("lon")
+                if plat is None or plon is None:
+                    continue
+                try:
+                    d = float(self._haversine_km(self.latitude, self.longitude, float(plat), float(plon)))
+                except Exception:
+                    continue
+                if d < best_dist:
+                    best_dist = d
+                    best = p
+
+            if best is None:
+                _LOGGER.debug("No valid ports with coordinates in %s", path)
+                return None
+
+            if max_distance_km is not None and best_dist > float(max_distance_km):
+                _LOGGER.debug("Nearest port %s is %.3f km away, exceeds max_distance_km=%.3f", best.get("name"), best_dist, max_distance_km)
+                return None
+
+            meta = obj.get("metadata", {})
+
+            # Constituent names as present in the port (stable deterministic ordering)
+            port_consts = best.get("constituents", {})
+            if not port_consts:
+                _LOGGER.debug("Port %s has no constituents", best.get("name"))
+                return None
+            constituent_order = list(port_consts.keys())
+
+            # compute a reference JD for frequency calculation (use current time)
+            now_epoch = datetime.now(timezone.utc).timestamp()
+            jd_ref = float(now_epoch) / 86400.0 + 2440587.5
+
+            # compute constituent periods via UTide
+            try:
+                periods_map = await self._compute_constituent_period_hours_utide(constituent_order, jd_ref)
+            except Exception as exc:
+                _LOGGER.exception("Failed to compute constituent periods via UTide for port %s: %s", best.get("name"), exc)
+                return None
+
+            # build coef vec
+            coef_vals = self._build_coef_vec_from_port(port_consts, constituent_order, meta)
+
+            # replace the object's constituent set and apply them
+            try:
+                # set new constituent ordering, store period mapping (hours)
+                self._constituents = list(constituent_order)
+                # store constituent period hours for local use
+                self._constituent_period_hours = dict(periods_map)
+                # set coefficients (this validates length)
+                applied = self.set_coefficients(coef_vals)
+                if not applied:
+                    _LOGGER.error("set_coefficients rejected coefficients built from port %s", best.get("name"))
+                    return None
+
+                # store provenance for debugging
+                try:
+                    self._constituents_source = {"file": filename, "port_id": best.get("id"), "port_name": best.get("name"), "distance_km": best_dist}
+                except Exception:
+                    pass
+
+                _LOGGER.info("Applied constituents from port '%s' (id=%s) dist=%.3f km; constituents=%s", best.get("name"), best.get("id"), best_dist, ",".join(self._constituents))
+                return best
+            except Exception:
+                _LOGGER.exception("Failed to apply port constituents for port %s", best.get("name"))
+                return None
+
+        except Exception:
+            _LOGGER.exception("Error loading ports constituents file %s", filename)
+            return None
 
     async def get_tide_for_timestamps(self, timestamps: Sequence[Any], *, location_tz: str) -> Dict[str, Any]:
         """
@@ -648,7 +863,23 @@ class TideProxy:
         except Exception:
             pass
 
-        periods_sec = {k: (CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR) for k in self._constituents}
+        # build periods_sec and omegas for current constituents. Prefer instance stored mapping from UTide if present.
+        periods_sec: Dict[str, float] = {}
+        if hasattr(self, "_constituent_period_hours") and self._constituent_period_hours:
+            for k in self._constituents:
+                ph = self._constituent_period_hours.get(k)
+                if ph is None:
+                    _LOGGER.error("Missing period hours for constituent '%s' in instance mapping", k)
+                    raise RuntimeError(f"Missing period mapping for constituent '{k}'")
+                periods_sec[k] = float(ph) * _SECONDS_PER_HOUR
+        else:
+            # fallback to global mapping (old behaviour) but if a constituent is missing -> raise
+            for k in self._constituents:
+                if k not in CONSTITUENT_PERIOD_HOURS:
+                    _LOGGER.error("Constituent '%s' not in CONSTITUENT_PERIOD_HOURS and no instance mapping available", k)
+                    raise RuntimeError(f"Constituent '{k}' not known (no period mapping)")
+                periods_sec[k] = CONSTITUENT_PERIOD_HOURS[k] * _SECONDS_PER_HOUR
+
         omegas = {k: 2.0 * math.pi / periods_sec[k] for k in periods_sec}
 
         coef_arr = np.asarray(self._coef_vec, dtype=float)
