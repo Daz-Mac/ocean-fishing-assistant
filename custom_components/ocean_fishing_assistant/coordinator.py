@@ -1,4 +1,3 @@
-# custom_components/ocean_fishing_assistant/coordinator.py
 """
 Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
 """
@@ -12,7 +11,7 @@ import functools
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT, CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT
+from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT, CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT, CONF_WORLD_TIDES_API_KEY
 from .tide_proxy import TideProxy
 from . import unit_helpers
 
@@ -39,6 +38,7 @@ class OFACoordinator(DataUpdateCoordinator):
         fetch_cache_ttl: Optional[int] = None,
         tide_ttl: Optional[int] = None,
         tide_phase_offset_minutes: Optional[int] = None,
+        tide_api_key: Optional[str] = None,
     ):
         super().__init__(
             hass,
@@ -103,6 +103,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lon,
                 ttl=int(tide_ttl),
                 phase_offset_hours=phase_offset_hours,
+                api_key=tide_api_key,
             )
         else:
             self._tide_proxy = TideProxy(
@@ -110,6 +111,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lat,
                 self.lon,
                 phase_offset_hours=phase_offset_hours,
+                api_key=tide_api_key,
             )
 
         self.time_periods_mode = time_periods_mode or "full_day"

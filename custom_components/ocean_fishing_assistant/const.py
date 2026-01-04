@@ -13,6 +13,11 @@ DEFAULT_UPDATE_INTERVAL = 15 * 60  # seconds
 OM_BASE = "https://api.open-meteo.com/v1/forecast"
 OM_MARINE_BASE = "https://marine-api.open-meteo.com/v1/marine"
 
+# World Tides API base (configurable)
+WORLD_TIDES_API_BASE = "https://www.worldtides.info/api"
+# Name of config entry field for World Tides API key (store in entry.data)
+CONF_WORLD_TIDES_API_KEY = "world_tides_api_key"
+
 # Default forecast mode (used where appropriate)
 DEFAULT_FORECAST_MODE = "hourly"
 
