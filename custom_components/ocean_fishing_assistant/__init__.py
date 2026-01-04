@@ -253,6 +253,21 @@ async def async_setup_entry(hass, entry):
             coord_inner.safety_limits = normalized_limits or {}
             _LOGGER.debug("Applied new safety_limits to coordinator for entry %s: %s (warnings=%s)", entry_inner.entry_id, normalized_limits, warnings)
 
+            # Apply time_periods_mode update from options (strict)
+            try:
+                new_time_periods_mode = entry_inner.options.get(CONF_TIME_PERIODS, entry_inner.data.get(CONF_TIME_PERIODS, "full_day"))
+                # Strict validation of allowed modes
+                allowed_modes = {"full_day", "dawn_dusk"}
+                if not isinstance(new_time_periods_mode, str) or new_time_periods_mode not in allowed_modes:
+                    raise ValueError(f"Invalid time_periods_mode option: {new_time_periods_mode!r} (allowed: {allowed_modes})")
+                old_mode = getattr(coord_inner, "time_periods_mode", None)
+                coord_inner.time_periods_mode = new_time_periods_mode
+                _LOGGER.debug("Applied time_periods_mode change for entry %s: old=%s new=%s", entry_inner.entry_id, old_mode, new_time_periods_mode)
+            except Exception:
+                _LOGGER.exception("Failed to apply time_periods_mode option for entry %s (strict)", entry_inner.entry_id)
+                # Fail loudly to surface invalid options
+                raise
+
             # Apply tide phase offset if provided in options: rebuild TideProxy with new offset
             try:
                 new_phase_min = int(opts.get(CONF_TIDE_PHASE_OFFSET_MINUTES, entry_inner.data.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT)))
