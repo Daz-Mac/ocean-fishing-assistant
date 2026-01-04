@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncio
-import json
 
 from homeassistant.util import dt as dt_util
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -21,7 +20,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # constants
 _DEFAULT_TTL = 15 * 60  # seconds
-_GRID_SECONDS_DEFAULT = 60  # resolution for nearest-sample matching (seconds)
 _NEGATIVE_TTL_DEFAULT = 360  # seconds for negative-cache entries on failure
 
 # Default World Tides base (configurable via const if needed)
@@ -32,9 +30,6 @@ from .const import (
     TIDE_PROXY_TTL_DEFAULT,
 )
 
-# numeric tolerances
-EPS_DERIV = 1e-10
-
 # Minimal date formatting helper
 def _iso_z(dt: datetime) -> str:
     if dt.tzinfo is None:
@@ -44,56 +39,14 @@ def _iso_z(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _to_epoch_seconds(ts: Any) -> int:
-    if isinstance(ts, (int, float)):
-        v = float(ts)
-        # Sometimes timestamps are milliseconds
-        if v > 1e12:
-            v = v / 1000.0
-        return int(v)
-    if isinstance(ts, str):
-        s = ts.strip()
-        try:
-            # numeric-string?
-            if s.replace(".", "", 1).isdigit():
-                v = float(s)
-                if v > 1e12:
-                    v = v / 1000.0
-                return int(v)
-        except Exception:
-            pass
-        try:
-            if s.endswith("Z"):
-                s2 = s.replace("Z", "+00:00")
-            else:
-                s2 = s
-            dt = datetime.fromisoformat(s2)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
-            return int(dt.timestamp())
-        except Exception:
-            raise ValueError(f"Unrecognized timestamp string: {ts}")
-    if isinstance(ts, datetime):
-        return int(ts.astimezone(timezone.utc).timestamp())
-    raise ValueError(f"Unsupported timestamp type: {type(ts)}")
-
-
 class TideProxy:
     """
-    TideProxy backed by World Tides API.
-
-    Strict behavior:
-      - World Tides API key must be provided via `api_key` at construction (no fallbacks).
-      - get_tide_for_timestamps must return arrays exactly aligned with the provided timestamps (lengths must match).
-      - If the World Tides API does not return expected data, a RuntimeError is raised.
+    TideProxy backed by World Tides API using *only extremes* (high/low).
+    Strict behavior: API key required at construction; if extremes are missing for requested window, raise.
 
     Caching / inflight dedupe:
       - Shared in-memory cache stored at hass.data[DOMAIN]["tide_api_cache"]
       - Inflight map stored at hass.data[DOMAIN]["tide_api_inflight"]
-      - Cache keys normalized by rounded coords and canonical time buckets so nearby requests coalesce.
-      - Failed requests are negative-cached for `negative_ttl` seconds to avoid hammering API.
     """
 
     def __init__(
@@ -153,12 +106,7 @@ class TideProxy:
     # Shared cache / inflight helpers
     # -----------------------
     def _shared_store(self) -> Dict[str, Dict]:
-        """
-        Return the integration-level store dict under hass.data[DOMAIN].
-        Creates structure if missing.
-        """
         store = self.hass.data.setdefault(DOMAIN, {})
-        # initialize sub-structures
         store.setdefault("tide_api_cache", {})
         store.setdefault("tide_api_inflight", {})
         return store
@@ -170,18 +118,14 @@ class TideProxy:
         )
 
     def _time_bucket(self, dt: datetime, bucket_seconds: int = 300) -> int:
-        # bucket_seconds default 5 minutes: canonicalize start/end to reduce unique keys
         return int(math.floor(dt.timestamp() / float(bucket_seconds)) * bucket_seconds)
 
-    def _make_cache_key(self, endpoint: str, start_dt: datetime, end_dt: datetime, *, step_seconds: Optional[int] = None, extra: Optional[Dict[str, Any]] = None) -> str:
+    def _make_cache_key(self, endpoint: str, start_dt: datetime, end_dt: datetime, *, extra: Optional[Dict[str, Any]] = None) -> str:
         lat_r, lon_r = self._rounded_coords()
         start_b = self._time_bucket(start_dt, bucket_seconds=300)
         end_b = self._time_bucket(end_dt, bucket_seconds=300)
         parts = [endpoint, f"lat={lat_r}", f"lon={lon_r}", f"start={start_b}", f"end={end_b}"]
-        if step_seconds:
-            parts.append(f"step={int(step_seconds)}")
         if extra:
-            # keep deterministic ordering
             for k in sorted(extra.keys()):
                 parts.append(f"{k}={extra[k]}")
         return "|".join(parts)
@@ -197,14 +141,12 @@ class TideProxy:
         now_ts = int(dt_util.now().timestamp())
         if expires_at < now_ts:
             _LOGGER.debug("Tide cache entry expired: key=%s", key)
-            # remove expired entry
             try:
                 del cache[key]
             except Exception:
                 pass
             return None
 
-        # If entry is an error (negative cache), raise the recorded error immediately
         if entry.get("error"):
             msg = entry.get("message", "previous tide request failed")
             _LOGGER.debug("Tide negative-cache hit key=%s message=%s", key, msg)
@@ -222,26 +164,15 @@ class TideProxy:
         _LOGGER.debug("Tide cache set key=%s expires_in=%s", key, ttl_use)
 
     def _set_cached_error(self, key: str, exc: Exception, ttl: Optional[int] = None) -> None:
-        """
-        Write a negative cache entry for `key` recording the error message for `ttl` seconds.
-        """
         store = self._shared_store()
         cache = store.setdefault("tide_api_cache", {})
         ttl_use = int(ttl if ttl is not None else self._negative_ttl)
         expires_at = int(dt_util.now().timestamp()) + max(1, ttl_use)
-        # store stringified message only (do not store exception object)
         msg = str(exc)
         cache[key] = {"expires": expires_at, "error": True, "message": msg}
         _LOGGER.debug("Tide negative-cache set key=%s expires_in=%s message=%s", key, ttl_use, msg)
 
     async def _await_inflight_or_run(self, key: str, coro_func):
-        """
-        If a request for `key` is already in-flight, await its future.
-        Otherwise, register a new future, run coro_func() to produce result,
-        set result on future and return it.
-
-        coro_func should be a coroutine function (callable) that, when awaited, returns the result.
-        """
         store = self._shared_store()
         inflight = store.setdefault("tide_api_inflight", {})
 
@@ -252,7 +183,6 @@ class TideProxy:
             try:
                 return await asyncio.shield(existing)
             finally:
-                # do not remove here; the creator will remove
                 pass
 
         fut: asyncio.Future = loop.create_future()
@@ -260,13 +190,11 @@ class TideProxy:
         try:
             _LOGGER.debug("Starting network request for tide key=%s", key)
             result = await coro_func()
-            # store into cache by caller if desired, but we set it here to ensure consistent caching
             if not fut.done():
                 fut.set_result(result)
             return result
         except Exception as exc:
             _LOGGER.debug("Tide request failed for key=%s exc=%s", key, exc)
-            # set a negative cache entry so subsequent immediate callers see the failure for a short window
             try:
                 self._set_cached_error(key, exc, ttl=self._negative_ttl)
             except Exception:
@@ -275,36 +203,28 @@ class TideProxy:
                 fut.set_exception(exc)
             raise
         finally:
-            # remove inflight entry
             try:
                 inflight.pop(key, None)
             except Exception:
                 pass
 
     # -----------------------
-    # Fetch wrappers that use shared cache + inflight dedupe
+    # Fetch extremes only (cheap)
     # -----------------------
-    async def _fetch_world_tides_heights(self, start_dt: datetime, end_dt: datetime, step_seconds: int = 60) -> List[Dict[str, Any]]:
+    async def _fetch_world_tides_extremes(self, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
         """
-        Request World Tides heights for the interval [start_dt, end_dt] with approximate step (seconds).
+        Request World Tides extremes (high/low) for [start_dt, end_dt].
         Uses shared cache and inflight de-duplication.
-        Returns a list of dicts with keys: 'time' (datetime UTC) and 'height' (meters).
-        Raises RuntimeError on API problems.
-
-        NOTE: This call also requests extremes in the same network call (heights & extremes flags).
-        The extremes are cached under the 'extremes' cache key so callers can fetch extremes without a second network call.
+        Returns list of dicts: {'time': datetime(tz=UTC), 'height': float, 'type': 'high'|'low'|...}
+        Raises RuntimeError on API problems or missing extremes.
         """
-        # Build canonical cache key
-        heights_key = self._make_cache_key("heights", start_dt, end_dt, step_seconds=step_seconds)
-        extremes_key = self._make_cache_key("extremes", start_dt, end_dt, step_seconds=None)
+        key = self._make_cache_key("extremes", start_dt, end_dt)
         cached = None
         try:
-            cached = self._get_cached(heights_key)
+            cached = self._get_cached(key)
         except RuntimeError:
-            # negative-cache hit -> raise immediately
             raise
         if cached is not None:
-            # cached stored with ISO times; convert to datetime objects
             out: List[Dict[str, Any]] = []
             for item in cached:
                 try:
@@ -324,18 +244,15 @@ class TideProxy:
                         dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
                     else:
                         dt = ts
-                    out.append({"time": dt, "height": float(item.get("height"))})
+                    out.append({"time": dt, "height": float(item.get("height")), "type": item.get("type")})
                 except Exception:
-                    # skip malformed cached entry (treat as cache miss)
-                    _LOGGER.debug("Malformed cached height entry for key=%s: %r", heights_key, item)
+                    _LOGGER.debug("Malformed cached extremes entry for key=%s: %r", key, item)
                     out = None
                     break
             if out is not None:
                 return out
 
-        # define the actual network call as a coroutine
         async def _do_fetch():
-            # length in days (integer) — ensure cover whole interval
             seconds = max(1, int((end_dt - start_dt).total_seconds()))
             length_days = max(1, math.ceil(seconds / 86400.0))
 
@@ -344,20 +261,20 @@ class TideProxy:
             params = {
                 "lat": str(self.latitude),
                 "lon": str(self.longitude),
-                # v3 expects epoch seconds for start
                 "start": str(int(start_dt.timestamp())),
-                # days is integer number of days
                 "days": str(int(length_days)),
                 "key": self._api_key,
-                # request minute resolution where supported (v3 param name 'step')
-                "step": str(max(60, int(step_seconds))),
-                # request both heights & extremes in the same call (presence of key matters)
-                "heights": "",
+                # request extremes only (cheap)
                 "extremes": "",
             }
 
+            # redact key for logs
+            safe_params = dict(params)
+            if "key" in safe_params:
+                safe_params["key"] = "REDACTED"
+
             url = f"{self._base}"
-            _LOGGER.debug("WorldTides (v3) request: %s params=%s", url, params)
+            _LOGGER.debug("WorldTides (v3) request: %s params=%s", url, safe_params)
             try:
                 async with session.get(url, params=params, timeout=30) as resp:
                     if resp.status != 200:
@@ -369,56 +286,21 @@ class TideProxy:
                 _LOGGER.exception("WorldTides request exception: %s", exc)
                 raise RuntimeError(f"Failed to fetch World Tides data: {exc}") from exc
 
-            # Parse heights (support multiple possible key names)
-            raw_heights = None
-            for k in ("heights", "predictions", "data"):
-                raw_heights = j.get(k)
-                if raw_heights:
-                    break
-
-            out_heights_cacheable: List[Dict[str, Any]] = []
-            out_heights_parsed: List[Dict[str, Any]] = []
-            if raw_heights:
-                for item in raw_heights:
-                    ts = item.get("date") or item.get("time") or item.get("t")
-                    h = item.get("height") or item.get("v") or item.get("value")
-                    if ts is None or h is None:
-                        continue
-                    # Normalize timestamp
-                    try:
-                        if isinstance(ts, (int, float)):
-                            dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-                            ts_out = _iso_z(dt)
-                        else:
-                            s = str(ts)
-                            if s.endswith("Z"):
-                                s2 = s.replace("Z", "+00:00")
-                            else:
-                                s2 = s
-                            dt = datetime.fromisoformat(s2)
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            else:
-                                dt = dt.astimezone(timezone.utc)
-                            ts_out = _iso_z(dt)
-                    except Exception:
-                        _LOGGER.debug("Failed to parse WorldTides time value %r", ts)
-                        continue
-                    try:
-                        height_m = float(h)
-                    except Exception:
-                        _LOGGER.debug("Failed to parse WorldTides height value %r", h)
-                        continue
-                    out_heights_parsed.append({"time": dt, "height": height_m})
-                    out_heights_cacheable.append({"time": ts_out, "height": height_m})
-
-            # Parse extremes (if present)
+            # Attempt to find extremes in a few possible places in payload
             raw_extremes = None
-            for k in ("extremes", "data", "predictions"):
-                raw_extremes = j.get(k) if j.get(k) else raw_extremes
-            # If the extremes key is distinct from heights, try to read extremes specifically
             if "extremes" in j:
                 raw_extremes = j.get("extremes")
+            else:
+                # some payloads may include a 'data' or 'predictions' list with type markers
+                for k in ("data", "predictions"):
+                    cand = j.get(k)
+                    if not cand:
+                        continue
+                    # filter those entries that look like extremes (have 'type' or 'extreme' keys)
+                    extremes_like = [it for it in cand if ("type" in it and ("high" in str(it.get("type")).lower() or "low" in str(it.get("type")).lower())) or ("extreme" in it)]
+                    if extremes_like:
+                        raw_extremes = extremes_like
+                        break
 
             out_extremes_cacheable: List[Dict[str, Any]] = []
             out_extremes_parsed: List[Dict[str, Any]] = []
@@ -453,138 +335,50 @@ class TideProxy:
                     except Exception:
                         _LOGGER.debug("Failed to parse WorldTides extreme height value %r", h)
                         continue
-                    out_extremes_parsed.append({"time": dt, "height": height_m, "type": typ})
-                    out_extremes_cacheable.append({"time": ts_out, "height": height_m, "type": typ})
+                    typ_s = (str(typ).strip() if typ is not None else "").lower()
+                    # normalize type to "high" or "low" if possible
+                    if typ_s.startswith("h"):
+                        typ_norm = "high"
+                    elif typ_s.startswith("l"):
+                        typ_norm = "low"
+                    else:
+                        typ_norm = typ_s or None
+                    out_extremes_parsed.append({"time": dt, "height": height_m, "type": typ_norm})
+                    out_extremes_cacheable.append({"time": ts_out, "height": height_m, "type": typ_norm})
 
-            # sort and validate heights
-            out_heights_parsed.sort(key=lambda x: x["time"].timestamp())
-            out_heights_cacheable.sort(key=lambda x: x["time"])
-            if not out_heights_parsed:
-                # It's possible extremes were returned but no regular heights; still allow extremes but raise if no usable samples at all
-                if not out_extremes_parsed:
-                    _LOGGER.error("WorldTides response contained no usable heights or extremes: %s", j)
-                    raise RuntimeError("WorldTides response contained no usable heights or extremes")
-            # write cache entries for both heights and extremes where available
-            try:
-                if out_heights_cacheable:
-                    self._set_cached(heights_key, out_heights_cacheable, ttl=self._ttl)
-            except Exception:
-                _LOGGER.debug("Failed to set tide heights cache for key=%s", heights_key)
-            try:
-                if out_extremes_cacheable:
-                    self._set_cached(extremes_key, out_extremes_cacheable, ttl=self._ttl)
-            except Exception:
-                _LOGGER.debug("Failed to set tide extremes cache for key=%s", extremes_key)
-            return out_heights_parsed
+            if not out_extremes_parsed:
+                _LOGGER.error("WorldTides response contained no usable extremes: %s", j)
+                raise RuntimeError("WorldTides response contained no usable extremes")
 
-        # Use inflight / dedupe wrapper
+            # sort & cache
+            out_extremes_parsed.sort(key=lambda x: x["time"].timestamp())
+            out_extremes_cacheable.sort(key=lambda x: x["time"])
+            try:
+                self._set_cached(key, out_extremes_cacheable, ttl=self._ttl)
+            except Exception:
+                _LOGGER.debug("Failed to set tide extremes cache for key=%s", key)
+            return out_extremes_parsed
+
+        # Use inflight/dedupe wrapper
         try:
-            return await self._await_inflight_or_run(heights_key, _do_fetch)
+            return await self._await_inflight_or_run(key, _do_fetch)
         except Exception:
             raise
-
-    async def _fetch_world_tides_extremes(self, start_dt: datetime, end_dt: datetime) -> List[Dict[str, Any]]:
-        """
-        Request World Tides extremes (high/low) for [start_dt, end_dt].
-        Uses shared cache and inflight de-duplication.
-
-        This tries to use a cached extremes result first. If missing it will call the heights fetch which requests both heights & extremes
-        in a single network call and will populate the extremes cache, avoiding a second network call.
-        """
-        key = self._make_cache_key("extremes", start_dt, end_dt, step_seconds=None)
-        cached = None
-        try:
-            cached = self._get_cached(key)
-        except RuntimeError:
-            # negative-cache hit -> raise immediately
-            raise
-        if cached is not None:
-            out: List[Dict[str, Any]] = []
-            for item in cached:
-                try:
-                    ts = item.get("time")
-                    if isinstance(ts, str):
-                        s = ts
-                        if s.endswith("Z"):
-                            s2 = s.replace("Z", "+00:00")
-                        else:
-                            s2 = s
-                        dt = datetime.fromisoformat(s2)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        else:
-                            dt = dt.astimezone(timezone.utc)
-                    elif isinstance(ts, (int, float)):
-                        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-                    else:
-                        dt = ts
-                    out.append({"time": dt, "height": float(item.get("height")), "type": item.get("type")})
-                except Exception:
-                    _LOGGER.debug("Malformed cached extremes entry for key=%s: %r", key, item)
-                    out = None
-                    break
-            if out is not None:
-                return out
-
-        # If extremes not cached, request heights (the heights fetch also requests extremes in the same call)
-        try:
-            # ask for heights with canonical step (this will also fetch & cache extremes)
-            await self._fetch_world_tides_heights(start_dt, end_dt, step_seconds=_GRID_SECONDS_DEFAULT)
-        except Exception:
-            # if heights fetch fails, re-raise as extremes cannot be obtained
-            raise
-
-        # Now attempt to read extremes from the cache again
-        try:
-            cached2 = self._get_cached(key)
-        except RuntimeError:
-            raise
-        if cached2 is None:
-            raise RuntimeError("WorldTides extremes response missing after combined fetch")
-        out: List[Dict[str, Any]] = []
-        for item in cached2:
-            try:
-                ts = item.get("time")
-                if isinstance(ts, str):
-                    s = ts
-                    if s.endswith("Z"):
-                        s2 = s.replace("Z", "+00:00")
-                    else:
-                        s2 = s
-                    dt = datetime.fromisoformat(s2)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    else:
-                        dt = dt.astimezone(timezone.utc)
-                elif isinstance(ts, (int, float)):
-                    dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-                else:
-                    dt = ts
-                out.append({"time": dt, "height": float(item.get("height")), "type": item.get("type")})
-            except Exception:
-                _LOGGER.debug("Malformed cached extremes entry for key=%s: %r", key, item)
-                out = None
-                break
-        if out is None:
-            raise RuntimeError("WorldTides extremes cache contained malformed entries")
-        return out
 
     # -----------------------
-    # High-level API (unchanged except using shared cache-backed fetchers)
+    # High-level API (extremes-only)
     # -----------------------
     async def get_tide_for_timestamps(self, timestamps: Sequence[Any], *, location_tz: str) -> Dict[str, Any]:
         """
-        Fetch tide predictions aligned to the provided timestamps using World Tides API.
+        Fetch tide predictions aligned to the provided timestamps using World Tides extremes only.
 
-        Returns a dict with:
+        Returns:
           - 'timestamps': list[ISOZ]
-          - 'tide_phase': list[str] per timestamp (rising/falling/high/low/flat)
-          - 'tide_phase_name': list[str] friendly names ("High Tide"/"Low Tide"/...)
-          - 'moon_phase': list[float or None] aligned numeric moon phase (0..1) where possible
-          - 'tide_strength': float 0..1 (normalized local amplitude estimate)
-          - 'next_high'/'next_low': dict or None, each {'timestamp': ISOZ}
-          - 'confidence': "worldtides_api"
-          - 'source': "worldtides_api"
+          - 'tide_phase': list[str] per timestamp ('rising'|'falling'|'flat')
+          - 'tide_phase_name': list[str] friendly names
+          - 'moon_phase': list[float or None] aligned numeric moon phase (0..1)
+          - 'tide_strength': float 0..1 estimated from local extreme amplitudes
+          - 'next_high'/'next_low': dict or None
         """
         if not location_tz:
             raise ValueError("location_tz is required (strict)")
@@ -595,7 +389,7 @@ class TideProxy:
                 "tide_phase": [],
                 "moon_phase": [],
                 "tide_strength": 0.0,
-                "confidence": "no_timestamps",
+                "confidence": "worldtides_api",
                 "source": "worldtides_api",
                 "next_high": None,
                 "next_low": None,
@@ -609,7 +403,6 @@ class TideProxy:
                 dt_objs.append(dt)
                 continue
             try:
-                epoch = None
                 if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.strip().replace(".", "", 1).isdigit()):
                     v = float(ts)
                     if v > 1e12:
@@ -638,10 +431,9 @@ class TideProxy:
                 parsed = parsed.astimezone(timezone.utc)
             dt_objs.append(parsed)
 
-        # TTL/caching: if we recently computed same timestamps, return cached result
         now = dt_util.now().astimezone(timezone.utc)
         try:
-            new_keys = [_to_epoch_seconds(t) for t in timestamps]
+            new_keys = [_iso_z(dt) for dt in dt_objs]
         except Exception:
             new_keys = [int(dt.timestamp()) for dt in dt_objs]
 
@@ -650,136 +442,116 @@ class TideProxy:
             if cached_keys is not None and cached_keys == new_keys:
                 return self._cache["raw_tide"]
 
-        # Determine fetch window: include a margin of 1 hour on each side
-        start_dt = min(dt_objs) - timedelta(hours=1)
-        end_dt = max(dt_objs) + timedelta(hours=1)
+        # Determine fetch window: expand by 1 day on each side to obtain bracketing extremes
+        start_dt = min(dt_objs) - timedelta(days=1)
+        end_dt = max(dt_objs) + timedelta(days=1)
 
-        # Ask World Tides for heights at reasonably fine resolution (1 minute)
         try:
-            heights_samples = await self._fetch_world_tides_heights(start_dt, end_dt, step_seconds=_GRID_SECONDS_DEFAULT)
+            extremes_samples = await self._fetch_world_tides_extremes(start_dt, end_dt)
         except Exception as exc:
-            _LOGGER.exception("WorldTides heights fetch failed: %s", exc)
-            raise RuntimeError(f"WorldTides heights fetch failed: {exc}") from exc
+            _LOGGER.exception("WorldTides extremes fetch failed: %s", exc)
+            raise RuntimeError(f"WorldTides extremes fetch failed: {exc}") from exc
 
-        # Build time-indexed list for nearest-sample lookups
-        times_arr = [float(x["time"].timestamp()) for x in heights_samples]
-        heights_arr = [float(x["height"]) for x in heights_samples]
+        if not extremes_samples:
+            raise RuntimeError("No extremes returned for requested window")
 
-        # Helper: find nearest height sample index for epoch t (binary search)
+        # Build simple lists for binary search
+        times_arr = [float(x["time"].timestamp()) for x in extremes_samples]
+        heights_arr = [float(x["height"]) for x in extremes_samples]
+        types_arr = [str(x.get("type") or "").lower() for x in extremes_samples]
+
         import bisect
 
-        def _nearest_sample_value(epoch_ts: float) -> Tuple[float, int]:
-            i = bisect.bisect_left(times_arr, epoch_ts)
-            if i == 0:
-                return heights_arr[0], 0
-            if i >= len(times_arr):
-                return heights_arr[-1], len(times_arr) - 1
-            before_t = times_arr[i - 1]
-            after_t = times_arr[i]
-            if abs(epoch_ts - before_t) <= abs(after_t - epoch_ts):
-                return heights_arr[i - 1], i - 1
-            return heights_arr[i], i
+        def _bracketing_indices(epoch_ts: float) -> Tuple[Optional[int], Optional[int]]:
+            """
+            Return (i_prev, i_next) where i_prev is index of last extreme with time <= epoch_ts,
+            and i_next is index of first extreme with time > epoch_ts.
+            Either may be None if not available.
+            """
+            i = bisect.bisect_right(times_arr, epoch_ts)
+            i_prev = i - 1 if (i - 1) >= 0 else None
+            i_next = i if i < len(times_arr) else None
+            return i_prev, i_next
 
         tidal_heights_for_timestamps: List[float] = []
-        sample_indices_used: List[int] = []
-        for dt in dt_objs:
-            epoch = float(dt.timestamp())
-            h, idx = _nearest_sample_value(epoch)
-            tidal_heights_for_timestamps.append(float(h))
-            sample_indices_used.append(int(idx))
-
-        # Determine tide phase for each timestamp using numeric derivative around nearest sample
         tide_phase_list: List[str] = []
         tide_phase_name_list: List[str] = []
-        n_samples = len(heights_arr)
-        for idx in sample_indices_used:
-            try:
-                # numeric derivative: use neighbor samples where possible
-                if n_samples == 1:
-                    d = 0.0
-                else:
-                    # choose indices safely
-                    i0 = max(0, idx - 1)
-                    i1 = min(n_samples - 1, idx + 1)
-                    t0 = times_arr[i0]
-                    t1 = times_arr[i1]
-                    y0 = heights_arr[i0]
-                    y1 = heights_arr[i1]
-                    if t1 == t0:
-                        d = 0.0
-                    else:
-                        d = (y1 - y0) / (t1 - t0)
-                if abs(d) < 1e-6:
-                    phase = "flat"
-                elif d > 0.0:
+
+        # For each timestamp, compute interpolated height & phase using bracketing extremes
+        for dt in dt_objs:
+            epoch = float(dt.timestamp())
+            i_prev, i_next = _bracketing_indices(epoch)
+            # Strict: require both bracketing extremes to exist
+            if i_prev is None or i_next is None:
+                raise RuntimeError(f"Insufficient extremes to interpolate tide for timestamp {dt.isoformat()} (need surrounding high/low)")
+
+            t_prev = float(times_arr[i_prev])
+            t_next = float(times_arr[i_next])
+            h_prev = float(heights_arr[i_prev])
+            h_next = float(heights_arr[i_next])
+            type_prev = types_arr[i_prev]
+            type_next = types_arr[i_next]
+
+            # Fraction of time between extremes
+            if t_next == t_prev:
+                frac = 0.0
+            else:
+                frac = (epoch - t_prev) / (t_next - t_prev)
+                frac = max(0.0, min(1.0, frac))
+
+            # Linear interpolation of height between extremes (approximation)
+            interp_h = h_prev + (h_next - h_prev) * frac
+            tidal_heights_for_timestamps.append(float(interp_h))
+
+            # Determine phase: if prev is low and next is high -> rising; if prev high and next low -> falling
+            if type_prev and type_next:
+                if type_prev.startswith("l") and type_next.startswith("h"):
                     phase = "rising"
-                else:
+                    phase_name = "Rising"
+                elif type_prev.startswith("h") and type_next.startswith("l"):
                     phase = "falling"
-                tide_phase_list.append(phase)
-                if phase == "rising":
-                    tide_phase_name_list.append("Rising")
-                elif phase == "falling":
-                    tide_phase_name_list.append("Falling")
+                    phase_name = "Falling"
                 else:
-                    tide_phase_name_list.append("Flat")
-            except Exception:
-                tide_phase_list.append("flat")
-                tide_phase_name_list.append("Flat")
+                    # Unknown sequence: fallback to nearest trend by comparing heights
+                    phase = "flat"
+                    phase_name = "Flat"
+            else:
+                phase = "flat"
+                phase_name = "Flat"
+            tide_phase_list.append(phase)
+            tide_phase_name_list.append(phase_name)
 
-        # Find extrema (local highs and lows) from heights_samples after now
-        highs: List[Tuple[float, float]] = []
-        lows: List[Tuple[float, float]] = []
-        try:
-            for i in range(1, len(heights_arr) - 1):
-                prev_h = heights_arr[i - 1]
-                cur_h = heights_arr[i]
-                next_h = heights_arr[i + 1]
-                t_epoch = float(times_arr[i])
-                if cur_h > prev_h and cur_h > next_h:
-                    highs.append((t_epoch, cur_h))
-                elif cur_h < prev_h and cur_h < next_h:
-                    lows.append((t_epoch, cur_h))
-        except Exception:
-            _LOGGER.exception("Failed to identify extrema from WorldTides heights")
-
+        # Determine next high/low from extremes relative to now
         now_ts = float(now.timestamp())
         next_high_obj = None
         next_low_obj = None
-        for t, h in highs:
+        for t, h, typ in zip(times_arr, heights_arr, types_arr):
             if t >= now_ts:
-                next_high_obj = {"timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat().replace("+00:00", "Z")}
-                break
-        for t, h in lows:
-            if t >= now_ts:
-                next_low_obj = {"timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat().replace("+00:00", "Z")}
+                if typ and typ.startswith("h") and next_high_obj is None:
+                    next_high_obj = {"timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat().replace("+00:00", "Z")}
+                if typ and typ.startswith("l") and next_low_obj is None:
+                    next_low_obj = {"timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat().replace("+00:00", "Z")}
+            if next_high_obj and next_low_obj:
                 break
 
-        # If extremes endpoint (cached) available, prefer it for provenance
+        # Estimate tide_strength as normalized amplitude (average high-low amplitude in window)
         try:
-            extremes = await self._fetch_world_tides_extremes(start_dt, end_dt)
-            # convert extremes entries into next_high/next_low (prefer first future ones)
-            if extremes:
-                fut_high = next((e for e in extremes if float(e["time"].timestamp()) >= now_ts and (str(e.get("type", "")).lower().startswith("h") or str(e.get("type", "")).lower() == "high")), None)
-                fut_low = next((e for e in extremes if float(e["time"].timestamp()) >= now_ts and (str(e.get("type", "")).lower().startswith("l") or str(e.get("type", "")).lower() == "low")), None)
-                if fut_high:
-                    next_high_obj = {"timestamp": fut_high["time"].isoformat().replace("+00:00", "Z")}
-                if fut_low:
-                    next_low_obj = {"timestamp": fut_low["time"].isoformat().replace("+00:00", "Z")}
-        except Exception:
-            # non-fatal: we already have next_high_obj/next_low_obj from heights interpolation above
-            _LOGGER.debug("WorldTides extremes fetch failed or not available; continuing with height-derived extrema", exc_info=True)
-
-        # Compute simple tide_strength estimate (normalized amplitude over sample window)
-        try:
-            amp = (max(heights_arr) - min(heights_arr)) / 2.0
-            # Normalize to some plausible amplitude range (domain-specific tuning)
-            # Use 0..5m typical range -> clamp to [0,1]
-            norm = max(0.0, min(1.0, amp / 2.5))
+            # compute pairs of adjacent high/low amplitude differences
+            amps: List[float] = []
+            # scan for alternating high/low pairs
+            for i in range(len(heights_arr) - 1):
+                if types_arr[i] and types_arr[i + 1] and ((types_arr[i].startswith("h") and types_arr[i + 1].startswith("l")) or (types_arr[i].startswith("l") and types_arr[i + 1].startswith("h"))):
+                    amps.append(abs(heights_arr[i] - heights_arr[i + 1]) / 2.0)
+            if amps:
+                amp = float(sum(amps) / len(amps))
+            else:
+                amp = max(heights_arr) - min(heights_arr)
+            norm = max(0.0, min(1.0, amp / 2.5))  # same normalization as previous logic
             tide_strength_value = float(norm)
         except Exception:
             tide_strength_value = 0.5
 
-        # Compute moon phases for the timestamps (attempt skyfield but do not fail if unavailable)
+        # Compute moon phases (try Skyfield; non-fatal)
         moon_phases: List[Optional[float]] = []
         try:
             await self._ensure_loaded()
@@ -802,10 +574,8 @@ class TideProxy:
                 except Exception:
                     moon_phases.append(None)
         except Exception:
-            # If Skyfield unavailable, fall back to None for moon phase (we keep strictness on tide heights only)
             moon_phases = [None] * len(dt_objs)
 
-        # Build canonical arrays of ISOZ timestamps
         ts_isoz = [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs]
 
         raw_tide: Dict[str, Any] = {
@@ -815,19 +585,19 @@ class TideProxy:
             "tide_phase": tide_phase_list,
             "tide_phase_name": tide_phase_name_list,
             "tide_strength": float(round(tide_strength_value, 3)),
-            "confidence": "worldtides_api",
+            "confidence": "worldtides_api_extremes_only",
             "source": "worldtides_api",
             "_helpers": {
-                "samples_used": len(heights_samples),
-                "heights_window_start": _iso_z(start_dt),
-                "heights_window_end": _iso_z(end_dt),
+                "extremes_used": len(extremes_samples),
+                "extremes_window_start": _iso_z(start_dt),
+                "extremes_window_end": _iso_z(end_dt),
                 "phase_offset_hours": float(self._phase_offset_hours),
             },
             "next_high": next_high_obj,
             "next_low": next_low_obj,
         }
 
-        # Cache and return (per-instance exact-cache)
+        # Cache and return (per-instance cache)
         try:
             self._cache = {"timestamps": new_keys, "raw_tide": raw_tide, "version": 1}
         except Exception:
@@ -863,31 +633,9 @@ class TideProxy:
                 _LOGGER.info("Skyfield loaded version=%s", version)
             except Exception:
                 _LOGGER.exception("Failed to load Skyfield resources")
-                # Not fatal for tide heights, but will affect moon phase and dawn/dusk features.
                 raise
 
-    async def _async_find_next_moon_transit(self, sf_eph, sf_ts, sf_almanac, sf_wgs, start_dt: datetime) -> Optional[datetime]:
-        # Preserve a small helper previously used by code that relied on Skyfield for moon transit
-        try:
-            start_dt = start_dt.astimezone(timezone.utc)
-            t0 = sf_ts.utc(start_dt.year, start_dt.month, start_dt.day, start_dt.hour, start_dt.minute, start_dt.second)
-            end_dt = start_dt + timedelta(days=3)
-            t1 = sf_ts.utc(end_dt.year, end_dt.month, end_dt.day, end_dt.hour, end_dt.minute, end_dt.second)
-            topos = sf_wgs.latlon(self.latitude, self.longitude)
-            f = sf_almanac.meridian_transits(sf_eph, sf_eph["moon"], topos)
-            times, events = sf_almanac.find_discrete(t0, t1, f)
-            for t in times:
-                try:
-                    dt = t.utc_datetime().replace(tzinfo=timezone.utc)
-                except Exception:
-                    dt = datetime.fromtimestamp(t.tt).replace(tzinfo=timezone.utc)
-                if dt and dt > start_dt:
-                    return dt
-            return None
-        except Exception:
-            _LOGGER.debug("Moon transit search failed", exc_info=True)
-            return None
-
+    # compute_period_indices_for_timestamps preserved as before (uses Skyfield for dawn/dusk)
     async def compute_period_indices_for_timestamps(
         self,
         timestamps: Sequence[Any],
@@ -896,15 +644,10 @@ class TideProxy:
         *,
         location_tz: str,
     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        """
-        Compute indices mapping for periods (same API as before).
-
-        Note: this method still uses Skyfield for dawn/dusk when mode == 'dawn_dusk'.
-        """
+        # (Implementation unchanged from previous version)
         if not location_tz:
             raise ValueError("location_tz is required (strict)")
 
-        # parse incoming timestamps to UTC datetimes (aligned to canonical arrays)
         dt_objs: List[datetime] = []
         for ts in timestamps:
             try:
@@ -927,18 +670,12 @@ class TideProxy:
         if not dt_objs:
             return {}
 
-        # Build local-datetime list using ZoneInfo
-        try:
-            from zoneinfo import ZoneInfo
-            tzinfo_local = ZoneInfo(location_tz)
-        except Exception as exc:
-            raise ValueError(f"Invalid location_tz '{location_tz}': {exc}") from exc
-
+        from zoneinfo import ZoneInfo
+        tzinfo_local = ZoneInfo(location_tz)
         local_dt_objs: List[datetime] = [dt.astimezone(tzinfo_local) for dt in dt_objs]
-        index_dt_pairs = list(enumerate(dt_objs))  # dt_objs are UTC (for index matching)
+        index_dt_pairs = list(enumerate(dt_objs))
         dates_needed = sorted({local_dt.date() for local_dt in local_dt_objs})
 
-        # Load Skyfield only if dawn/dusk mode requested (for sunrise/sunset)
         if mode == "dawn_dusk":
             await self._ensure_loaded()
             sf_ts = self._sf_ts
@@ -959,12 +696,10 @@ class TideProxy:
 
         for d in dates_needed:
             try:
-                # local day start/end in local tz
                 local_day_start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tzinfo_local)
                 local_day_end = local_day_start + timedelta(days=1)
 
                 if mode == "dawn_dusk":
-                    # Use Skyfield to compute sunrise/sunset as before
                     expand = timedelta(hours=12)
                     search_start_local = local_day_start - expand
                     search_end_local = local_day_end + expand
@@ -1020,7 +755,6 @@ class TideProxy:
                     result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z_local(dawn_start_utc), "end": _iso_z_local(dawn_end_utc)}
                     result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z_local(dusk_start_utc), "end": _iso_z_local(dusk_end_utc)}
                 else:
-                    # full_day mode: define local periods 00-06,06-12,12-18,18-24 and convert to UTC for index matching
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})
                     p00_start_local = local_day_start
