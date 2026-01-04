@@ -733,7 +733,7 @@ class TideProxy:
                     sunrise_dt_local = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
                     sunset_dt_local = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
 
-                    # DEBUG: log the search window, candidate lists and chosen times (local & UTC)
+                    # INFO-level log so chosen times are visible in normal logs
                     try:
                         sunrise_candidates_iso = [c.isoformat() for c in sunrise_candidates]
                         sunset_candidates_iso = [c.isoformat() for c in sunset_candidates]
@@ -741,7 +741,7 @@ class TideProxy:
                         sunrise_candidates_iso = repr(sunrise_candidates)
                         sunset_candidates_iso = repr(sunset_candidates)
 
-                    _LOGGER.debug(
+                    _LOGGER.info(
                         "dawn_dusk for local date=%s lat=%.5f lon=%.5f search_start=%s search_end=%s "
                         "sunrise_candidates=%s sunset_candidates=%s chosen_sunrise_local=%s chosen_sunset_local=%s "
                         "chosen_sunrise_utc=%s chosen_sunset_utc=%s",
@@ -777,8 +777,24 @@ class TideProxy:
                             dawn_indices.append(idx)
                         if dt >= dusk_start_utc and dt < dusk_end_utc:
                             dusk_indices.append(idx)
-                    result[date_key]["dawn"] = {"indices": dawn_indices, "start": _iso_z_local(dawn_start_utc), "end": _iso_z_local(dawn_end_utc)}
-                    result[date_key]["dusk"] = {"indices": dusk_indices, "start": _iso_z_local(dusk_start_utc), "end": _iso_z_local(dusk_end_utc)}
+
+                    # include chosen sunrise/sunset times and candidate lists so they are visible to callers / attributes
+                    result[date_key]["dawn"] = {
+                        "indices": dawn_indices,
+                        "start": _iso_z_local(dawn_start_utc),
+                        "end": _iso_z_local(dawn_end_utc),
+                        "sunrise_local": sunrise_dt_local.isoformat(),
+                        "sunrise_utc": sunrise_dt_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "sunrise_candidates_local": sunrise_candidates_iso,
+                    }
+                    result[date_key]["dusk"] = {
+                        "indices": dusk_indices,
+                        "start": _iso_z_local(dusk_start_utc),
+                        "end": _iso_z_local(dusk_end_utc),
+                        "sunset_local": sunset_dt_local.isoformat(),
+                        "sunset_utc": sunset_dt_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "sunset_candidates_local": sunset_candidates_iso,
+                    }
                 else:
                     date_key = d.isoformat()
                     result.setdefault(date_key, {})

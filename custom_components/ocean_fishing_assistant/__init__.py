@@ -169,7 +169,15 @@ async def async_setup_entry(hass, entry):
     fetcher = WeatherFetcher(hass, lat, lon, speed_unit=wind_unit, cache_ttl_seconds=weather_cache_ttl)
     _LOGGER.debug("WeatherFetcher instantiated for entry %s (cache_ttl=%s)", entry.entry_id, weather_cache_ttl)
 
-    time_periods_mode = entry.data.get(CONF_TIME_PERIODS, "full_day")
+    # Prefer runtime options (entry.options) for time period selection, fall back to entry.data (strict)
+    time_periods_mode = entry.options.get(CONF_TIME_PERIODS, entry.data.get(CONF_TIME_PERIODS, "full_day"))
+    _LOGGER.debug(
+        "Resolved time_periods_mode at startup for entry %s: options=%s data=%s chosen=%s",
+        entry.entry_id,
+        entry.options,
+        entry.data.get(CONF_TIME_PERIODS),
+        time_periods_mode,
+    )
 
     coord = OFACoordinator(
         hass,
