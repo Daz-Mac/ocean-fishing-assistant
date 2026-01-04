@@ -733,6 +733,31 @@ class TideProxy:
                     sunrise_dt_local = min(sunrise_candidates, key=lambda e: abs((e - morning_target).total_seconds()))
                     sunset_dt_local = min(sunset_candidates, key=lambda e: abs((e - evening_target).total_seconds()))
 
+                    # DEBUG: log the search window, candidate lists and chosen times (local & UTC)
+                    try:
+                        sunrise_candidates_iso = [c.isoformat() for c in sunrise_candidates]
+                        sunset_candidates_iso = [c.isoformat() for c in sunset_candidates]
+                    except Exception:
+                        sunrise_candidates_iso = repr(sunrise_candidates)
+                        sunset_candidates_iso = repr(sunset_candidates)
+
+                    _LOGGER.debug(
+                        "dawn_dusk for local date=%s lat=%.5f lon=%.5f search_start=%s search_end=%s "
+                        "sunrise_candidates=%s sunset_candidates=%s chosen_sunrise_local=%s chosen_sunset_local=%s "
+                        "chosen_sunrise_utc=%s chosen_sunset_utc=%s",
+                        d.isoformat(),
+                        self.latitude,
+                        self.longitude,
+                        search_start_utc.isoformat().replace("+00:00", "Z"),
+                        search_end_utc.isoformat().replace("+00:00", "Z"),
+                        sunrise_candidates_iso,
+                        sunset_candidates_iso,
+                        sunrise_dt_local.isoformat(),
+                        sunset_dt_local.isoformat(),
+                        sunrise_dt_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        sunset_dt_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    )
+
                     dawn_start_local = sunrise_dt_local - timedelta(hours=dawn_window_hours)
                     dawn_end_local = sunrise_dt_local + timedelta(hours=dawn_window_hours)
                     dusk_start_local = sunset_dt_local - timedelta(hours=dawn_window_hours)
