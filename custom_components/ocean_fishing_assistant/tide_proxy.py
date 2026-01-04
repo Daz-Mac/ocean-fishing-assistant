@@ -22,6 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 # constants
 _DEFAULT_TTL = 15 * 60  # seconds
 _GRID_SECONDS_DEFAULT = 60  # resolution for nearest-sample matching (seconds)
+_NEGATIVE_TTL_DEFAULT = 360  # seconds for negative-cache entries on failure
 
 # Default World Tides base (configurable via const if needed)
 from .const import (
@@ -92,6 +93,7 @@ class TideProxy:
       - Shared in-memory cache stored at hass.data[DOMAIN]["tide_api_cache"]
       - Inflight map stored at hass.data[DOMAIN]["tide_api_inflight"]
       - Cache keys normalized by rounded coords and canonical time buckets so nearby requests coalesce.
+      - Failed requests are negative-cached for `negative_ttl` seconds to avoid hammering API.
     """
 
     def __init__(
@@ -104,11 +106,13 @@ class TideProxy:
         phase_offset_hours: float = 0.0,
         api_key: Optional[str] = None,
         worldtides_base: Optional[str] = None,
+        negative_ttl: Optional[int] = None,
     ):
         self.hass = hass
         self.latitude = float(latitude or 0.0)
         self.longitude = float(longitude or 0.0)
         self._ttl = int(ttl)
+        self._negative_ttl = int(negative_ttl if negative_ttl is not None else _NEGATIVE_TTL_DEFAULT)
         self._last_calc: Optional[datetime] = None
         self._cache: Optional[Dict[str, Any]] = None
 
@@ -136,10 +140,11 @@ class TideProxy:
         self._load_lock = asyncio.Lock()
 
         _LOGGER.debug(
-            "TideProxy initialized lat=%s lon=%s ttl=%s phase_offset_hours=%.3f world_base=%s",
+            "TideProxy initialized lat=%s lon=%s ttl=%s negative_ttl=%s phase_offset_hours=%.3f world_base=%s",
             self.latitude,
             self.longitude,
             self._ttl,
+            self._negative_ttl,
             self._phase_offset_hours,
             self._base,
         )
@@ -198,6 +203,13 @@ class TideProxy:
             except Exception:
                 pass
             return None
+
+        # If entry is an error (negative cache), raise the recorded error immediately
+        if entry.get("error"):
+            msg = entry.get("message", "previous tide request failed")
+            _LOGGER.debug("Tide negative-cache hit key=%s message=%s", key, msg)
+            raise RuntimeError(f"Tide fetch previously failed: {msg}")
+
         _LOGGER.debug("Tide cache hit key=%s", key)
         return entry.get("data")
 
@@ -208,6 +220,19 @@ class TideProxy:
         expires_at = int(dt_util.now().timestamp()) + max(1, ttl_use)
         cache[key] = {"expires": expires_at, "data": data}
         _LOGGER.debug("Tide cache set key=%s expires_in=%s", key, ttl_use)
+
+    def _set_cached_error(self, key: str, exc: Exception, ttl: Optional[int] = None) -> None:
+        """
+        Write a negative cache entry for `key` recording the error message for `ttl` seconds.
+        """
+        store = self._shared_store()
+        cache = store.setdefault("tide_api_cache", {})
+        ttl_use = int(ttl if ttl is not None else self._negative_ttl)
+        expires_at = int(dt_util.now().timestamp()) + max(1, ttl_use)
+        # store stringified message only (do not store exception object)
+        msg = str(exc)
+        cache[key] = {"expires": expires_at, "error": True, "message": msg}
+        _LOGGER.debug("Tide negative-cache set key=%s expires_in=%s message=%s", key, ttl_use, msg)
 
     async def _await_inflight_or_run(self, key: str, coro_func):
         """
@@ -241,6 +266,11 @@ class TideProxy:
             return result
         except Exception as exc:
             _LOGGER.debug("Tide request failed for key=%s exc=%s", key, exc)
+            # set a negative cache entry so subsequent immediate callers see the failure for a short window
+            try:
+                self._set_cached_error(key, exc, ttl=self._negative_ttl)
+            except Exception:
+                _LOGGER.debug("Failed to write negative cache for key=%s", key, exc_info=True)
             if not fut.done():
                 fut.set_exception(exc)
             raise
@@ -263,7 +293,12 @@ class TideProxy:
         """
         # Build canonical cache key
         key = self._make_cache_key("heights", start_dt, end_dt, step_seconds=step_seconds)
-        cached = self._get_cached(key)
+        cached = None
+        try:
+            cached = self._get_cached(key)
+        except RuntimeError:
+            # negative-cache hit -> raise immediately
+            raise
         if cached is not None:
             # cached stored with ISO times; convert to datetime objects
             out: List[Dict[str, Any]] = []
@@ -398,7 +433,12 @@ class TideProxy:
         Returns list of dicts with keys like 'time' (datetime UTC) and 'height' and 'type' ('High'/'Low') where available.
         """
         key = self._make_cache_key("extremes", start_dt, end_dt, step_seconds=None)
-        cached = self._get_cached(key)
+        cached = None
+        try:
+            cached = self._get_cached(key)
+        except RuntimeError:
+            # negative-cache hit -> raise immediately
+            raise
         if cached is not None:
             out: List[Dict[str, Any]] = []
             for item in cached:
