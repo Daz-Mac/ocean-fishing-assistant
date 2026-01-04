@@ -63,10 +63,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_ocean_location(user_input)
 
     # ----
-    # Ocean location (mode, name, coordinates)
+    # Ocean location (mode, name, coordinates, World Tides API key)
     # ----
     async def async_step_ocean_location(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Configure ocean location (mode, name and coordinates)."""
+        """Configure ocean location (mode, name, coordinates) and capture the World Tides API key (required)."""
         errors: dict[str, str] = {}
         if user_input is not None:
             # Validate coordinates and title
@@ -77,6 +77,14 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "invalid_coordinates"
             except (ValueError, KeyError):
                 errors["base"] = "invalid_coordinates"
+
+            # Validate API key presence (required once per integration)
+            try:
+                api_key_submitted = str(user_input.get(CONF_WORLD_TIDES_API_KEY, "")).strip()
+                if not api_key_submitted:
+                    errors["base"] = "missing_world_tides_api_key"
+            except Exception:
+                errors["base"] = "missing_world_tides_api_key"
 
             # Duplicate title check
             if not errors:
@@ -93,7 +101,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             break
 
             if not errors:
-                # Save basic values
+                # Save basic values including the API key
                 self.ocean_config.update(user_input)
                 # Default setup_mode -> normal unless explicitly provided
                 self.ocean_config.setdefault("setup_mode", "normal")
@@ -105,6 +113,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         default_lat = user_input.get(CONF_LATITUDE, "") if user_input else ""
         default_lon = user_input.get(CONF_LONGITUDE, "") if user_input else ""
         default_mode = user_input.get("setup_mode", "normal") if user_input else "normal"
+        default_world_key = user_input.get(CONF_WORLD_TIDES_API_KEY, "") if user_input else ""
 
         return self.async_show_form(
             step_id="ocean_location",
@@ -122,6 +131,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_NAME, default=default_name): str,
                     vol.Required(CONF_LATITUDE, default=default_lat): cv.latitude,
                     vol.Required(CONF_LONGITUDE, default=default_lon): cv.longitude,
+                    vol.Required(CONF_WORLD_TIDES_API_KEY, default=default_world_key): selector.TextSelector(),
                 }
             ),
             errors=errors,
@@ -131,14 +141,13 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Advanced configuration step (only when user picks advanced)
     # ----
     async def async_step_advanced_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Advanced options: update_interval, TTLs, expose_raw, World Tides API key. Factor weights live on their own screen."""
+        """Advanced options: update_interval, TTLs, expose_raw. Factor weights live on their own screen."""
         default_update_interval = self.ocean_config.get("update_interval", DEFAULT_UPDATE_INTERVAL)
         default_expose_raw = self.ocean_config.get("expose_raw", False)
         default_fetch_cache_ttl = self.ocean_config.get(CONF_FETCH_CACHE_TTL, FETCH_CACHE_TTL)
         default_tide_ttl = self.ocean_config.get(CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT)
         default_weather_cache_ttl = self.ocean_config.get(CONF_WEATHER_CACHE_TTL, WEATHER_FETCHER_CACHE_TTL_DEFAULT)
         default_phase_offset = int(self.ocean_config.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))
-        default_world_tides_key = self.ocean_config.get(CONF_WORLD_TIDES_API_KEY, "")
 
         if user_input is not None:
             errors: dict[str, str] = {}
@@ -151,14 +160,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ui_tide_ttl = int(user_input.get(CONF_TIDE_TTL, default_tide_ttl))
                 ui_weather_ttl = int(user_input.get(CONF_WEATHER_CACHE_TTL, default_weather_cache_ttl))
                 ui_phase_offset = int(user_input.get(CONF_TIDE_PHASE_OFFSET_MINUTES, default_phase_offset))
-                ui_world_key = str(user_input.get(CONF_WORLD_TIDES_API_KEY, "")).strip()
                 if ui_fetch_ttl < 30 or ui_tide_ttl < 10 or ui_weather_ttl < 30:
                     errors["base"] = "ttl_too_small"
                 if ui_phase_offset < -180 or ui_phase_offset > 180:
                     errors["base"] = "phase_offset_out_of_range"
-                if not ui_world_key:
-                    # Require the World Tides API key in advanced config
-                    errors["base"] = "missing_world_tides_api_key"
             except Exception:
                 errors["base"] = "invalid_advanced_values"
 
@@ -183,11 +188,10 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=default_phase_offset): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
                             ),
-                            vol.Required(CONF_WORLD_TIDES_API_KEY, default=default_world_tides_key): selector.TextSelector(),
                         }
                     ),
                     errors=errors,
-                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, a local tide phase offset (minutes), and the World Tides API key."},
+                    description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, and a local tide phase offset (minutes)."},
                 )
 
             # Save advanced options
@@ -197,7 +201,6 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.ocean_config[CONF_TIDE_TTL] = ui_tide_ttl
             self.ocean_config[CONF_WEATHER_CACHE_TTL] = ui_weather_ttl
             self.ocean_config[CONF_TIDE_PHASE_OFFSET_MINUTES] = ui_phase_offset
-            self.ocean_config[CONF_WORLD_TIDES_API_KEY] = ui_world_key
 
             # After advanced options, go to factor weights step (separate screen)
             return await self.async_step_factor_weights()
@@ -223,10 +226,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=default_phase_offset): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
                     ),
-                    vol.Required(CONF_WORLD_TIDES_API_KEY, default=default_world_tides_key): selector.TextSelector(),
                 }
             ),
-            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, a local tide phase offset (minutes), and the World Tides API key."},
+            description_placeholders={"info": "Configure advanced options: how often to fetch and cache TTLs, and a local tide phase offset (minutes)."},
         )
 
     # ----

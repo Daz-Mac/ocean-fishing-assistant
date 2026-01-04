@@ -95,6 +95,10 @@ class OFACoordinator(DataUpdateCoordinator):
         phase_offset_minutes = int(tide_phase_offset_minutes) if tide_phase_offset_minutes is not None else int(TIDE_PHASE_OFFSET_MINUTES_DEFAULT)
         phase_offset_hours = float(phase_offset_minutes) / 60.0
 
+        # Store the tide API key used for TideProxy so the coordinator retains which key it's using.
+        # This allows other coordinator methods (or future rebuilds) to reference the same key.
+        self._tide_api_key = tide_api_key
+
         # create TideProxy using provided tide_ttl and phase offset (falls back to TideProxy defaults if None)
         if tide_ttl is not None:
             self._tide_proxy = TideProxy(
@@ -103,7 +107,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lon,
                 ttl=int(tide_ttl),
                 phase_offset_hours=phase_offset_hours,
-                api_key=tide_api_key,
+                api_key=self._tide_api_key,
             )
         else:
             self._tide_proxy = TideProxy(
@@ -111,7 +115,7 @@ class OFACoordinator(DataUpdateCoordinator):
                 self.lat,
                 self.lon,
                 phase_offset_hours=phase_offset_hours,
-                api_key=tide_api_key,
+                api_key=self._tide_api_key,
             )
 
         self.time_periods_mode = time_periods_mode or "full_day"
