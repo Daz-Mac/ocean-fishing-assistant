@@ -260,6 +260,15 @@ class OFACoordinator(DataUpdateCoordinator):
 
             # Precompute period indices using TideProxy + Skyfield (strict)
             # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
+            _LOGGER.debug(
+                "compute_period_indices_for_timestamps called: mode=%s sample_count=%d sample_first=%s sample_last=%s location_tz=%s",
+                self.time_periods_mode,
+                len(timestamps) if timestamps is not None else 0,
+                timestamps[0] if timestamps else None,
+                timestamps[-1] if timestamps else None,
+                self.location_tz,
+            )
+
             try:
                 period_indices = await self._tide_proxy.compute_period_indices_for_timestamps(
                     timestamps,
