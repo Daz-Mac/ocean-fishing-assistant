@@ -1,7 +1,5 @@
 """Constants for Ocean Fishing Assistant (ocean-only, strict)."""
 
-from datetime import timedelta
-
 # Integration identity
 DOMAIN = "ocean_fishing_assistant"
 DEFAULT_NAME = "Ocean Fishing Assistant"

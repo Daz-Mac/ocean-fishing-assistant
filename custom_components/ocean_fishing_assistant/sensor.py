@@ -34,7 +34,6 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_NAME
 from . import unit_helpers
-from . import tide_proxy
 from .moon_utils import coerce_phase as moon_coerce_phase, fraction_to_name
 
 _LOGGER = logging.getLogger(__name__)
@@ -365,7 +364,6 @@ class OFASensor(CoordinatorEntity):
 
         # Stable unique id: one sensor per config entry (slugged entry_id)
         entry_id = entry.entry_id
-        import re
         slug = re.sub(r"\W+", "_", entry_id).strip("_").lower()
         self._attr_unique_id = f"ocean_fishing_assistant_{slug}_score"
 

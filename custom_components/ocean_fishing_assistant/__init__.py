@@ -13,7 +13,6 @@ from homeassistant.helpers import aiohttp_client
 from .const import (
     DOMAIN,
     DEFAULT_UPDATE_INTERVAL,
-    DEFAULT_SAFETY_LIMITS,
     CONF_SPECIES_ID,
     CONF_SPECIES_REGION,
     CONF_TIME_PERIODS,
