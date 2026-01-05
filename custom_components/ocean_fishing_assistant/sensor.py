@@ -1,7 +1,4 @@
-# custom_components/ocean_fishing_assistant/sensor.py
 """
-Simplified OFA sensor (aggressive mode).
-
 This sensor assumes strict canonical payloads produced by DataFormatter and
 Skyfield. It removes historical aliases and many fallback heuristics so that
 missing or malformed upstream data surfaces as clear errors.
@@ -131,6 +128,7 @@ def _augment_components_with_values_simple(
     components: Optional[Dict[str, Any]],
     score_calc_raw: Optional[Dict[str, Any]],
     entry_units: str,
+    expose_raw: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Simplified augmentation (display-only output, strict canonical):
@@ -143,9 +141,6 @@ def _augment_components_with_values_simple(
          temperature -> temperature (e.g. "21.0 °C")
     This function strictly reads canonical numeric values from score_calc_raw and does not
     attempt to read legacy fields or pre-merged strings.
-
-    Additionally: if a component contains explicit sibling unit keys (e.g. 'tide_height' and 'tide_unit'),
-    merge them into a single display string and remove the separate unit key to ensure consistent merged output.
     """
     if components is None:
         return None
@@ -268,7 +263,10 @@ def _augment_components_with_values_simple(
                         mpn = moon_coerce_phase(mp)
                     except Exception:
                         mpn = mp
-                    cc["moon_phase"] = _round_opt(mpn, 6)
+                    # Inject numeric moon_phase only when raw output is enabled.
+                    if expose_raw:
+                        cc["moon_phase"] = _round_opt(mpn, 6)
+                    # Always provide friendly name if derivable.
                     mname = _moon_phase_name(mpn)
                     if mname:
                         cc["moon_phase_name"] = mname
@@ -345,7 +343,6 @@ class OFASensor(CoordinatorEntity):
         self,
         coordinator,
         name: str,
-        expose_raw: bool = False,
         entry: Optional[ConfigEntry] = None,
     ):
         # Strict: name must be present (async_setup_entry already validates CONF_NAME)
@@ -528,7 +525,7 @@ class OFASensor(CoordinatorEntity):
 
         # augment components: remove per-component score_10 and inject numeric values from score_calc_raw when present
         comps = current_copy.get("components")
-        current_copy["components"] = _augment_components_with_values_simple(comps, score_calc_raw, entry_units)
+        current_copy["components"] = _augment_components_with_values_simple(comps, score_calc_raw, entry_units, self._is_raw_enabled())
 
         # attach grouped safety values derived strictly from canonical score_calc_raw.raw
         safety_vals = _collect_safety_values(score_calc_raw, entry_units)
@@ -662,7 +659,7 @@ class OFASensor(CoordinatorEntity):
 
                 # augment components similarly (period-level components are aggregated; provide aggregated raw)
                 comps = sanitized.get("components")
-                sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units)
+                sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units, self._is_raw_enabled())
 
                 # add safety_values strictly from aggregated canonical raw only
                 period_safety = _collect_safety_values(raw_agg or None, entry_units) or {}
@@ -808,9 +805,12 @@ class OFASensor(CoordinatorEntity):
                     moon_numeric = mp[0] if mp else None
             else:
                 moon_numeric = mp
-        # Keep numeric moon_phase for compatibility, rounded
-        attrs["moon_phase"] = _round_opt(moon_numeric, 6) if moon_numeric is not None else None
-        # Also provide friendly name for user readability
+
+        # Only expose numeric moon_phase when raw output is enabled.
+        if self._is_raw_enabled():
+            attrs["moon_phase"] = _round_opt(moon_numeric, 6) if moon_numeric is not None else None
+
+        # Also provide friendly name for user readability (always present)
         attrs["moon_phase_name"] = _moon_phase_name(moon_numeric) if moon_numeric is not None else None
 
         # Top-level current metrics (use formatted_weather produced by scoring — canonical numeric fields)
