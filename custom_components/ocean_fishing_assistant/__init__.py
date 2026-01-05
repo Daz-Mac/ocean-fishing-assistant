@@ -27,6 +27,9 @@ from .const import (
     TIDE_PHASE_OFFSET_MINUTES_DEFAULT,
     # world tides api key
     CONF_WORLD_TIDES_API_KEY,
+    # shared tide cache keys
+    SHARED_TIDE_CACHE_KEY,
+    SHARED_TIDE_INFLIGHT_KEY,
 )
 
 # import unit helpers to validate/convert options on updates
@@ -42,7 +45,17 @@ async def async_setup_entry(hass, entry):
     session = aiohttp_client.async_get_clientsession(hass)
     _LOGGER.debug("Acquired aiohttp session: %s", session)
 
-    fetch_cache = hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
+    # Ensure the base domain dict exists
+    domain_store = hass.data.setdefault(DOMAIN, {})
+
+    # Initialize shared fetch cache and tide cache/inflight buckets exactly once per integration load.
+    # TideProxy expects these keys to exist; initializing here makes intent explicit and keeps keys
+    # co-located with integration-level state.
+    domain_store.setdefault("fetch_cache", {})
+    domain_store.setdefault(SHARED_TIDE_CACHE_KEY, {})
+    domain_store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
+
+    fetch_cache = domain_store.get("fetch_cache")
     _LOGGER.debug(
         "Fetch cache initialized for domain %s (current keys: %s)", DOMAIN, list(fetch_cache.keys())[:10]
     )
@@ -276,9 +289,9 @@ async def async_setup_entry(hass, entry):
                 new_phase_hours = float(new_phase_min) / 60.0
                 # preserve tide_ttl from entry.data if present otherwise use existing _tide_proxy._ttl
                 tide_ttl_local = int(entry_inner.data.get(CONF_TIDE_TTL, getattr(coord_inner._tide_proxy, "_ttl", TIDE_PROXY_TTL_DEFAULT)))
-                # Rebuild TideProxy with the stored world tides key in entry.data
+                # Rebuild TideProxy with the stored world tides key in entry.data via helper
                 world_key = entry_inner.data.get(CONF_WORLD_TIDES_API_KEY)
-                coord_inner._tide_proxy = TideProxy(hass_inner, coord_inner.lat, coord_inner.lon, ttl=tide_ttl_local, phase_offset_hours=new_phase_hours, api_key=world_key)
+                coord_inner.rebuild_tide_proxy(tide_ttl=tide_ttl_local, phase_offset_hours=new_phase_hours, api_key=world_key)
                 _LOGGER.debug("Rebuilt TideProxy for entry %s with phase_offset_minutes=%s", entry_inner.entry_id, new_phase_min)
             except Exception:
                 _LOGGER.exception("Failed to apply updated tide phase offset for entry %s", entry_inner.entry_id)

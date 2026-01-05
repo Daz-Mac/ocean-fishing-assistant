@@ -9,7 +9,8 @@
           "setup_mode": "Setup mode",
           "name": "Name",
           "latitude": "Latitude",
-          "longitude": "Longitude"
+          "longitude": "Longitude",
+          "world_tides_api_key": "World Tides API Key"
         }
       },
       "advanced_config": {

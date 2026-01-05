@@ -135,6 +135,31 @@ class OFACoordinator(DataUpdateCoordinator):
         if fetcher_speed != expected_speed_unit:
             raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
 
+    def rebuild_tide_proxy(self, *, tide_ttl: Optional[int] = None, phase_offset_hours: Optional[float] = None, api_key: Optional[str] = None) -> None:
+        """
+        Helper to rebuild the TideProxy instance with the provided parameters.
+        - tide_ttl: optional TTL in seconds to pass to TideProxy (falls back to existing)
+        - phase_offset_hours: optional phase offset in hours
+        - api_key: world tides API key (strict: must be provided)
+        This updates self._tide_proxy and self._tide_api_key.
+        """
+        if api_key is None:
+            api_key = self._tide_api_key
+        if not api_key:
+            raise RuntimeError("World Tides API key is required to rebuild TideProxy (strict)")
+
+        # compute phase offset hours: preserve existing if not provided
+        if phase_offset_hours is None:
+            old = getattr(self._tide_proxy, "_phase_offset_hours", 0.0)
+            phase_offset_hours = float(old)
+
+        ttl_use = int(tide_ttl) if tide_ttl is not None else getattr(self._tide_proxy, "_ttl", TIDE_PROXY_TTL_DEFAULT)
+
+        # instantiate new TideProxy; this will raise if api_key missing / invalid per strict policy
+        self._tide_proxy = TideProxy(self.hass, self.lat, self.lon, ttl=int(ttl_use), phase_offset_hours=float(phase_offset_hours), api_key=api_key)
+        self._tide_api_key = api_key
+        _LOGGER.debug("Coordinator rebuilt TideProxy with ttl=%s phase_offset_hours=%.3f", ttl_use, phase_offset_hours)
+
     # Async helper to instantiate heavy objects in executor
     async def async_init(self) -> None:
         """Instantiate blocking/time-consuming helper objects in the executor.
