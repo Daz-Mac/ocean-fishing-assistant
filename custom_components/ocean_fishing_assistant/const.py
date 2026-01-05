@@ -39,6 +39,28 @@ FETCH_CACHE_TTL = DEFAULT_UPDATE_INTERVAL  # seconds (align with DEFAULT_UPDATE_
 
 # Separate defaults for the three TTLs (Option B)
 TIDE_PROXY_TTL_DEFAULT = 30 * 60       # seconds (default 30 minutes)
+
+# Network / World Tides HTTP defaults
+WORLD_TIDES_TIMEOUT_SECONDS = 15  # per-request timeout (seconds)
+WORLD_TIDES_MAX_RETRIES = 2       # number of retries on 5xx/429/network errors
+WORLD_TIDES_RETRY_BACKOFF_SECONDS = 1  # base backoff seconds (exponential backoff)
+
+# Shared cache bucketing and names
+TIDE_CACHE_BUCKET_SECONDS = 300   # seconds for time-bucketing cache keys (5 minutes)
+SHARED_TIDE_CACHE_KEY = "tide_api_cache_v1"
+SHARED_TIDE_INFLIGHT_KEY = "tide_api_inflight_v1"
+
+# Negative-cache TTL for failed requests
+TIDE_NEGATIVE_TTL_DEFAULT = 360  # seconds (6 minutes)
+
+# Tide numeric constants
+TIDE_STRENGTH_NORMALIZATION_DENOM = 2.5  # denom used to normalize tide amplitude to 0..1
+TIDE_MIN_REQUIRED_BRACKETING = True  # require both bracketing extremes for interpolation (strict)
+
+# Canonical strings
+TIDE_CONFIDENCE_SOURCE = "worldtides_api_extremes_only"
+TIDE_SOURCE = "worldtides_api"
+
 WEATHER_FETCHER_CACHE_TTL_DEFAULT = 30 * 60  # seconds (default 30 minutes)
 
 # Tide phase offset default (minutes) — allows per-location tuning of tide predictions

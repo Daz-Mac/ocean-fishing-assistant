@@ -10,6 +10,7 @@ import asyncio
 
 from homeassistant.util import dt as dt_util
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from aiohttp import ClientError  # used for exception handling with HA session
 
 # Skyfield (loaded lazily for moon/sun computations)
 from skyfield.api import Loader, wgs84  # type: ignore
@@ -18,16 +19,26 @@ import skyfield
 
 _LOGGER = logging.getLogger(__name__)
 
-# constants
-_DEFAULT_TTL = 15 * 60  # seconds
-_NEGATIVE_TTL_DEFAULT = 360  # seconds for negative-cache entries on failure
-
-# Default World Tides base (configurable via const if needed)
 from .const import (
     WORLD_TIDES_API_BASE,
     DOMAIN,
     COORD_ROUND_DECIMALS,
     TIDE_PROXY_TTL_DEFAULT,
+    # network / timeouts
+    WORLD_TIDES_TIMEOUT_SECONDS,
+    WORLD_TIDES_MAX_RETRIES,
+    WORLD_TIDES_RETRY_BACKOFF_SECONDS,
+    # cache / keys / buckets
+    TIDE_NEGATIVE_TTL_DEFAULT,
+    TIDE_CACHE_BUCKET_SECONDS,
+    SHARED_TIDE_CACHE_KEY,
+    SHARED_TIDE_INFLIGHT_KEY,
+    # tide algorithm constants
+    TIDE_STRENGTH_NORMALIZATION_DENOM,
+    TIDE_MIN_REQUIRED_BRACKETING,
+    # canonical strings
+    TIDE_CONFIDENCE_SOURCE,
+    TIDE_SOURCE,
 )
 
 # Minimal date formatting helper
@@ -41,12 +52,12 @@ def _iso_z(dt: datetime) -> str:
 
 class TideProxy:
     """
-    TideProxy backed by World Tides API using *only extremes* (high/low).
+    TideProxy backed by World Tides API using extremes (high/low).
     Strict behavior: API key required at construction; if extremes are missing for requested window, raise.
 
     Caching / inflight dedupe:
-      - Shared in-memory cache stored at hass.data[DOMAIN]["tide_api_cache"]
-      - Inflight map stored at hass.data[DOMAIN]["tide_api_inflight"]
+      - Shared in-memory cache stored at hass.data[DOMAIN][SHARED_TIDE_CACHE_KEY]
+      - Inflight map stored at hass.data[DOMAIN][SHARED_TIDE_INFLIGHT_KEY]
     """
 
     def __init__(
@@ -65,7 +76,7 @@ class TideProxy:
         self.latitude = float(latitude or 0.0)
         self.longitude = float(longitude or 0.0)
         self._ttl = int(ttl)
-        self._negative_ttl = int(negative_ttl if negative_ttl is not None else _NEGATIVE_TTL_DEFAULT)
+        self._negative_ttl = int(negative_ttl if negative_ttl is not None else TIDE_NEGATIVE_TTL_DEFAULT)
         self._last_calc: Optional[datetime] = None
         self._cache: Optional[Dict[str, Any]] = None
 
@@ -77,12 +88,15 @@ class TideProxy:
         self._api_key = str(api_key).strip()
 
         self._base = worldtides_base or WORLD_TIDES_API_BASE
+        # explicit extremes endpoint (keeps intent clear & easier to change)
+        self._extremes_endpoint = f"{self._base.rstrip('/')}/extremes"
 
         # Skyfield loader for moon phase and dawn/dusk computations; loaded lazily
         try:
             data_dir = hass.config.path("custom_components", "ocean_fishing_assistant", "data")
         except Exception:
             from homeassistant.const import CONFIG_DIR  # type: ignore
+
             data_dir = os.path.join(CONFIG_DIR, "custom_components", "ocean_fishing_assistant", "data")
         os.makedirs(data_dir, exist_ok=True)
         self._loader = Loader(data_dir)
@@ -107,8 +121,8 @@ class TideProxy:
     # -----------------------
     def _shared_store(self) -> Dict[str, Dict]:
         store = self.hass.data.setdefault(DOMAIN, {})
-        store.setdefault("tide_api_cache", {})
-        store.setdefault("tide_api_inflight", {})
+        store.setdefault(SHARED_TIDE_CACHE_KEY, {})
+        store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
         return store
 
     def _rounded_coords(self) -> Tuple[float, float]:
@@ -117,13 +131,13 @@ class TideProxy:
             round(self.longitude, COORD_ROUND_DECIMALS),
         )
 
-    def _time_bucket(self, dt: datetime, bucket_seconds: int = 300) -> int:
+    def _time_bucket(self, dt: datetime, bucket_seconds: int = TIDE_CACHE_BUCKET_SECONDS) -> int:
         return int(math.floor(dt.timestamp() / float(bucket_seconds)) * bucket_seconds)
 
     def _make_cache_key(self, endpoint: str, start_dt: datetime, end_dt: datetime, *, extra: Optional[Dict[str, Any]] = None) -> str:
         lat_r, lon_r = self._rounded_coords()
-        start_b = self._time_bucket(start_dt, bucket_seconds=300)
-        end_b = self._time_bucket(end_dt, bucket_seconds=300)
+        start_b = self._time_bucket(start_dt, bucket_seconds=TIDE_CACHE_BUCKET_SECONDS)
+        end_b = self._time_bucket(end_dt, bucket_seconds=TIDE_CACHE_BUCKET_SECONDS)
         parts = [endpoint, f"lat={lat_r}", f"lon={lon_r}", f"start={start_b}", f"end={end_b}"]
         if extra:
             for k in sorted(extra.keys()):
@@ -132,7 +146,7 @@ class TideProxy:
 
     def _get_cached(self, key: str) -> Optional[Any]:
         store = self._shared_store()
-        cache = store.get("tide_api_cache", {})
+        cache = store.get(SHARED_TIDE_CACHE_KEY, {})
         entry = cache.get(key)
         if not entry:
             _LOGGER.debug("Tide cache miss (no entry) key=%s", key)
@@ -157,7 +171,7 @@ class TideProxy:
 
     def _set_cached(self, key: str, data: Any, ttl: Optional[int] = None) -> None:
         store = self._shared_store()
-        cache = store.setdefault("tide_api_cache", {})
+        cache = store.setdefault(SHARED_TIDE_CACHE_KEY, {})
         ttl_use = int(ttl if ttl is not None else self._ttl)
         expires_at = int(dt_util.now().timestamp()) + max(1, ttl_use)
         cache[key] = {"expires": expires_at, "data": data}
@@ -165,7 +179,7 @@ class TideProxy:
 
     def _set_cached_error(self, key: str, exc: Exception, ttl: Optional[int] = None) -> None:
         store = self._shared_store()
-        cache = store.setdefault("tide_api_cache", {})
+        cache = store.setdefault(SHARED_TIDE_CACHE_KEY, {})
         ttl_use = int(ttl if ttl is not None else self._negative_ttl)
         expires_at = int(dt_util.now().timestamp()) + max(1, ttl_use)
         msg = str(exc)
@@ -174,7 +188,7 @@ class TideProxy:
 
     async def _await_inflight_or_run(self, key: str, coro_func):
         store = self._shared_store()
-        inflight = store.setdefault("tide_api_inflight", {})
+        inflight = store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
 
         loop = asyncio.get_running_loop()
         existing = inflight.get(key)
@@ -219,10 +233,10 @@ class TideProxy:
         Raises RuntimeError on API problems or missing extremes.
         """
         key = self._make_cache_key("extremes", start_dt, end_dt)
-        cached = None
         try:
             cached = self._get_cached(key)
         except RuntimeError:
+            # previous negative-cache entry: re-raise to fail loudly
             raise
         if cached is not None:
             out: List[Dict[str, Any]] = []
@@ -264,7 +278,7 @@ class TideProxy:
                 "start": str(int(start_dt.timestamp())),
                 "days": str(int(length_days)),
                 "key": self._api_key,
-                # request extremes only (cheap)
+                # request extremes only
                 "extremes": "",
             }
 
@@ -273,18 +287,43 @@ class TideProxy:
             if "key" in safe_params:
                 safe_params["key"] = "REDACTED"
 
-            url = f"{self._base}"
-            _LOGGER.debug("WorldTides (v3) request: %s params=%s", url, safe_params)
-            try:
-                async with session.get(url, params=params, timeout=30) as resp:
-                    if resp.status != 200:
+            url = self._extremes_endpoint
+            _LOGGER.debug("WorldTides request: %s params=%s", url, safe_params)
+
+            # Retry loop for transient errors
+            last_exc: Optional[Exception] = None
+            for attempt in range(0, max(1, WORLD_TIDES_MAX_RETRIES + 1)):
+                try:
+                    timeout = WORLD_TIDES_TIMEOUT_SECONDS
+                    async with session.get(url, params=params, timeout=timeout) as resp:
                         body = await resp.text()
-                        _LOGGER.error("WorldTides request failed status=%s body=%s", resp.status, body)
-                        raise RuntimeError(f"WorldTides request failed status={resp.status}")
-                    j = await resp.json()
-            except Exception as exc:
-                _LOGGER.exception("WorldTides request exception: %s", exc)
-                raise RuntimeError(f"Failed to fetch World Tides data: {exc}") from exc
+                        if resp.status != 200:
+                            # treat 429 and 5xx as transient (retryable), others as fatal
+                            if resp.status == 429 or 500 <= resp.status < 600:
+                                _LOGGER.warning("WorldTides transient status=%s attempt=%d body=%s", resp.status, attempt + 1, body)
+                                last_exc = RuntimeError(f"WorldTides transient status={resp.status}")
+                                raise last_exc
+                            _LOGGER.error("WorldTides request failed status=%s body=%s", resp.status, body)
+                            raise RuntimeError(f"WorldTides request failed status={resp.status} body={body}")
+                        j = await resp.json()
+                        # success -> break retry loop
+                        last_exc = None
+                        break
+                except (asyncio.TimeoutError, ClientError, RuntimeError) as exc:
+                    last_exc = exc
+                    # if we are out of attempts, break and raise below
+                    if attempt >= WORLD_TIDES_MAX_RETRIES:
+                        _LOGGER.exception("WorldTides request final failure after %d attempts: %s", attempt + 1, exc)
+                        raise RuntimeError(f"Failed to fetch World Tides data: {exc}") from exc
+                    # else back off and retry
+                    backoff = WORLD_TIDES_RETRY_BACKOFF_SECONDS * (2 ** attempt)
+                    _LOGGER.debug("WorldTides request attempt=%d failed; backing off %s seconds: %s", attempt + 1, backoff, exc)
+                    await asyncio.sleep(backoff)
+            else:
+                # if loop exits without break and last_exc set, raise
+                if last_exc is not None:
+                    _LOGGER.exception("WorldTides request failed after retries: %s", last_exc)
+                    raise RuntimeError(f"Failed to fetch World Tides data: {last_exc}") from last_exc
 
             # Attempt to find extremes in a few possible places in payload
             raw_extremes = None
@@ -296,8 +335,11 @@ class TideProxy:
                     cand = j.get(k)
                     if not cand:
                         continue
-                    # filter those entries that look like extremes (have 'type' or 'extreme' keys)
-                    extremes_like = [it for it in cand if ("type" in it and ("high" in str(it.get("type")).lower() or "low" in str(it.get("type")).lower())) or ("extreme" in it)]
+                    extremes_like = [
+                        it
+                        for it in cand
+                        if (("type" in it and ("high" in str(it.get("type")).lower() or "low" in str(it.get("type")).lower())) or ("extreme" in it))
+                    ]
                     if extremes_like:
                         raw_extremes = extremes_like
                         break
@@ -336,7 +378,6 @@ class TideProxy:
                         _LOGGER.debug("Failed to parse WorldTides extreme height value %r", h)
                         continue
                     typ_s = (str(typ).strip() if typ is not None else "").lower()
-                    # normalize type to "high" or "low" if possible
                     if typ_s.startswith("h"):
                         typ_norm = "high"
                     elif typ_s.startswith("l"):
@@ -360,10 +401,7 @@ class TideProxy:
             return out_extremes_parsed
 
         # Use inflight/dedupe wrapper
-        try:
-            return await self._await_inflight_or_run(key, _do_fetch)
-        except Exception:
-            raise
+        return await self._await_inflight_or_run(key, _do_fetch)
 
     # -----------------------
     # High-level API (extremes-only)
@@ -389,8 +427,8 @@ class TideProxy:
                 "tide_phase": [],
                 "moon_phase": [],
                 "tide_strength": 0.0,
-                "confidence": "worldtides_api",
-                "source": "worldtides_api",
+                "confidence": TIDE_CONFIDENCE_SOURCE,
+                "source": TIDE_SOURCE,
                 "next_high": None,
                 "next_low": None,
             }
@@ -446,11 +484,7 @@ class TideProxy:
         start_dt = min(dt_objs) - timedelta(days=1)
         end_dt = max(dt_objs) + timedelta(days=1)
 
-        try:
-            extremes_samples = await self._fetch_world_tides_extremes(start_dt, end_dt)
-        except Exception as exc:
-            _LOGGER.exception("WorldTides extremes fetch failed: %s", exc)
-            raise RuntimeError(f"WorldTides extremes fetch failed: {exc}") from exc
+        extremes_samples = await self._fetch_world_tides_extremes(start_dt, end_dt)
 
         if not extremes_samples:
             raise RuntimeError("No extremes returned for requested window")
@@ -481,9 +515,17 @@ class TideProxy:
         for dt in dt_objs:
             epoch = float(dt.timestamp())
             i_prev, i_next = _bracketing_indices(epoch)
-            # Strict: require both bracketing extremes to exist
-            if i_prev is None or i_next is None:
+            # Strict: require both bracketing extremes to exist (configurable constant)
+            if TIDE_MIN_REQUIRED_BRACKETING and (i_prev is None or i_next is None):
                 raise RuntimeError(f"Insufficient extremes to interpolate tide for timestamp {dt.isoformat()} (need surrounding high/low)")
+
+            # If bracketing not strictly required, fall back to best-effort using nearest available
+            if i_prev is None:
+                i_prev = i_next
+            if i_next is None:
+                i_next = i_prev
+            if i_prev is None or i_next is None:
+                raise RuntimeError(f"Unable to determine bracketing extremes for {dt.isoformat()}")
 
             t_prev = float(times_arr[i_prev])
             t_next = float(times_arr[i_next])
@@ -512,7 +554,6 @@ class TideProxy:
                     phase = "falling"
                     phase_name = "Falling"
                 else:
-                    # Unknown sequence: fallback to nearest trend by comparing heights
                     phase = "flat"
                     phase_name = "Flat"
             else:
@@ -536,17 +577,19 @@ class TideProxy:
 
         # Estimate tide_strength as normalized amplitude (average high-low amplitude in window)
         try:
-            # compute pairs of adjacent high/low amplitude differences
             amps: List[float] = []
-            # scan for alternating high/low pairs
+            # scan for alternating high/low pairs and estimate half-amplitude
             for i in range(len(heights_arr) - 1):
-                if types_arr[i] and types_arr[i + 1] and ((types_arr[i].startswith("h") and types_arr[i + 1].startswith("l")) or (types_arr[i].startswith("l") and types_arr[i + 1].startswith("h"))):
+                if types_arr[i] and types_arr[i + 1] and (
+                    (types_arr[i].startswith("h") and types_arr[i + 1].startswith("l"))
+                    or (types_arr[i].startswith("l") and types_arr[i + 1].startswith("h"))
+                ):
                     amps.append(abs(heights_arr[i] - heights_arr[i + 1]) / 2.0)
             if amps:
                 amp = float(sum(amps) / len(amps))
             else:
-                amp = max(heights_arr) - min(heights_arr)
-            norm = max(0.0, min(1.0, amp / 2.5))  # same normalization as previous logic
+                amp = max(heights_arr) - min(heights_arr) if heights_arr else 0.0
+            norm = max(0.0, min(1.0, amp / float(TIDE_STRENGTH_NORMALIZATION_DENOM)))
             tide_strength_value = float(norm)
         except Exception:
             tide_strength_value = 0.5
@@ -585,8 +628,8 @@ class TideProxy:
             "tide_phase": tide_phase_list,
             "tide_phase_name": tide_phase_name_list,
             "tide_strength": float(round(tide_strength_value, 3)),
-            "confidence": "worldtides_api_extremes_only",
-            "source": "worldtides_api",
+            "confidence": TIDE_CONFIDENCE_SOURCE,
+            "source": TIDE_SOURCE,
             "_helpers": {
                 "extremes_used": len(extremes_samples),
                 "extremes_window_start": _iso_z(start_dt),
@@ -671,6 +714,7 @@ class TideProxy:
             return {}
 
         from zoneinfo import ZoneInfo
+
         tzinfo_local = ZoneInfo(location_tz)
         local_dt_objs: List[datetime] = [dt.astimezone(tzinfo_local) for dt in dt_objs]
         index_dt_pairs = list(enumerate(dt_objs))
@@ -706,13 +750,29 @@ class TideProxy:
 
                     search_start_utc = search_start_local.astimezone(timezone.utc)
                     search_end_utc = search_end_local.astimezone(timezone.utc)
-                    t0_exp = sf_ts.utc(search_start_utc.year, search_start_utc.month, search_start_utc.day, search_start_utc.hour, search_start_utc.minute, search_start_utc.second)
-                    t1_exp = sf_ts.utc(search_end_utc.year, search_end_utc.month, search_end_utc.day, search_end_utc.hour, search_end_utc.minute, search_end_utc.second)
+                    t0_exp = sf_ts.utc(
+                        search_start_utc.year,
+                        search_start_utc.month,
+                        search_start_utc.day,
+                        search_start_utc.hour,
+                        search_start_utc.minute,
+                        search_start_utc.second,
+                    )
+                    t1_exp = sf_ts.utc(
+                        search_end_utc.year,
+                        search_end_utc.month,
+                        search_end_utc.day,
+                        search_end_utc.hour,
+                        search_end_utc.minute,
+                        search_end_utc.second,
+                    )
 
                     f = sf_almanac.sunrise_sunset(sf_eph, sf_wgs.latlon(self.latitude, self.longitude))
                     times, events = sf_almanac.find_discrete(t0_exp, t1_exp, f)
                     if not times:
-                        raise RuntimeError(f"No sunrise/sunset events found for local date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}")
+                        raise RuntimeError(
+                            f"No sunrise/sunset events found for local date {d.isoformat()} at location lat={self.latitude},lon={self.longitude}"
+                        )
                     sunrise_candidates: List[datetime] = []
                     sunset_candidates: List[datetime] = []
                     for t, ev in zip(times, events):
@@ -726,7 +786,9 @@ class TideProxy:
                         else:
                             sunset_candidates.append(evt_dt_local)
                     if not sunrise_candidates or not sunset_candidates:
-                        raise RuntimeError(f"Unable to determine sunrise or sunset for local date {d.isoformat()} at lat={self.latitude},lon={self.longitude}")
+                        raise RuntimeError(
+                            f"Unable to determine sunrise or sunset for local date {d.isoformat()} at lat={self.latitude},lon={self.longitude}"
+                        )
 
                     morning_target = local_day_start + timedelta(hours=6)
                     evening_target = local_day_start + timedelta(hours=18)
