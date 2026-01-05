@@ -87,9 +87,8 @@ class TideProxy:
             raise RuntimeError("World Tides API key is required for TideProxy (strict)")
         self._api_key = str(api_key).strip()
 
-        self._base = worldtides_base or WORLD_TIDES_API_BASE
-        # explicit extremes endpoint (keeps intent clear & easier to change)
-        self._extremes_endpoint = f"{self._base.rstrip('/')}/extremes"
+        # Base URL (must be the API base, e.g. "https://www.worldtides.info/api/v3")
+        self._base = (worldtides_base or WORLD_TIDES_API_BASE).rstrip("/")
 
         # Skyfield loader for moon phase and dawn/dusk computations; loaded lazily
         try:
@@ -278,7 +277,7 @@ class TideProxy:
                 "start": str(int(start_dt.timestamp())),
                 "days": str(int(length_days)),
                 "key": self._api_key,
-                # request extremes only
+                # request extremes only (action must be a query parameter)
                 "extremes": "",
             }
 
@@ -287,7 +286,8 @@ class TideProxy:
             if "key" in safe_params:
                 safe_params["key"] = "REDACTED"
 
-            url = self._extremes_endpoint
+            # Use base URL and request action as query param (avoid path '/extremes' which returns 404)
+            url = self._base
             _LOGGER.debug("WorldTides request: %s params=%s", url, safe_params)
 
             # Retry loop for transient errors
@@ -298,6 +298,18 @@ class TideProxy:
                     async with session.get(url, params=params, timeout=timeout) as resp:
                         body = await resp.text()
                         if resp.status != 200:
+                            # Specific handling for common fatal statuses
+                            if resp.status == 401:
+                                _LOGGER.error("WorldTides authentication failed (401). Check API key.")
+                                raise RuntimeError("WorldTides API key invalid (401)")
+                            if resp.status == 404:
+                                _LOGGER.error(
+                                    "WorldTides endpoint not found (404). Ensure WORLD_TIDES_API_BASE is correct and the action is passed as a query parameter (e.g. ?extremes). body=%s",
+                                    body,
+                                )
+                                raise RuntimeError(
+                                    "WorldTides endpoint not found (404) - check WORLD_TIDES_API_BASE and that action (extremes) is passed as a query param"
+                                )
                             # treat 429 and 5xx as transient (retryable), others as fatal
                             if resp.status == 429 or 500 <= resp.status < 600:
                                 _LOGGER.warning("WorldTides transient status=%s attempt=%d body=%s", resp.status, attempt + 1, body)
