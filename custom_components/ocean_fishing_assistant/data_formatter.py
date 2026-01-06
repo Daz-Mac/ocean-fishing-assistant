@@ -1,16 +1,12 @@
 # custom_components/ocean_fishing_assistant/data_formatter.py
 """
-Minimal, strict DataFormatter.
+Minimal, strict DataFormatter (fixed).
 
-Assumptions (canonical, exact):
- - raw_payload is a dict
- - raw_payload['hourly'] is a dict containing arrays with identical length
- - raw_payload['hourly_units'] is a dict containing unit hints for keys used below
- - 'time' array contains ISO timestamps (or values parseable by homeassistant.util.dt.parse_datetime)
- - Required hourly arrays: temperature_2m, wind_speed_10m, windgusts_10m, pressure_msl
- - Marine arrays (wave_height, swell_wave_period, ...) if provided are arrays aligned to 'time'
-
-This implementation fails fast (ValueError) when the exact expected shape is not present.
+Changes:
+- When the raw payload does not include moon_phase, DataFormatter deterministically
+  computes and attaches a moon_phase array (fraction 0.0..1.0) for every timestamp.
+  This preserves strict scoring behavior without requiring external providers to include moon_phase.
+- No other loosened validations; required arrays are still enforced and types validated.
 """
 
 from __future__ import annotations
@@ -49,6 +45,34 @@ def _ensure_length(key: str, timestamps: List[str], arr: List[Any]) -> None:
 class DataFormatter:
     def __init__(self, config_entry_data: Optional[Dict[str, Any]] = None) -> None:
         self._config_entry_data = config_entry_data or {}
+
+    def _compute_moon_phase_fraction(self, dt: datetime) -> float:
+        """
+        Deterministic moon phase fraction in [0.0, 1.0] using a simple Julian-date based algorithm.
+        Lightweight and does not require external libraries.
+        """
+        # Convert to UTC naive fractional day
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        year = dt.year
+        month = dt.month
+        day = dt.day + dt.hour / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
+        # Algorithm to compute Julian day
+        y = year
+        m = month
+        if m < 3:
+            y -= 1
+            m += 12
+        a = int(y / 100)
+        b = 2 - a + int(a / 4)
+        jd = int(365.25 * (y + 4716)) + int(30.6001 * (m + 1)) + day + b - 1524.5
+        # Reference new moon at JD 2451550.1 (2000-01-06 18:14 UT roughly)
+        days_since_ref = jd - 2451550.1
+        synodic_month = 29.53058867
+        phase = (days_since_ref % synodic_month) / synodic_month
+        return float(phase % 1.0)
 
     def validate(
         self,
@@ -177,7 +201,27 @@ class DataFormatter:
         if precomputed_period_indices is not None:
             canonical["period_forecasts"] = precomputed_period_indices
 
-        # Determine factor weights to pass (entry-level -> explicit param -> default)
+        # If moon_phase missing in canonical, compute deterministic moon_phase per timestamp
+        if "moon_phase" not in canonical:
+            phases: List[float] = []
+            for ts in timestamps:
+                dt = dt_util.parse_datetime(ts)
+                if dt is None:
+                    # fallback to new moon (deterministic) if parsing unexpectedly fails
+                    phases.append(0.0)
+                    continue
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+                try:
+                    phases.append(self._compute_moon_phase_fraction(dt))
+                except Exception:
+                    # conservative default
+                    phases.append(0.0)
+            canonical["moon_phase"] = phases
+
+        # precompute factor weights param to pass through
         fw = factor_weights if factor_weights is not None else (self._config_entry_data.get(CONF_FACTOR_WEIGHTS) if isinstance(self._config_entry_data, dict) else None)
 
         # compute per-timestamp forecasts using ocean_scoring

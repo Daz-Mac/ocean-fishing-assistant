@@ -1,11 +1,12 @@
 # custom_components/ocean_fishing_assistant/ocean_scoring.py
 """
-Simplified, strict scoring module.
+Simplified, strict scoring module (fixed).
 
-Expect canonical payload produced by DataFormatter:
- - payload["timestamps"] : list of ISO timestamps (strings)
- - payload["wind_m_s"], payload["wind_max_m_s"], payload["wave_height_m"], payload["temperature_c"], payload["pressure_hpa"], optional payload["swell_period_s"], optional payload["tide_phase"]
- - payload["location_tz"] required for time-based scoring
+Changes:
+- Pressure delta now prefers forward difference, falls back to backward difference,
+  and finally defaults to a neutral 0.0 (no longer raises MissingDataError for end-of-series).
+- Moon phase is only required when the species profile explicitly expresses a moon preference.
+- Keeps the rest of the strict checks for other profile-required inputs.
 """
 
 from __future__ import annotations
@@ -93,7 +94,8 @@ def compute_score(
 ) -> Dict[str, Any]:
     """
     Strict compute for a single timestamp (index).
-    This implementation is intentionally minimal and assumes canonical inputs.
+    This implementation assumes canonical inputs but avoids failing when moon or pressure-delta
+    can be reasonably approximated or are not required by the species profile.
     """
     if "timestamps" not in data:
         raise MissingDataError("timestamps missing")
@@ -141,17 +143,28 @@ def compute_score(
             moon_val = _to_float_safe(mp)
         moon_val = coerce_phase(moon_val) if moon_val is not None else None
 
-    # pressure delta (forward difference only, strict)
-    pressure_delta = None
+    # pressure delta: prefer forward difference, fall back to backward difference,
+    # otherwise default to 0.0 (neutral). This avoids MissingDataError at series edges.
+    pressure_delta: Optional[float] = None
     if isinstance(pressure_arr, (list, tuple)):
+        p_curr = _to_float_safe(pressure_arr[use_index]) if use_index < len(pressure_arr) else None
+        # try forward
         if use_index + 1 < len(pressure_arr):
-            p_curr = _to_float_safe(pressure_arr[use_index])
             p_next = _to_float_safe(pressure_arr[use_index + 1])
-            if p_curr is None or p_next is None:
-                raise MissingDataError("pressure series has non-numeric neighbor")
-            pressure_delta = float(p_next) - float(p_curr)
-        else:
-            raise MissingDataError("pressure neighbor point required for delta (forward difference)")
+            if p_curr is not None and p_next is not None:
+                pressure_delta = float(p_next) - float(p_curr)
+        # try backward as approximation
+        if pressure_delta is None and use_index - 1 >= 0:
+            p_prev = _to_float_safe(pressure_arr[use_index - 1])
+            if p_curr is not None and p_prev is not None:
+                # approximate forward delta as current minus previous
+                pressure_delta = float(p_curr) - float(p_prev)
+        # if still None -> neutral
+        if pressure_delta is None:
+            pressure_delta = 0.0
+    else:
+        # scalar pressure or missing series: neutral
+        pressure_delta = 0.0
 
     # minimal missing requirements depending on profile preferences
     def _pref_is_set(key: str) -> bool:
@@ -165,14 +178,17 @@ def compute_score(
         missing.append("wave_height_m")
     if temp is None and _pref_is_set("preferred_temp_c"):
         missing.append("temperature_c")
-    if moon_val is None:
+    # moon only required if profile explicitly specifies a moon_preference (and not 'any')
+    moon_pref = species_profile.get("moon_preference")
+    if moon_val is None and moon_pref:
+        # If moon_pref is truthy (could be list/string), require numeric moon_val
         missing.append("moon_phase")
-    if pressure_delta is None:
-        missing.append("pressure_hpa_series_with_forward_point")
+    # pressure_delta is no longer treated as mandatory (we default it to neutral above)
+
     if missing:
         raise MissingDataError(f"Missing required inputs: {missing}")
 
-    components = {}
+    components: Dict[str, Dict[str, float]] = {}
 
     # TIDE (phase preference simple check)
     pref_tide = species_profile.get("preferred_tide_phase")
@@ -186,7 +202,12 @@ def compute_score(
                 tide_phase = tp
         if tide_phase is None or not isinstance(tide_phase, str):
             raise MissingDataError("tide_phase required by profile but missing")
-        components["tide"] = {"score_10": 10.0 if str(tide_phase).lower() in [str(x).lower() for x in (pref_tide if isinstance(pref_tide, (list, tuple)) else [pref_tide])] else 3.0}
+        components["tide"] = {
+            "score_10": 10.0
+            if str(tide_phase).lower()
+            in [str(x).lower() for x in (pref_tide if isinstance(pref_tide, (list, tuple)) else [pref_tide])]
+            else 3.0
+        }
     else:
         components["tide"] = {"score_10": 10.0}
 
@@ -250,7 +271,7 @@ def compute_score(
         components["time"] = {"score_10": 10.0}
     else:
         # normalize hours: accept list of ints or single int
-        hours = []
+        hours: List[int] = []
         if isinstance(pref_times, (list, tuple)):
             for it in pref_times:
                 try:
@@ -277,7 +298,7 @@ def compute_score(
             tscore = 3.0
         components["time"] = {"score_10": _clamp_0_10(tscore)}
 
-    # PRESSURE: simple forward delta mapping
+    # PRESSURE: map pressure_delta to score (neutral if no meaningful delta)
     if pressure_delta is None:
         components["pressure"] = {"score_10": 5.0}
     else:
@@ -405,7 +426,14 @@ def compute_forecast(
     timestamps = payload["timestamps"]
     for idx, ts in enumerate(timestamps):
         try:
-            res = compute_score(payload, species_profile=species_profile or {}, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
+            res = compute_score(
+                payload,
+                species_profile=species_profile or {},
+                use_index=idx,
+                safety_limits=safety_limits,
+                units=units,
+                factor_weights=factor_weights,
+            )
             forecast_raw = {
                 "formatted_weather": {
                     "temperature": payload.get("temperature_c")[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),
