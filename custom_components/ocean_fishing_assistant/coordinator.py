@@ -1,226 +1,396 @@
-# custom_components/ocean_fishing_assistant/data_formatter.py
 """
-Minimal, strict DataFormatter (fixed).
-
-Changes:
-- When the raw payload does not include moon_phase, DataFormatter deterministically
-  computes and attaches a moon_phase array (fraction 0.0..1.0) for every timestamp.
-  This preserves strict scoring behavior without requiring external providers to include moon_phase.
-- No other loosened validations; required arrays are still enforced and types validated.
+Strict coordinator: ensures fetcher configured using user-selected units and propagates strict errors
 """
 
-from __future__ import annotations
+from datetime import timedelta
+import async_timeout
+import logging
+import time
+from typing import Optional
+import functools
 
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from homeassistant.util import dt as dt_util
-
+from .const import FETCH_CACHE_TTL, DOMAIN, CONF_TIDE_TTL, TIDE_PROXY_TTL_DEFAULT, CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT, CONF_WORLD_TIDES_API_KEY
+from .tide_proxy import TideProxy
 from . import unit_helpers
-from . import ocean_scoring
-from .const import CONF_FACTOR_WEIGHTS
 
-# Canonical mapping: incoming Open-Meteo key -> canonical key
-HOURLY_KEY_MAP = {
-    "time": "timestamps",
-    "temperature_2m": "temperature_c",
-    "wind_speed_10m": "wind_m_s",
-    "windgusts_10m": "wind_max_m_s",
-    "pressure_msl": "pressure_hpa",
-    "cloudcover": "cloud_cover",
-    "precipitation_probability": "precipitation_probability",
-    "visibility": "visibility_km",
-    "wave_height": "wave_height_m",
-    "wave_period": "wave_period_s",
-    "swell_wave_height": "swell_height_m",
-    "swell_wave_period": "swell_period_s",
-}
+# We'll instantiate TimezoneFinder lazily inside the executor to avoid blocking the event loop
+# (importing TimezoneFinder at module import time can trigger package metadata I/O).
+_LOGGER = logging.getLogger(__name__)
 
 
-def _ensure_length(key: str, timestamps: List[str], arr: List[Any]) -> None:
-    if len(timestamps) != len(arr):
-        raise ValueError(f"Array length mismatch: '{key}' length={len(arr)} vs timestamps length={len(timestamps)}")
-
-
-class DataFormatter:
-    def __init__(self, config_entry_data: Optional[Dict[str, Any]] = None) -> None:
-        self._config_entry_data = config_entry_data or {}
-
-    def _compute_moon_phase_fraction(self, dt: datetime) -> float:
-        """
-        Deterministic moon phase fraction in [0.0, 1.0] using a simple Julian-date based algorithm.
-        Lightweight and does not require external libraries.
-        """
-        # Convert to UTC naive fractional day
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        year = dt.year
-        month = dt.month
-        day = dt.day + dt.hour / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
-        # Algorithm to compute Julian day
-        y = year
-        m = month
-        if m < 3:
-            y -= 1
-            m += 12
-        a = int(y / 100)
-        b = 2 - a + int(a / 4)
-        jd = int(365.25 * (y + 4716)) + int(30.6001 * (m + 1)) + day + b - 1524.5
-        # Reference new moon at JD 2451550.1 (2000-01-06 18:14 UT roughly)
-        days_since_ref = jd - 2451550.1
-        synodic_month = 29.53058867
-        phase = (days_since_ref % synodic_month) / synodic_month
-        return float(phase % 1.0)
-
-    def validate(
+class OFACoordinator(DataUpdateCoordinator):
+    def __init__(
         self,
-        raw_payload: Dict[str, Any],
-        species_profile=None,
+        hass,
+        entry_id: str,
+        fetcher,
+        formatter,
+        lat: float,
+        lon: float,
+        update_interval: int,
+        species: Optional[dict] = None,
         units: str = "metric",
         safety_limits: Optional[dict] = None,
-        precomputed_period_indices: Optional[Dict[str, Dict[str, Any]]] = None,
-        factor_weights: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Validate raw_payload strictly and return canonical data dict.
+        time_periods_mode: str = "full_day",
+        *,
+        fetch_cache_ttl: Optional[int] = None,
+        tide_ttl: Optional[int] = None,
+        tide_phase_offset_minutes: Optional[int] = None,
+        tide_api_key: Optional[str] = None,
+    ):
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="ocean_fishing_assistant",
+            update_interval=timedelta(seconds=update_interval),
+        )
+        self.entry_id = entry_id
+        self.fetcher = fetcher
+        self.formatter = formatter
+        self.lat = lat
+        self.lon = lon
 
-        Raises ValueError on any missing/invalid required item.
-        """
-        if not isinstance(raw_payload, dict):
-            raise ValueError("raw_payload must be a dict")
+        # Do NOT instantiate TimezoneFinder() synchronously here (it does blocking file I/O).
+        # Instead, create lazily in the executor via async_init() and resolve timezone via resolve_location_tz().
+        self._tf = None  # will hold TimezoneFinder instance (created in executor)
+        self.location_tz: Optional[str] = None  # resolved IANA timezone name (set during setup in async_setup_entry)
 
-        hourly = raw_payload.get("hourly")
-        if not isinstance(hourly, dict):
-            raise ValueError("raw_payload['hourly'] must be a dict")
+        # Enforce strict contract for species: allow None or a resolved dict only.
+        self.species = species
+        if self.species is not None:
+            if not isinstance(self.species, dict):
+                raise ValueError(
+                    "Coordinator requires 'species' to be a resolved dict (no fallbacks). "
+                    "Pass a species dict from SpeciesLoader.get_species or get_general_profile."
+                )
+            if "id" not in self.species:
+                raise ValueError("Provided species dict missing required 'id' key (strict)")
 
-        # timestamps
-        times = hourly.get("time")
-        if not isinstance(times, (list, tuple)) or not times:
-            raise ValueError("'hourly.time' must be a non-empty list")
-        timestamps: List[str] = []
-        for t in times:
-            parsed = dt_util.parse_datetime(str(t))
-            if parsed is None:
-                # try numeric epoch fallback
-                try:
-                    v = float(t)
-                    if v > 1e12:
-                        v = v / 1000.0
-                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
-                except Exception as exc:
-                    raise ValueError(f"Unable to parse timestamp '{t}': {exc}") from exc
-            # normalize to Z-formatted ISO
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
+        self.units = units or "metric"
+        # Normalize safety limits into canonical metric keys (e.g. max_wind_m_s, max_gust_m_s)
+        # Accept either canonical keys (max_wind_m_s...) or legacy/display keys (safety_* from UI).
+        raw_limits = safety_limits or {}
+        try:
+            # If the provided dict looks like UI/display keys (prefixed with "safety_"), convert -> canonical metric
+            if any(str(k).startswith("safety_") for k in raw_limits.keys()):
+                canonical = unit_helpers.convert_safety_display_to_metric(raw_limits, entry_units=self.units)
             else:
-                parsed = parsed.astimezone(timezone.utc)
-            timestamps.append(parsed.isoformat().replace("+00:00", "Z"))
+                canonical = dict(raw_limits)  # assume already canonical
+            # Validate & normalize numeric ranges (raises on invalid if strict True)
+            normalized, warnings = unit_helpers.validate_and_normalize_safety_limits(canonical, strict=True)
+            self.safety_limits = normalized or {}
+            if warnings:
+                _LOGGER.debug("Safety limits normalized with warnings: %s", warnings)
+        except Exception as exc:
+            _LOGGER.exception("Failed to normalize/validate safety_limits: %s", exc)
+            # Fail fast in strict mode — do not allow coordinator to start with ambiguous thresholds
+            raise
 
-        hourly_units = raw_payload.get("hourly_units")
-        if not isinstance(hourly_units, dict):
-            raise ValueError("raw_payload must include 'hourly_units' dict (strict)")
+        # Instance-level TTLs (allow override from entry.data)
+        self._fetch_cache_ttl = int(fetch_cache_ttl) if fetch_cache_ttl is not None else int(FETCH_CACHE_TTL)
 
-        canonical: Dict[str, Any] = {}
-        canonical["timestamps"] = timestamps
-        if isinstance(raw_payload.get("location_tz"), str):
-            canonical["location_tz"] = raw_payload.get("location_tz")
+        # Phase offset (minutes) to pass into TideProxy (convert to hours)
+        phase_offset_minutes = int(tide_phase_offset_minutes) if tide_phase_offset_minutes is not None else int(TIDE_PHASE_OFFSET_MINUTES_DEFAULT)
+        phase_offset_hours = float(phase_offset_minutes) / 60.0
 
-        # Map straightforward keys. Required keys raise if absent or not lists.
-        required_keys = ["temperature_2m", "wind_speed_10m", "windgusts_10m", "pressure_msl"]
-        for req in required_keys:
-            if req not in hourly or not isinstance(hourly[req], (list, tuple)):
-                raise ValueError(f"Missing required hourly array '{req}' (strict)")
+        # Store the tide API key used for TideProxy so the coordinator retains which key it's using.
+        # This allows other coordinator methods (or future rebuilds) to reference the same key.
+        self._tide_api_key = tide_api_key
 
-        # perform direct mapping with minimal conversion
-        for om_key, canon_key in HOURLY_KEY_MAP.items():
-            if om_key == "time":
-                continue
-            arr = hourly.get(om_key)
-            if arr is None:
-                continue
-            if not isinstance(arr, (list, tuple)):
-                raise ValueError(f"Hourly key '{om_key}' must be a list")
-            _ensure_length(om_key, timestamps, list(arr))
+        # create TideProxy using provided tide_ttl and phase offset (falls back to TideProxy defaults if None)
+        if tide_ttl is not None:
+            self._tide_proxy = TideProxy(
+                hass,
+                self.lat,
+                self.lon,
+                ttl=int(tide_ttl),
+                phase_offset_hours=phase_offset_hours,
+                api_key=self._tide_api_key,
+            )
+        else:
+            self._tide_proxy = TideProxy(
+                hass,
+                self.lat,
+                self.lon,
+                phase_offset_hours=phase_offset_hours,
+                api_key=self._tide_api_key,
+            )
 
-            # Handle wind arrays: convert to canonical m/s
-            if om_key in ("wind_speed_10m", "windgusts_10m"):
-                # expect unit hint in hourly_units
-                unit_hint = hourly_units.get(om_key)
-                if not unit_hint:
-                    # strict: require unit hint for wind arrays
-                    raise ValueError(f"Missing unit hint for '{om_key}' in hourly_units (strict)")
-                converted = []
-                for v in arr:
-                    if v is None:
-                        converted.append(None)
-                    else:
-                        try:
-                            val = float(v)
-                        except Exception:
-                            raise ValueError(f"Non-numeric wind value in '{om_key}': {v!r}")
-                        uh = str(unit_hint).strip().lower()
-                        if uh in ("m/s", "mps", "m s-1"):
-                            converted.append(float(val))
-                        elif uh in ("km/h", "kmh", "kph"):
-                            converted.append(unit_helpers.kmh_to_m_s(val))
-                        elif uh in ("mph", "mi/h", "miles/h"):
-                            converted.append(unit_helpers.mph_to_m_s(val))
-                        else:
-                            # strict: unknown unit hint is error
-                            raise ValueError(f"Unknown wind unit hint for '{om_key}': {unit_hint!r}")
-                canonical[canon_key] = converted
-            elif om_key == "visibility":
-                # Open-Meteo visibility is reported in meters; canonical is km
-                converted = []
-                for v in arr:
-                    if v is None:
-                        converted.append(None)
-                    else:
-                        converted.append(float(v) / 1000.0)
-                canonical[canon_key] = converted
+        self.time_periods_mode = time_periods_mode or "full_day"
+
+        # Validate fetcher speed unit matches the configured units selection (strict enforcement)
+        expected_speed_unit = None
+        if self.units == "metric":
+            expected_speed_unit = "km/h"
+        elif self.units == "imperial":
+            expected_speed_unit = "mph"
+        else:
+            expected_speed_unit = self.units
+
+        fetcher_speed = getattr(self.fetcher, "speed_unit", None)
+        if fetcher_speed is None:
+            raise ValueError("Fetcher instance missing 'speed_unit' attribute; fetcher must be created with explicit units (strict)")
+        if fetcher_speed != expected_speed_unit:
+            raise ValueError(f"Fetcher speed_unit '{fetcher_speed}' does not match coordinator expected '{expected_speed_unit}' (strict)")
+
+    def rebuild_tide_proxy(self, *, tide_ttl: Optional[int] = None, phase_offset_hours: Optional[float] = None, api_key: Optional[str] = None) -> None:
+        """
+        Helper to rebuild the TideProxy instance with the provided parameters.
+        - tide_ttl: optional TTL in seconds to pass to TideProxy (falls back to existing)
+        - phase_offset_hours: optional phase offset in hours
+        - api_key: world tides API key (strict: must be provided)
+        This updates self._tide_proxy and self._tide_api_key.
+        """
+        if api_key is None:
+            api_key = self._tide_api_key
+        if not api_key:
+            raise RuntimeError("World Tides API key is required to rebuild TideProxy (strict)")
+
+        # compute phase offset hours: preserve existing if not provided
+        if phase_offset_hours is None:
+            old = getattr(self._tide_proxy, "_phase_offset_hours", 0.0)
+            phase_offset_hours = float(old)
+
+        ttl_use = int(tide_ttl) if tide_ttl is not None else getattr(self._tide_proxy, "_ttl", TIDE_PROXY_TTL_DEFAULT)
+
+        # instantiate new TideProxy; this will raise if api_key missing / invalid per strict policy
+        self._tide_proxy = TideProxy(self.hass, self.lat, self.lon, ttl=int(ttl_use), phase_offset_hours=float(phase_offset_hours), api_key=api_key)
+        self._tide_api_key = api_key
+        _LOGGER.debug("Coordinator rebuilt TideProxy with ttl=%s phase_offset_hours=%.3f", ttl_use, phase_offset_hours)
+
+    # Async helper to instantiate heavy objects in executor
+    async def async_init(self) -> None:
+        """Instantiate blocking/time-consuming helper objects in the executor.
+
+        Call once from async_setup_entry (or lazily before first resolve_location_tz).
+        """
+        if self._tf is None:
+            # Import and instantiate TimezoneFinder inside a worker thread to avoid blocking the event loop.
+            def _make_timezonefinder():
+                # local import to avoid doing file I/O at module import time
+                from timezonefinder import TimezoneFinder
+                return TimezoneFinder()
+
+            self._tf = await self.hass.async_add_executor_job(_make_timezonefinder)
+
+    async def resolve_location_tz(self, lat: float, lon: float) -> Optional[str]:
+        """Resolve an IANA timezone name for lat/lon using TimezoneFinder in executor.
+
+        Returns timezone name string or None if resolution fails. This method
+        is strict — caller should decide how to handle a missing tz (we prefer fail-fast).
+        """
+        if self._tf is None:
+            await self.async_init()
+
+        # timezone_at is keyword-only in recent TimezoneFinder versions; use functools.partial
+        try:
+            func = functools.partial(self._tf.timezone_at, lat=lat, lng=lon)
+            tz_name = await self.hass.async_add_executor_job(func)
+            return str(tz_name) if tz_name else None
+        except Exception:
+            _LOGGER.exception("TimezoneFinder raised while resolving tz for %s,%s", lat, lon)
+            return None
+
+    async def _async_update_data(self):
+        """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
+        async with async_timeout.timeout(60):
+            cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
+            # Use an explicit 'days' variable — ensures cache key matches fetch parameters.
+            days = 5
+            # Use centralized rounding helper so coordinate rounding precision is consistent across modules
+            lat_r, lon_r = unit_helpers.round_coords(self.lat, self.lon)
+            cache_key = (lat_r, lon_r, "hourly", int(days))
+            cached = cache_dict.get(cache_key)
+            raw = None
+            if cached and (time.time() - float(cached.get("fetched_at", 0))) < self._fetch_cache_ttl:
+                raw = cached.get("data")
             else:
-                canonical[canon_key] = list(arr)
+                # fetch raw Open-Meteo payload strictly (may raise)
+                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=days)
+                cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
 
-        # minimal canonical checks
-        if "wind_m_s" not in canonical or "temperature_c" not in canonical or "pressure_hpa" not in canonical:
-            raise ValueError("Insufficient canonical keys: required wind/temperature/pressure arrays missing after mapping")
+            # Fetch marine variables (STRICT: marine is required for ocean assistant)
+            if not hasattr(self.fetcher, "fetch_marine_direct"):
+                raise RuntimeError("Fetcher does not implement fetch_marine_direct (marine required)")
 
-        # attach tide if present (we assume tide provider returned canonical aligned arrays)
-        tide_obj = raw_payload.get("tide")
-        if isinstance(tide_obj, dict):
-            canonical["tide"] = tide_obj
+            marine = await self.fetcher.fetch_marine_direct(days=days)  # will raise on failure
+            if not isinstance(marine, dict) or "hourly" not in marine or not isinstance(marine["hourly"], dict):
+                raise RuntimeError("Marine payload invalid (strict)")
 
-        # Under strict policy, moon_phase must be provided by the upstream provider.
-        # Do not infer or compute moon_phase here — fail loudly if missing.
-        mp = hourly.get("moon_phase")
-        if not isinstance(mp, (list, tuple)):
-            raise ValueError("Missing required hourly array 'moon_phase' (strict)")
-        _ensure_length("moon_phase", timestamps, list(mp))
-        canonical["moon_phase"] = list(mp)
+            # Only attach marine arrays that align exactly with raw['hourly']['time']
+            if not isinstance(raw, dict) or "hourly" not in raw or not isinstance(raw["hourly"], dict):
+                raise RuntimeError("Raw forecast payload missing required 'hourly' arrays (strict)")
+            ref_time = raw["hourly"]["time"]
+            if not isinstance(ref_time, (list, tuple)):
+                raise ValueError("Raw hourly 'time' is not a list (strict)")
+            ref_len = len(ref_time)
+            for k, arr in marine["hourly"].items():
+                if k == "time":
+                    continue
+                if not isinstance(arr, (list, tuple)):
+                    raise ValueError(f"Marine hourly key '{k}' is not an array (strict)")
+                if len(arr) != ref_len:
+                    raise ValueError(f"Marine hourly array '{k}' length {len(arr)} does not match forecast time length {ref_len} (strict)")
+                raw["hourly"][k] = list(arr)
 
-        # precomputed period indices (optional) — pass through
-        if precomputed_period_indices is not None:
-            canonical["period_forecasts"] = precomputed_period_indices
+            # Attach tide strictly (tide proxy must return dict with arrays aligned to timestamps)
+            timestamps = raw["hourly"]["time"]
+            # pass location_tz into tide proxy calls
+            if not self.location_tz:
+                raise RuntimeError("Coordinator missing resolved location_tz (strict) - ensure async_init/resolve_location_tz was called during setup")
+            tide = await self._tide_proxy.get_tide_for_timestamps(timestamps, location_tz=self.location_tz)
+            if not isinstance(tide, dict):
+                raise ValueError("TideProxy returned invalid shape (strict)")
 
-        # precompute factor weights param to pass through
-        fw = factor_weights if factor_weights is not None else (self._config_entry_data.get(CONF_FACTOR_WEIGHTS) if isinstance(self._config_entry_data, dict) else None)
+            # --- Normalization for strict canonical shape ---
+            try:
+                nh = tide.get("next_high")
+                nl = tide.get("next_low")
 
-        # compute per-timestamp forecasts using ocean_scoring
-        per_ts_forecasts = ocean_scoring.compute_forecast(canonical, species_profile=species_profile, safety_limits=safety_limits, units=units, factor_weights=fw)
+                def _normalize_entry(entry):
+                    # If already dict, strip any height keys and pass through
+                    if isinstance(entry, dict):
+                        entry_copy = dict(entry)
+                        # Remove any height keys if present (tide heights intentionally removed)
+                        entry_copy.pop("height_m", None)
+                        entry_copy.pop("height", None)
+                        entry_copy.pop("height_meters", None)
+                        return entry_copy
+                    # If a simple timestamp string, convert -> strict dict with only timestamp
+                    if isinstance(entry, str):
+                        return {"timestamp": entry}
+                    # Unknown or missing -> None
+                    return None
 
-        # basic validation: ensure every forecast entry has timestamp and score_10 (score may be None if compute_score failed)
-        for i, e in enumerate(per_ts_forecasts):
-            if "timestamp" not in e:
-                raise ValueError(f"Forecast entry at index {i} missing 'timestamp'")
+                nh_obj = _normalize_entry(nh)
+                nl_obj = _normalize_entry(nl)
 
-        final = {
-            "timestamps": timestamps,
-            **canonical,
-            "raw_payload": raw_payload,
-            "per_timestamp_forecasts": per_ts_forecasts,
-            # period_forecasts will be constructed by DataFormatter if not provided by coordinator; for strict mode we rely on coordinator's precomputed indices
-            "period_forecasts": canonical.get("period_forecasts", {}),
-        }
-        return final
+                # Overwrite canonical keys with normalized objects (may be None)
+                tide["next_high"] = nh_obj
+                tide["next_low"] = nl_obj
+            except Exception:
+                # If normalization fails for any reason, log but continue — downstream strict checks will catch it.
+                _LOGGER.exception("Failed to normalize tide 'next_high'/'next_low' payload; continuing with original tide object")
+
+            # only attach tide arrays if they are same length as timestamps; attach scalars as well
+            tide_validated = {}
+            for k, v in tide.items():
+                if isinstance(v, (list, tuple)):
+                    if len(v) != len(timestamps):
+                        raise ValueError(f"Tide array '{k}' length {len(v)} does not match timestamps length {len(timestamps)} (strict)")
+                    tide_validated[k] = list(v)
+                else:
+                    tide_validated[k] = v
+            # Set validated tide object strictly under 'tide' key (no backward-compat top-level copies)
+            raw["tide"] = tide_validated
+
+            # Precompute period indices using TideProxy + Skyfield (strict)
+            # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
+            _LOGGER.debug(
+                "compute_period_indices_for_timestamps called: mode=%s sample_count=%d sample_first=%s sample_last=%s location_tz=%s",
+                self.time_periods_mode,
+                len(timestamps) if timestamps is not None else 0,
+                timestamps[0] if timestamps else None,
+                timestamps[-1] if timestamps else None,
+                self.location_tz,
+            )
+
+            try:
+                period_indices = await self._tide_proxy.compute_period_indices_for_timestamps(
+                    timestamps,
+                    mode=self.time_periods_mode,
+                    dawn_window_hours=1.0,
+                    location_tz=self.location_tz,
+                )
+            except Exception:
+                _LOGGER.exception("Failed to compute time-period indices from Skyfield (strict)")
+                # propagate strict failure
+                raise
+
+            # Attach current snapshot (strict)
+            if not hasattr(self.fetcher, "get_weather_data"):
+                raise RuntimeError("Fetcher does not implement get_weather_data (strict)")
+            try:
+                current = await self.fetcher.get_weather_data()  # will raise on failure
+            except Exception as exc:
+                # Log with context for easier debugging, then re-raise as a strict error.
+                _LOGGER.exception(
+                    "Failed to construct current snapshot from Open-Meteo hourly data for %s,%s: %s",
+                    self.lat,
+                    self.lon,
+                    exc,
+                )
+                raise RuntimeError("Failed to construct current weather snapshot from hourly arrays (strict)") from exc
+
+            # STRICT sanity check: ensure current contains required keys (all required under strict policy)
+            required_current = ["temperature", "wind_speed", "wind_gust", "cloud_cover", "precipitation_probability", "pressure", "wind_unit"]
+            missing_current = [k for k in required_current if not (isinstance(current, dict) and current.get(k) is not None)]
+            if missing_current:
+                _LOGGER.error(
+                    "Constructed current snapshot missing required fields for %s,%s: missing=%s current=%s",
+                    self.lat,
+                    self.lon,
+                    missing_current,
+                    current,
+                )
+                raise RuntimeError(f"Constructed current snapshot missing required fields (strict): {missing_current}")
+
+            raw["current"] = current
+
+            # Insert location_tz into raw so DataFormatter/canonical get access to it
+            raw["location_tz"] = self.location_tz
+
+            # Run strict formatter (errors propagate). Pass precomputed period indices so DataFormatter uses them.
+            data = self.formatter.validate(
+                raw,
+                species_profile=self.species,
+                units=self.units,
+                safety_limits=self.safety_limits,
+                precomputed_period_indices=period_indices,
+            )
+
+            # Strict validation: ensure the per-timestamp forecast covering the current UTC hour
+            # contains a numeric score_100. If not, fail fast so the integration does not start in an
+            # inconsistent state.
+            try:
+                from homeassistant.util import dt as dt_util
+
+                forecasts = data.get("per_timestamp_forecasts") or []
+                if not isinstance(forecasts, list) or not forecasts:
+                    raise RuntimeError("Formatter produced empty per_timestamp_forecasts (strict)")
+
+                now_z = dt_util.utcnow().replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+
+                found = None
+                # exact match first
+                for entry in forecasts:
+                    ts = entry.get("timestamp")
+                    if ts is None:
+                        continue
+                    if ts == now_z:
+                        found = entry
+                        break
+
+                # fallback to first future timestamp (strict but deterministic)
+                if found is None:
+                    for entry in forecasts:
+                        ts = entry.get("timestamp")
+                        if ts is None:
+                            continue
+                        if ts >= now_z:
+                            found = entry
+                            break
+
+                if found is None:
+                    raise RuntimeError("Formatter did not produce a forecast covering current time (strict)")
+
+                if found.get("score_100") is None:
+                    _LOGGER.error("Strict validation failed: current per-timestamp forecast missing score_100; forecast_raw=%s", found.get("forecast_raw"))
+                    raise RuntimeError("Per-timestamp forecast covering current time missing score_100 (strict)")
+            except Exception:
+                _LOGGER.exception("Strict validation of current forecast failed")
+                raise
+
+            return data
