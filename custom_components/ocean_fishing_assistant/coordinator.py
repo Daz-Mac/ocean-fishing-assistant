@@ -275,45 +275,13 @@ class OFACoordinator(DataUpdateCoordinator):
                 _LOGGER.exception("Failed to normalize tide 'next_high'/'next_low' payload; continuing with original tide object")
 
             # only attach tide arrays if they are same length as timestamps; attach scalars as well
-            tide_validated = {}
             for k, v in tide.items():
                 if isinstance(v, (list, tuple)):
                     if len(v) != len(timestamps):
                         raise ValueError(f"Tide array '{k}' length {len(v)} does not match timestamps length {len(timestamps)} (strict)")
-                    tide_validated[k] = list(v)
+                    raw.setdefault("tide", {})[k] = list(v)
                 else:
-                    tide_validated[k] = v
-            # Set validated tide object strictly under 'tide' key (no backward-compat top-level copies)
-            raw["tide"] = tide_validated
-
-            # COPY moon_phase from tide into raw['hourly'] if hourly doesn't already have it.
-            # This does NOT compute moon phases  it only preserves what TideProxy produced.
-            try:
-                # Only copy when hourly lacks moon_phase and tide provided an array with matching length
-                if isinstance(raw.get("hourly"), dict) and "moon_phase" not in raw["hourly"]:
-                    mp = tide_validated.get("moon_phase")
-                    if isinstance(mp, (list, tuple)):
-                        if len(mp) == len(timestamps):
-                            raw["hourly"]["moon_phase"] = list(mp)
-                            none_indices = [i for i, v in enumerate(mp) if v is None]
-                            if none_indices:
-                                _LOGGER.warning(
-                                    "TideProxy produced moon_phase with None entries at indices %s for %s,%s \u2014 copying into raw['hourly'] anyway (strict expects moon_phase).",
-                                    none_indices,
-                                    self.lat,
-                                    self.lon,
-                                )
-                        else:
-                            _LOGGER.warning(
-                                "TideProxy moon_phase length %d does not match timestamps length %d for %s,%s; not copying into raw['hourly'].",
-                                len(mp),
-                                len(timestamps),
-                                self.lat,
-                                self.lon,
-                            )
-            except Exception:
-                # Never compute moon phase here; if copying fails, log and continue  downstream strict checks will catch missing moon_phase.
-                _LOGGER.exception("Failed while attempting to copy tide['moon_phase'] into raw['hourly']")
+                    raw.setdefault("tide", {})[k] = v
 
             # Precompute period indices using TideProxy + Skyfield (strict)
             # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
@@ -379,47 +347,5 @@ class OFACoordinator(DataUpdateCoordinator):
                 safety_limits=self.safety_limits,
                 precomputed_period_indices=period_indices,
             )
-
-            # Strict validation: ensure the per-timestamp forecast covering the current UTC hour
-            # contains a numeric score_100. If not, fail fast so the integration does not start in an
-            # inconsistent state.
-            try:
-                from homeassistant.util import dt as dt_util
-
-                forecasts = data.get("per_timestamp_forecasts") or []
-                if not isinstance(forecasts, list) or not forecasts:
-                    raise RuntimeError("Formatter produced empty per_timestamp_forecasts (strict)")
-
-                now_z = dt_util.utcnow().replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
-
-                found = None
-                # exact match first
-                for entry in forecasts:
-                    ts = entry.get("timestamp")
-                    if ts is None:
-                        continue
-                    if ts == now_z:
-                        found = entry
-                        break
-
-                # fallback to first future timestamp (strict but deterministic)
-                if found is None:
-                    for entry in forecasts:
-                        ts = entry.get("timestamp")
-                        if ts is None:
-                            continue
-                        if ts >= now_z:
-                            found = entry
-                            break
-
-                if found is None:
-                    raise RuntimeError("Formatter did not produce a forecast covering current time (strict)")
-
-                if found.get("score_100") is None:
-                    _LOGGER.error("Strict validation failed: current per-timestamp forecast missing score_100; forecast_raw=%s", found.get("forecast_raw"))
-                    raise RuntimeError("Per-timestamp forecast covering current time missing score_100 (strict)")
-            except Exception:
-                _LOGGER.exception("Strict validation of current forecast failed")
-                raise
 
             return data
