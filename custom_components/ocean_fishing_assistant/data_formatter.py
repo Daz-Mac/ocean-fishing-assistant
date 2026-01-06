@@ -192,34 +192,17 @@ class DataFormatter:
         if isinstance(tide_obj, dict):
             canonical["tide"] = tide_obj
 
-        # attach other optional parts directly if present
-        for key in ("moon_phase", "astro", "marine"):
-            if key in raw_payload:
-                canonical[key] = raw_payload.get(key)
+        # Under strict policy, moon_phase must be provided by the upstream provider.
+        # Do not infer or compute moon_phase here — fail loudly if missing.
+        mp = hourly.get("moon_phase")
+        if not isinstance(mp, (list, tuple)):
+            raise ValueError("Missing required hourly array 'moon_phase' (strict)")
+        _ensure_length("moon_phase", timestamps, list(mp))
+        canonical["moon_phase"] = list(mp)
 
         # precomputed period indices (optional) — pass through
         if precomputed_period_indices is not None:
             canonical["period_forecasts"] = precomputed_period_indices
-
-        # If moon_phase missing in canonical, compute deterministic moon_phase per timestamp
-        if "moon_phase" not in canonical:
-            phases: List[float] = []
-            for ts in timestamps:
-                dt = dt_util.parse_datetime(ts)
-                if dt is None:
-                    # fallback to new moon (deterministic) if parsing unexpectedly fails
-                    phases.append(0.0)
-                    continue
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                else:
-                    dt = dt.astimezone(timezone.utc)
-                try:
-                    phases.append(self._compute_moon_phase_fraction(dt))
-                except Exception:
-                    # conservative default
-                    phases.append(0.0)
-            canonical["moon_phase"] = phases
 
         # precompute factor weights param to pass through
         fw = factor_weights if factor_weights is not None else (self._config_entry_data.get(CONF_FACTOR_WEIGHTS) if isinstance(self._config_entry_data, dict) else None)

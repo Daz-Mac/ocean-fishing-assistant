@@ -2,10 +2,12 @@
 """
 Simplified, strict scoring module (fixed).
 
-Changes:
+Changes since last version included:
 - Pressure delta now prefers forward difference, falls back to backward difference,
   and finally defaults to a neutral 0.0 (no longer raises MissingDataError for end-of-series).
 - Moon phase is only required when the species profile explicitly expresses a moon preference.
+- Tide phase lookup now accepts either a top-level "tide_phase" key or a nested
+  "tide" dict with "tide_phase" list/key (both canonical shapes supported).
 - Keeps the rest of the strict checks for other profile-required inputs.
 """
 
@@ -194,20 +196,31 @@ def compute_score(
     pref_tide = species_profile.get("preferred_tide_phase")
     if pref_tide:
         tide_phase = None
+
+        # Accept tide_phase at top-level or under a nested 'tide' dict (canonical shapes)
+        # 1) top-level "tide_phase"
         if "tide_phase" in data:
             tp = data.get("tide_phase")
             if isinstance(tp, (list, tuple)):
                 tide_phase = tp[use_index] if use_index < len(tp) else None
             else:
                 tide_phase = tp
+        else:
+            # 2) nested under data["tide"]["tide_phase"]
+            tide_obj = data.get("tide")
+            if isinstance(tide_obj, dict) and "tide_phase" in tide_obj:
+                tp = tide_obj.get("tide_phase")
+                if isinstance(tp, (list, tuple)):
+                    tide_phase = tp[use_index] if use_index < len(tp) else None
+                else:
+                    tide_phase = tp
+
+        # validate
         if tide_phase is None or not isinstance(tide_phase, str):
             raise MissingDataError("tide_phase required by profile but missing")
-        components["tide"] = {
-            "score_10": 10.0
-            if str(tide_phase).lower()
-            in [str(x).lower() for x in (pref_tide if isinstance(pref_tide, (list, tuple)) else [pref_tide])]
-            else 3.0
-        }
+        # normalize comparison (case-insensitive)
+        good_names = [str(x).lower() for x in (pref_tide if isinstance(pref_tide, (list, tuple)) else [pref_tide])]
+        components["tide"] = {"score_10": 10.0 if str(tide_phase).lower() in good_names else 3.0}
     else:
         components["tide"] = {"score_10": 10.0}
 
