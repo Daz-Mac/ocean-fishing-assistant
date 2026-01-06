@@ -1,33 +1,24 @@
 # custom_components/ocean_fishing_assistant/ocean_scoring.py
 """
-Strict Ocean Fishing Scoring — no fallbacks, fail loudly.
+Simplified, strict scoring module.
 
-This module expects DataFormatter to normalize input into canonical keys:
-  - payload["timestamps"] : list of ISO timestamps
-  - payload["moon_phase"] : per-timestamp list OR scalar
-  - payload["tide"] : optional dict with tide metadata (may include tide_phase and moon_phase)
-  - payload["wind_m_s"] : per-timestamp list
-  - payload["wave_height_m"] : per-timestamp list
-  - payload["pressure_hpa"] : per-timestamp list (must have at least one future point)
-  - payload["temperature_c"] : per-timestamp list
-
-Any missing or malformed required input will raise MissingDataError (logged).
+Expect canonical payload produced by DataFormatter:
+ - payload["timestamps"] : list of ISO timestamps (strings)
+ - payload["wind_m_s"], payload["wind_max_m_s"], payload["wave_height_m"], payload["temperature_c"], payload["pressure_hpa"], optional payload["swell_period_s"], optional payload["tide_phase"]
+ - payload["location_tz"] required for time-based scoring
 """
+
 from __future__ import annotations
 
-import math
-import logging
-from typing import Any, Dict, List, Optional, Tuple, Union, Iterable
+from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
-
-_LOGGER = logging.getLogger(__name__)
 
 from zoneinfo import ZoneInfo
 
-from . import unit_helpers
 from .moon_utils import coerce_phase, matches_moon_preference
+from . import unit_helpers
 
-# Default global factor weights (used when no per-entry weights supplied)
+# Default factor weights
 FACTOR_WEIGHTS = {
     "tide": 0.25,
     "wind": 0.15,
@@ -41,7 +32,7 @@ FACTOR_WEIGHTS = {
 
 
 class MissingDataError(ValueError):
-    """Raised when required inputs for scoring are missing."""
+    pass
 
 
 def _to_float_safe(v: Any) -> Optional[float]:
@@ -53,194 +44,43 @@ def _to_float_safe(v: Any) -> Optional[float]:
         return None
 
 
-def _linear_within_score_10(value: float, pref_min: float, pref_max: float, tolerance: float) -> float:
-    if math.isclose(pref_min, pref_max):
-        low = pref_min - tolerance
-        high = pref_max + tolerance
-    else:
-        low = pref_min
-        high = pref_max
-    span_low = low - tolerance
-    span_high = high + tolerance
-    if value >= low and value <= high:
-        return 10.0
-    if value <= span_low or value >= span_high:
-        return 0.0
-    if value < low:
-        return 10.0 * (value - span_low) / (low - span_low)
-    if value > high:
-        return 10.0 * (span_high - value) / (span_high - high)
-    return 0.0
-
-
 def _clamp_0_10(x: float) -> float:
     return max(0.0, min(10.0, float(x)))
 
 
-def _coerce_datetime(v: Any) -> Optional[datetime]:
-    if v is None:
-        return None
-    if isinstance(v, datetime):
-        return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
-    try:
-        s = str(v)
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        parsed = datetime.fromisoformat(s)
-        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    except Exception:
-        try:
-            if isinstance(v, (int, float)):
-                val = float(v)
-                if val > 1e12:
-                    val = val / 1000.0
-                return datetime.fromtimestamp(val, tz=timezone.utc)
-        except Exception:
-            pass
-    return None
-
-
-def _format_safety_reason(code: str, safety_limits: Optional[Dict[str, Any]], units: str = "metric") -> str:
-    if not code:
-        return ""
-    code = str(code)
-
-    def _format_wind_val(val_m_s: float) -> str:
-        try:
-            val = float(val_m_s)
-        except Exception:
-            return f"{val_m_s} m/s"
-        try:
-            if units == "metric":
-                conv = unit_helpers.m_s_to_kmh(val)
-                unit_label = "km/h"
-            elif units == "imperial":
-                conv = unit_helpers.m_s_to_mph(val)
-                unit_label = "mph"
-            else:
-                conv = val
-                unit_label = "m/s"
-            return f"{round(conv, 1)} {unit_label}"
-        except Exception:
-            return f"{val} m/s"
-
-    if ">" in code:
-        k, v = code.split(">", 1)
-        k = k.strip()
-        v = v.strip()
-        is_str_threshold = False
-        try:
-            val = float(v)
-        except Exception:
-            val = v
-            is_str_threshold = True
-        if k in ("wind", "wind_m_s"):
-            if is_str_threshold:
-                return f"Wind exceeds safe limit ({val})"
-            return f"Wind exceeds safe limit ({_format_wind_val(val)})"
-        if k in ("wave", "wave_height"):
-            return f"Wave height exceeds safe limit ({val} m)"
-        if k in ("swell", "swell_period"):
-            return f"Swell period below safe minimum ({val} s)"
-        if k in ("gust", "wind_gust"):
-            if is_str_threshold:
-                return f"Gust exceeds safe limit ({val})"
-            return f"Gust exceeds safe limit ({_format_wind_val(val)})"
-        if k in ("vis", "visibility"):
-            return f"Visibility below safe minimum ({val} km)"
-        if k in ("precip", "precip_chance", "precipitation"):
-            return f"Precipitation chance exceeds safe limit ({val} %)"
-
-        return f"{k} > {val}"
-    if "<" in code:
-        k, v = code.split("<", 1)
-        k = k.strip()
-        try:
-            val = float(v)
-        except Exception:
-            val = v
-        if k in ("vis", "visibility"):
-            return f"Visibility below safe minimum ({val} km)"
-        if k in ("swell", "swell_period"):
-            return f"Swell period below safe minimum ({val} s)"
-        return f"{k} < {val}"
-    if code == "wind_near_limit":
-        if safety_limits:
-            mw = safety_limits.get("max_wind_m_s")
-            if mw is not None:
-                return f"Wind approaching configured maximum ({_format_wind_val(mw)})"
-        return "Wind near configured maximum"
-    if code == "wave_near_limit":
-        if safety_limits:
-            mw = safety_limits.get("max_wave_height_m")
-            if mw is not None:
-                return f"Wave height approaching configured maximum ({mw} m)"
-        return "Wave height near configured minimum"
-    if code == "vis_near_limit":
-        if safety_limits:
-            mv = safety_limits.get("min_visibility_km")
-            if mv is not None:
-                return f"Visibility close to minimum ({mv} km)"
-        return "Visibility near configured minimum"
-    if code == "swell_near_limit":
-        if safety_limits:
-            ms = safety_limits.get("min_swell_period_s")
-            if ms is not None:
-                return f"Swell period approaching configured minimum ({ms} s)"
-        return "Swell period near configured minimum"
-    if code == "gust_near_limit":
-        if safety_limits:
-            mg = safety_limits.get("max_gust_m_s")
-            if mg is not None:
-                return f"Gust approaching configured maximum ({_format_wind_val(mg)})"
-        return "Gust near configured maximum"
-    if code == "precip_near_limit":
-        if safety_limits:
-            mp = safety_limits.get("max_precip_chance_pct")
-            if mp is not None:
-                return f"Precipitation chance approaching configured maximum ({mp} %)"
-        return "Precip chance near configured maximum"
-    return code
-
-
 def _validate_and_normalize_factor_weights(weights: Optional[Dict[str, float]]) -> Dict[str, float]:
-    """
-    Validate that weights include exactly the keys in FACTOR_WEIGHTS,
-    all values are numeric >= 0 and sum > 0. Normalize them to sum to 1.0.
-
-    If weights is None, returns normalized default FACTOR_WEIGHTS.
-    Raises ValueError on invalid inputs.
-    """
     if weights is None:
-        # normalize defaults
         total = sum(FACTOR_WEIGHTS.values()) or 1.0
         return {k: float(v) / total for k, v in FACTOR_WEIGHTS.items()}
-
-    if not isinstance(weights, dict):
-        raise ValueError("factor_weights must be a dict mapping factor name -> numeric weight")
-
-    expected_keys = set(FACTOR_WEIGHTS.keys())
-    provided_keys = set(weights.keys())
-    if provided_keys != expected_keys:
-        raise ValueError(f"factor_weights must contain exactly keys: {sorted(expected_keys)}; provided: {sorted(provided_keys)}")
-
-    # numeric and non-negative
-    norm: Dict[str, float] = {}
-    for k, v in weights.items():
-        try:
-            fv = float(v)
-        except Exception:
-            raise ValueError(f"factor_weights value for '{k}' is not numeric: {v!r}")
-        if fv < 0.0:
-            raise ValueError(f"factor_weights value for '{k}' must be >= 0")
-        norm[k] = fv
-
+    if set(weights.keys()) != set(FACTOR_WEIGHTS.keys()):
+        raise ValueError("factor_weights must contain exact factor keys")
+    norm = {k: float(weights[k]) for k in weights}
     total = sum(norm.values())
-    if total <= 0.0:
+    if total <= 0:
         raise ValueError("factor_weights sum must be > 0")
+    return {k: norm[k] / total for k in norm}
 
-    # Normalize to sum to 1.0
-    return {k: float(v) / float(total) for k, v in norm.items()}
+
+def _coerce_iso_dt(s: Any) -> Optional[datetime]:
+    if s is None:
+        return None
+    try:
+        if isinstance(s, datetime):
+            return s.astimezone(timezone.utc) if s.tzinfo else s.replace(tzinfo=timezone.utc)
+        ss = str(s)
+        if ss.endswith("Z"):
+            ss = ss[:-1] + "+00:00"
+        dt = datetime.fromisoformat(ss)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        try:
+            # numeric epoch
+            v = float(s)
+            if v > 1e12:
+                v = v / 1000.0
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except Exception:
+            return None
 
 
 def compute_score(
@@ -251,740 +91,301 @@ def compute_score(
     units: str = "metric",
     factor_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    if not data or "timestamps" not in data:
-        raise MissingDataError("Missing timestamps in data")
-    timestamps = data.get("timestamps", [])
+    """
+    Strict compute for a single timestamp (index).
+    This implementation is intentionally minimal and assumes canonical inputs.
+    """
+    if "timestamps" not in data:
+        raise MissingDataError("timestamps missing")
+    timestamps = data["timestamps"]
     if use_index < 0 or use_index >= len(timestamps):
-        raise MissingDataError(f"use_index {use_index} out of range")
+        raise MissingDataError("use_index out of range")
 
-    # Enforce a resolved species profile dict (no fallback)
+    # species_profile must be a dict (per strict policy)
     if not isinstance(species_profile, dict):
-        raise MissingDataError(f"species_profile must be a resolved dict (species metadata). Received: {species_profile!r}")
-    profile = species_profile
+        raise MissingDataError("species_profile must be a dict")
 
-    # Validate factor weights (either defaults or provided)
+    weights = _validate_and_normalize_factor_weights(factor_weights)
+
+    tz = data.get("location_tz")
+    if not tz:
+        raise MissingDataError("location_tz required for time scoring")
     try:
-        weights_norm = _validate_and_normalize_factor_weights(factor_weights)
+        tzinfo = ZoneInfo(tz)
     except Exception as exc:
-        # Fail fast — weight config invalid
-        raise ValueError(f"Invalid factor_weights provided: {exc}")
+        raise MissingDataError(f"invalid timezone {tz}: {exc}")
 
-    # Location timezone is required (strict)
-    tz_str = data.get("location_tz")
-    if not isinstance(tz_str, str) or not tz_str:
-        raise MissingDataError("location_tz (IANA timezone string) is required in data for local time scoring (strict)")
-    try:
-        tzinfo_local = ZoneInfo(tz_str)
-    except Exception as exc:
-        raise MissingDataError(f"Invalid location_tz '{tz_str}': {exc}")
-
-    # Helper to detect whether a profile preference is actually set (not None / not empty list)
-    def _pref_is_set(x: Any) -> bool:
-        return x is not None and not (isinstance(x, (list, tuple)) and len(x) == 0)
-
-    # Coerce empty-list fields to None to avoid numeric conversion errors
-    for key in ("preferred_wind_m_s", "preferred_temp_c", "max_wave_height_m", "preferred_tide_phase", "preferred_times", "moon_preference", "preferred_swell_period_s"):
-        val = profile.get(key)
-        if isinstance(val, (list, tuple)) and len(val) == 0:
-            profile[key] = None
-
-    def _get_at(key: str, index: int = 0) -> Optional[float]:
-        if key not in data:
+    # helpers to fetch scalar at index
+    def _get(key: str) -> Optional[float]:
+        v = data.get(key)
+        if v is None:
             return None
-        arr = data.get(key)
-        if arr is None:
-            return None
-        if isinstance(arr, (list, tuple)):
-            try:
-                return _to_float_safe(arr[index])
-            except Exception:
-                return None
-        return _to_float_safe(arr)
+        if isinstance(v, (list, tuple)):
+            return _to_float_safe(v[use_index]) if use_index < len(v) else None
+        return _to_float_safe(v)
 
-    wind = _get_at("wind_m_s", use_index)
-    wave = _get_at("wave_height_m", use_index)
-    temp = _get_at("temperature_c", use_index)
+    wind = _get("wind_m_s")
+    gust = _get("wind_max_m_s")
+    wave = _get("wave_height_m")
+    temp = _get("temperature_c")
     pressure_arr = data.get("pressure_hpa")
+    swell_period = _get("swell_period_s")
 
-    # wave/wave-period values — use swell_period_s as canonical period
-    swell_period = _get_at("swell_period_s", use_index)
-
-    moon_phase_val = None
+    # moon
+    moon_val = None
     if "moon_phase" in data:
         mp = data.get("moon_phase")
         if isinstance(mp, (list, tuple)):
-            moon_phase_val = _to_float_safe(mp[use_index]) if use_index < len(mp) else None
+            moon_val = _to_float_safe(mp[use_index]) if use_index < len(mp) else None
         else:
-            moon_phase_val = _to_float_safe(mp)
-    # coerce to normalized 0..1 using helper (optional; matching uses coerce internally)
-    moon_phase_val = coerce_phase(moon_phase_val) if moon_phase_val is not None else None
+            moon_val = _to_float_safe(mp)
+        moon_val = coerce_phase(moon_val) if moon_val is not None else None
 
-    # --- robust pressure delta calculation with backward-diff fallback ---
+    # pressure delta (forward difference only, strict)
     pressure_delta = None
-    pressure_arr_ok = False
     if isinstance(pressure_arr, (list, tuple)):
-        # ensure we have a current value at use_index
-        p_curr = _to_float_safe(pressure_arr[use_index]) if use_index < len(pressure_arr) else None
-        if p_curr is not None:
-            # prefer forward difference when next point exists
-            if use_index + 1 < len(pressure_arr):
-                p_next = _to_float_safe(pressure_arr[use_index + 1])
-                if p_next is not None:
-                    pressure_delta = float(p_next) - float(p_curr)
-                    pressure_arr_ok = True
-            # fallback to backward difference when forward not available
-            if not pressure_arr_ok and use_index - 1 >= 0:
-                p_prev = _to_float_safe(pressure_arr[use_index - 1])
-                if p_prev is not None:
-                    pressure_delta = float(p_curr) - float(p_prev)
-                    pressure_arr_ok = True
-    else:
-        pressure_arr_ok = False
+        if use_index + 1 < len(pressure_arr):
+            p_curr = _to_float_safe(pressure_arr[use_index])
+            p_next = _to_float_safe(pressure_arr[use_index + 1])
+            if p_curr is None or p_next is None:
+                raise MissingDataError("pressure series has non-numeric neighbor")
+            pressure_delta = float(p_next) - float(p_curr)
+        else:
+            raise MissingDataError("pressure neighbor point required for delta (forward difference)")
 
-    # Build missing list but only require components if profile requires them (except pressure & moon per policy)
+    # minimal missing requirements depending on profile preferences
+    def _pref_is_set(key: str) -> bool:
+        v = species_profile.get(key)
+        return v is not None and not (isinstance(v, (list, tuple)) and len(v) == 0)
+
     missing = []
-    # wind required if species provided preference for wind
-    if wind is None and _pref_is_set(profile.get("preferred_wind_m_s")):
+    if wind is None and _pref_is_set("preferred_wind_m_s"):
         missing.append("wind_m_s")
-    # wave required if species provided a max wave preference
-    if wave is None and _pref_is_set(profile.get("max_wave_height_m")):
+    if wave is None and _pref_is_set("max_wave_height_m"):
         missing.append("wave_height_m")
-    # temp required if species provided a pref temp
-    if temp is None and _pref_is_set(profile.get("preferred_temp_c")):
+    if temp is None and _pref_is_set("preferred_temp_c"):
         missing.append("temperature_c")
-    # moon: keep strict requirement (integration provides moon_phase via tide provider)
-    if moon_phase_val is None:
+    if moon_val is None:
         missing.append("moon_phase")
-    # require at least a neighbor pressure point (forward OR backward) -- we keep this strict
-    if not pressure_arr_ok:
-        missing.append("pressure_hpa_series_with_neighbor_point")
-    # swell period required if profile specifies preferred_swell_period_s
-    if _pref_is_set(profile.get("preferred_swell_period_s")) and swell_period is None:
-        missing.append("swell_period_s")
-
+    if pressure_delta is None:
+        missing.append("pressure_hpa_series_with_forward_point")
     if missing:
-        msg = f"Missing required inputs for scoring at index={use_index} timestamp={timestamps[use_index]}: {', '.join(missing)}"
-        raise MissingDataError(msg)
+        raise MissingDataError(f"Missing required inputs: {missing}")
 
-    comp: Dict[str, Any] = {}
+    components = {}
 
-    # TIDE component — phase-based only (and tolerant "any" token)
-    try:
-        pref_tide_phase_raw = profile.get("preferred_tide_phase", []) or []
-        # normalize and treat "any"/"none" as no preference
-        pref_tide_phase = [str(p).strip().lower() for p in (pref_tide_phase_raw or []) if str(p).strip().lower() not in ("any", "none", "")]
-        tide_phase_val = None
-        # locate tide_phase (top-level or under tide)
+    # TIDE (phase preference simple check)
+    pref_tide = species_profile.get("preferred_tide_phase")
+    if pref_tide:
+        tide_phase = None
         if "tide_phase" in data:
             tp = data.get("tide_phase")
             if isinstance(tp, (list, tuple)):
-                tide_phase_val = tp[use_index] if use_index < len(tp) else None
+                tide_phase = tp[use_index] if use_index < len(tp) else None
             else:
-                tide_phase_val = tp
-        elif "tide" in data and isinstance(data.get("tide"), dict):
-            tp = data.get("tide").get("tide_phase")
-            if isinstance(tp, (list, tuple)):
-                tide_phase_val = tp[use_index] if use_index < len(tp) else None
-            else:
-                tide_phase_val = tp
+                tide_phase = tp
+        if tide_phase is None or not isinstance(tide_phase, str):
+            raise MissingDataError("tide_phase required by profile but missing")
+        components["tide"] = {"score_10": 10.0 if str(tide_phase).lower() in [str(x).lower() for x in (pref_tide if isinstance(pref_tide, (list, tuple)) else [pref_tide])] else 3.0}
+    else:
+        components["tide"] = {"score_10": 10.0}
 
-        # Strict: if pref_tide_phase specified (non-empty after filtering), tide_phase MUST be present and be a string.
-        if pref_tide_phase:
-            if tide_phase_val is None or not isinstance(tide_phase_val, str):
-                raise MissingDataError("tide_phase (string) required by species profile but missing or not a string")
-            matched = any(str(pref).lower() == str(tide_phase_val).lower() for pref in pref_tide_phase)
-            tide_score = 10.0 if matched else 3.0
+    # WIND simple linear preference (single value or [min,max])
+    pref_wind = species_profile.get("preferred_wind_m_s")
+    if not pref_wind:
+        components["wind"] = {"score_10": 10.0}
+    else:
+        if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
+            wmin = float(pref_wind[0]); wmax = float(pref_wind[1])
         else:
-            # No preference -> maximum score (do not penalize missing tide phase)
-            tide_score = 10.0
-        tide_score = _clamp_0_10(tide_score)
-        comp_tide: Dict[str, Any] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
-
-        PHASE_NAME_MAP = {
-            "rising": "Rising",
-            "falling": "Falling",
-            "high": "High Tide",
-            "low": "Low Tide",
-        }
-        try:
-            if tide_phase_val is not None and isinstance(tide_phase_val, str):
-                comp_tide["tide_phase_name"] = PHASE_NAME_MAP.get(tide_phase_val.lower(), tide_phase_val)
-        except Exception:
-            pass
-
-        comp["tide"] = comp_tide
-    except MissingDataError:
-        # propagate strictly
-        raise
-    except Exception:
-        _LOGGER.debug("Failed to compute tide component (phase-based)", exc_info=True)
-
-    # WIND component
-    try:
-        pref_wind = profile.get("preferred_wind_m_s")
-        if pref_wind is None:
-            if wind is None:
-                wind_score = 10.0
-            else:
-                wind_score = 10.0
+            wmin = wmax = float(pref_wind)
+        if wind is None:
+            raise MissingDataError("wind required by profile")
+        # tolerance 20% of max or 1.0 m/s minimum
+        tol = max(1.0, 0.2 * max(1.0, wmax))
+        if wmin <= wind <= wmax:
+            ws = 10.0
+        elif wind < wmin - tol or wind > wmax + tol:
+            ws = 0.0
+        elif wind < wmin:
+            ws = 10.0 * (wind - (wmin - tol)) / (wmin - (wmin - tol))
         else:
-            if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
-                pw_min, pw_max = float(pref_wind[0]), float(pref_wind[1])
-            else:
-                pw = float(pref_wind) if pref_wind is not None else 0.0
-                pw_min, pw_max = pw, pw
-            wind_tol = max(1.0, 0.2 * max(1.0, pw_max))
-            if wind is None:
-                raise MissingDataError("wind_m_s required by profile but missing")
-            wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
-        wind_score = _clamp_0_10(wind_score)
-        comp["wind"] = {"score_10": round(wind_score, 3), "score_100": int(round(wind_score * 10))}
-    except MissingDataError:
-        raise
-    except Exception:
-        _LOGGER.debug("Failed to compute wind component", exc_info=True)
+            ws = 10.0 * ((wmax + tol) - wind) / (wmax + tol - wmax)
+        components["wind"] = {"score_10": _clamp_0_10(ws)}
 
-    # WAVES component
-    try:
-        max_wave_pref = profile.get("max_wave_height_m")
-        wave_score = None
-        if max_wave_pref is None:
-            if wave is None:
-                wave_score = 10.0
-            else:
-                wave_score = 10.0
+    # WAVES simple: prefer max_wave_height_m
+    pref_wave = species_profile.get("max_wave_height_m")
+    if not pref_wave:
+        components["waves"] = {"score_10": 10.0}
+    else:
+        if wave is None:
+            raise MissingDataError("wave_height_m required by profile")
+        max_w = float(pref_wave)
+        if wave <= 0.0:
+            ws = 10.0
+        elif wave >= max_w:
+            ws = 0.0
         else:
-            max_wave = float(max_wave_pref)
-            if wave is None:
-                raise MissingDataError("wave_height_m required by profile but missing")
-            if wave <= 0.0:
-                wave_score = 10.0
-            elif wave >= max_wave:
-                wave_score = 0.0
+            ws = 10.0 * (1.0 - (wave / max_w))
+        # optionally blend swell preference if present
+        pref_swell = species_profile.get("preferred_swell_period_s")
+        if pref_swell and swell_period is not None:
+            if isinstance(pref_swell, (list, tuple)) and len(pref_swell) >= 2:
+                spmin = float(pref_swell[0]); spmax = float(pref_swell[1])
             else:
-                wave_score = 10.0 * (1.0 - (wave / max_wave))
-
-        pref_swell_period = profile.get("preferred_swell_period_s")
-        period_score = None
-        try:
-            if pref_swell_period and swell_period is not None:
-                if isinstance(pref_swell_period, (list, tuple)) and len(pref_swell_period) >= 2:
-                    pp_min, pp_max = float(pref_swell_period[0]), float(pref_swell_period[1])
-                else:
-                    pp = float(pref_swell_period)
-                    pp_min, pp_max = pp, pp
-                period_score = _linear_within_score_10(float(swell_period), pp_min, pp_max, tolerance=2.0)
-        except Exception:
-            period_score = None
-
-        if period_score is not None:
-            final_wave_score = ((wave_score or 0.0) + (period_score or 0.0)) / 2.0
+                spmin = spmax = float(pref_swell)
+            # linear map for swell
+            if spmin <= swell_period <= spmax:
+                sp_score = 10.0
+            else:
+                sp_score = 0.0
+            waves_score = (ws + sp_score) / 2.0
         else:
-            final_wave_score = wave_score if wave_score is not None else 10.0
+            waves_score = ws
+        components["waves"] = {"score_10": _clamp_0_10(waves_score)}
 
-        final_wave_score = _clamp_0_10(final_wave_score)
-        comp["waves"] = {"score_10": round(final_wave_score, 3), "score_100": int(round(final_wave_score * 10))}
-    except MissingDataError:
-        raise
-    except Exception:
-        _LOGGER.debug("Failed to compute waves component", exc_info=True)
-
-    # TIME component (use local time via location_tz)
-    try:
-        preferred_times_raw = profile.get("preferred_times", []) or []
-
-        def _normalize_preferred_times(pref_times: List[Any]) -> List[int]:
-            out_hours: List[int] = []
-            token_map = {
-                # fallback token map for numeric tokens; dawn/dusk handled specially via period indices
-                "day": list(range(7, 17)),  # 07-16
-                "night": [h for h in range(0, 24) if h not in range(7, 17)],  # night
-                "all_day": list(range(0, 24)),
-            }
+    # TIME: simple hours matching (preferred_times expressed as hours list or absent -> full score)
+    pref_times = species_profile.get("preferred_times") or []
+    if not pref_times:
+        components["time"] = {"score_10": 10.0}
+    else:
+        # normalize hours: accept list of ints or single int
+        hours = []
+        if isinstance(pref_times, (list, tuple)):
             for it in pref_times:
-                if isinstance(it, dict):
-                    sh = None
-                    eh = None
-                    if "start_hour" in it or "end_hour" in it:
-                        sh = it.get("start_hour")
-                        eh = it.get("end_hour")
-                    elif "start" in it or "end" in it:
-                        sh = it.get("start")
-                        eh = it.get("end")
-                    elif "hour" in it:
-                        sh = it.get("hour")
-                        eh = None
-                    else:
-                        for k, v in it.items():
-                            if isinstance(v, (int, float, str)):
-                                sh = v
-                                break
-                    try:
-                        if sh is None:
-                            continue
-                        if isinstance(sh, str) and str(sh).strip().lower() in token_map:
-                            token_hours = token_map[str(sh).strip().lower()]
-                            out_hours.extend(token_hours)
-                            continue
-                        sh_i = int(sh)
-                    except Exception:
-                        continue
-                    if eh is None:
-                        out_hours.append(sh_i % 24)
-                    else:
-                        try:
-                            if isinstance(eh, str) and str(eh).strip().lower() in token_map:
-                                token_hours = token_map[str(eh).strip().lower()]
-                                out_hours.extend(token_hours)
-                                continue
-                            eh_i = int(eh)
-                        except Exception:
-                            out_hours.append(sh_i % 24)
-                            continue
-                        h = sh_i % 24
-                        out_hours.append(h)
-                        while h != (eh_i % 24):
-                            h = (h + 1) % 24
-                            out_hours.append(h)
-                else:
-                    if isinstance(it, str):
-                        key = it.strip().lower()
-                        if key in token_map:
-                            out_hours.extend(token_map[key])
-                            continue
-                    try:
-                        out_hours.append(int(float(it)) % 24)
-                    except Exception:
-                        continue
-            return sorted(set([h % 24 for h in out_hours]))
-
-        normalized_hours = _normalize_preferred_times(preferred_times_raw)
-
-        requested_special_tokens = set()
-        try:
-            for it in preferred_times_raw:
-                if isinstance(it, str):
-                    key = it.strip().lower()
-                    if key in ("dawn", "dusk"):
-                        requested_special_tokens.add(key)
-                elif isinstance(it, dict):
-                    for k in ("start", "start_hour", "hour"):
-                        if k in it and isinstance(it.get(k), str):
-                            key = str(it.get(k)).strip().lower()
-                            if key in ("dawn", "dusk"):
-                                requested_special_tokens.add(key)
-        except Exception:
-            requested_special_tokens = set()
-
-        # precomputed_pf may be provided in data (canonical) by DataFormatter using coordinator-supplied indices
-        precomputed_pf = data.get("period_forecasts") if isinstance(data.get("period_forecasts"), dict) else {}
-        time_score = 10.0
-        if not normalized_hours and not requested_special_tokens:
-            time_score = 10.0
+                try:
+                    hours.append(int(it) % 24)
+                except Exception:
+                    continue
         else:
             try:
-                # convert current timestamp to UTC then to local tz
-                t_dt_utc = _coerce_datetime(timestamps[use_index])
-                local_dt = t_dt_utc.astimezone(ZoneInfo(tz_str)) if t_dt_utc else None
-                hour = local_dt.hour if local_dt else None
-                date_key = local_dt.date().isoformat() if local_dt else None
+                hours.append(int(pref_times) % 24)
             except Exception:
-                hour = None
-                date_key = None
-
-            used_precomputed_match = False
-            if requested_special_tokens and precomputed_pf and date_key:
-                pmap = precomputed_pf.get(date_key) or {}
-                for tok in requested_special_tokens:
-                    pdata = pmap.get(tok)
-                    if pdata and isinstance(pdata, dict):
-                        indices = pdata.get("indices") or []
-                        try:
-                            if int(use_index) in [int(x) for x in indices]:
-                                time_score = 10.0
-                                used_precomputed_match = True
-                                break
-                        except Exception:
-                            continue
-
-            if not used_precomputed_match:
-                if hour is None:
-                    time_score = 5.0
-                else:
-                    def hour_distance(a: int, b: int) -> int:
-                        d = abs(a - b) % 24
-                        return min(d, 24 - d)
-
-                    if not normalized_hours:
-                        # if only requested special tokens but no matching precomputed_pf, fall back to neutral
-                        time_score = 10.0 if not requested_special_tokens else 5.0
-                    else:
-                        min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
-                        if min_dist == 0:
-                            time_score = 10.0
-                        elif min_dist == 1:
-                            time_score = 8.0
-                        elif min_dist == 2:
-                            time_score = 5.0
-                        elif min_dist == 3:
-                            time_score = 2.0
-                        else:
-                            time_score = 0.0
-
-        time_score = _clamp_0_10(time_score)
-        comp["time"] = {"score_10": round(time_score, 3), "score_100": int(round(time_score * 10))}
-    except Exception:
-        _LOGGER.debug("Failed to compute time component", exc_info=True)
-
-    # PRESSURE, SEASON, MOON, TEMPERATURE components (unchanged logic)...
-    try:
-        if pressure_delta is None:
-            pressure_score = 5.0
+                hours = []
+        # determine local hour
+        t_iso = timestamps[use_index]
+        dt = _coerce_iso_dt(t_iso)
+        local_dt = dt.astimezone(tzinfo)
+        hour = local_dt.hour
+        if not hours:
+            tscore = 10.0
+        elif hour in hours:
+            tscore = 10.0
+        elif any(abs(hour - h) == 1 for h in hours):
+            tscore = 8.0
         else:
-            if pressure_delta >= 2.0:
-                pressure_score = 10.0
-            elif pressure_delta <= -2.0:
-                pressure_score = 0.0
-            else:
-                pressure_score = 10.0 * ((pressure_delta + 2.0) / 4.0)
-        pressure_score = _clamp_0_10(pressure_score)
-        comp["pressure"] = {"score_10": round(pressure_score, 3), "score_100": int(round(pressure_score * 10))}
-    except Exception:
-        _LOGGER.debug("Failed to compute pressure component", exc_info=True)
+            tscore = 3.0
+        components["time"] = {"score_10": _clamp_0_10(tscore)}
 
-    try:
-        preferred_months = profile.get("preferred_months", []) or []
-        if not preferred_months:
-            season_score = 10.0
+    # PRESSURE: simple forward delta mapping
+    if pressure_delta is None:
+        components["pressure"] = {"score_10": 5.0}
+    else:
+        if pressure_delta >= 2.0:
+            ps = 10.0
+        elif pressure_delta <= -2.0:
+            ps = 0.0
         else:
-            try:
-                t_dt_utc = _coerce_datetime(timestamps[use_index])
-                local_dt = t_dt_utc.astimezone(ZoneInfo(tz_str)) if t_dt_utc else None
-                month = local_dt.month if local_dt else None
-            except Exception:
-                month = None
-            if month is None:
-                season_score = 5.0
-            else:
-                season_score = 10.0 if int(month) in [int(m) for m in preferred_months] else 3.0
-        season_score = _clamp_0_10(season_score)
-        comp["season"] = {"score_10": round(season_score, 3), "score_100": int(round(season_score * 10))}
-    except Exception:
-        _LOGGER.debug("Failed to compute season component", exc_info=True)
+            ps = 10.0 * ((pressure_delta + 2.0) / 4.0)
+        components["pressure"] = {"score_10": _clamp_0_10(ps)}
 
-    try:
-        moon_pref = profile.get("moon_preference", []) or []
+    # SEASON
+    months_pref = species_profile.get("preferred_months") or []
+    if not months_pref:
+        components["season"] = {"score_10": 10.0}
+    else:
+        dt = _coerce_iso_dt(timestamps[use_index])
+        local_dt = dt.astimezone(tzinfo)
+        components["season"] = {"score_10": 10.0 if local_dt.month in [int(m) for m in months_pref] else 3.0}
 
-        if not moon_pref:
-            moon_score = 10.0
+    # MOON
+    moon_pref = species_profile.get("moon_preference") or []
+    if not moon_pref:
+        components["moon"] = {"score_10": 10.0}
+    else:
+        if moon_val is not None and matches_moon_preference(moon_val, moon_pref, tolerance=0.05):
+            components["moon"] = {"score_10": 10.0}
         else:
-            if matches_moon_preference(moon_phase_val, moon_pref, tolerance=0.05):
-                moon_score = 10.0
-            else:
-                moon_score = 4.0
-        moon_score = _clamp_0_10(moon_score)
-        comp["moon"] = {"score_10": round(moon_score, 3), "score_100": int(round(moon_score * 10))}
-    except Exception:
-        _LOGGER.debug("Failed to compute moon component", exc_info=True)
+            components["moon"] = {"score_10": 4.0}
 
-    try:
-        pref_temp = profile.get("preferred_temp_c")
-        if pref_temp is None:
-            if temp is None:
-                temp_score = 10.0
-            else:
-                temp_score = 10.0
+    # TEMPERATURE
+    pref_temp = species_profile.get("preferred_temp_c")
+    if not pref_temp:
+        components["temperature"] = {"score_10": 10.0}
+    else:
+        if temp is None:
+            raise MissingDataError("temperature required by profile")
+        if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
+            pmin = float(pref_temp[0]); pmax = float(pref_temp[1])
         else:
-            if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
-                pt_min, pt_max = float(pref_temp[0]), float(pref_temp[1])
-            else:
-                pt = float(pref_temp) if pref_temp is not None else 10.0
-                pt_min, pt_max = pt, pt
-            temp_tol = _to_float_safe(profile.get("preferred_temp_tol_c")) or 5.0
-            if temp is None:
-                raise MissingDataError("temperature_c required by profile but missing")
-            temp_score = _linear_within_score_10(float(temp), pt_min, pt_max, temp_tol)
-        temp_score = _clamp_0_10(temp_score)
-        comp["temperature"] = {"score_10": round(temp_score, 3), "score_100": int(round(temp_score * 10))}
-    except MissingDataError:
-        raise
-    except Exception:
-        _LOGGER.debug("Failed to compute temperature component", exc_info=True)
+            pmin = pmax = float(pref_temp)
+        tol = float(species_profile.get("preferred_temp_tol_c") or 5.0)
+        # linear within tolerance
+        if pmin <= temp <= pmax:
+            ts = 10.0
+        elif temp < pmin - tol or temp > pmax + tol:
+            ts = 0.0
+        elif temp < pmin:
+            ts = 10.0 * (temp - (pmin - tol)) / (pmin - (pmin - tol))
+        else:
+            ts = 10.0 * ((pmax + tol) - temp) / (pmax + tol - pmax)
+        components["temperature"] = {"score_10": _clamp_0_10(ts)}
 
-    # Compute overall score using normalized weights_norm
+    # Combine to overall score using weights
     overall_10 = 0.0
-    for k in weights_norm:
-        comp_score = comp.get(k, {}).get("score_10")
-        if comp_score is None:
-            overall_10 += weights_norm.get(k, 0.0) * 10.0
-        else:
-            overall_10 += weights_norm.get(k, 0.0) * comp_score
-    overall_10 = float(round(overall_10, 3))
+    for k, w in weights.items():
+        comp_score = components.get(k, {}).get("score_10")
+        overall_10 += w * (comp_score if comp_score is not None else 10.0)
+    overall_10 = round(overall_10, 3)
     overall_100 = int(round(overall_10 * 10.0))
 
+    # Evaluate simple safety flags
     safety = {"unsafe": False, "caution": False, "reasons": []}
-    try:
-        if safety_limits:
-            max_wind = _to_float_safe(safety_limits.get("max_wind_m_s"))
-            if max_wind is not None and wind is not None:
-                if wind > max_wind:
-                    safety["unsafe"] = True
-                    try:
-                        if units == "metric":
-                            thr_val = round(unit_helpers.m_s_to_kmh(max_wind), 1)
-                            thr_unit = "km/h"
-                        elif units == "imperial":
-                            thr_val = round(unit_helpers.m_s_to_mph(max_wind), 1)
-                            thr_unit = "mph"
-                        else:
-                            thr_val = round(max_wind, 2)
-                            thr_unit = "m/s"
-                        safety["reasons"].append(f"wind>{thr_val} {thr_unit}")
-                    except Exception:
-                        safety["reasons"].append(f"wind>{max_wind}")
-                elif wind > (0.9 * max_wind):
-                    safety["caution"] = True
-                    safety["reasons"].append("wind_near_limit")
+    if safety_limits:
+        max_wind = _to_float_safe(safety_limits.get("max_wind_m_s"))
+        if max_wind is not None and wind is not None:
+            if wind > max_wind:
+                safety["unsafe"] = True
+                safety["reasons"].append(f"wind>{max_wind}")
+            elif wind > 0.9 * max_wind:
+                safety["caution"] = True
+                safety["reasons"].append("wind_near_limit")
+        max_wave = _to_float_safe(safety_limits.get("max_wave_height_m"))
+        if max_wave is not None and wave is not None:
+            if wave > max_wave:
+                safety["unsafe"] = True
+                safety["reasons"].append(f"wave>{max_wave}")
+            elif wave > 0.9 * max_wave:
+                safety["caution"] = True
+                safety["reasons"].append("wave_near_limit")
 
-            max_wave = _to_float_safe(safety_limits.get("max_wave_height_m"))
-            if max_wave is not None and wave is not None:
-                if wave > max_wave:
-                    safety["unsafe"] = True
-                    safety["reasons"].append(f"wave>{max_wave}")
-                elif wave > (0.9 * max_wave):
-                    safety["caution"] = True
-                    safety["reasons"].append("wave_near_limit")
-
-            max_gust = _to_float_safe(safety_limits.get("max_gust_m_s"))
-            gust = _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None
-            if max_gust is not None and gust is not None:
-                if gust > max_gust:
-                    safety["unsafe"] = True
-                    try:
-                        if units == "metric":
-                            thr_val = round(unit_helpers.m_s_to_kmh(max_gust), 1)
-                            thr_unit = "km/h"
-                        elif units == "imperial":
-                            thr_val = round(unit_helpers.m_s_to_mph(max_gust), 1)
-                            thr_unit = "mph"
-                        else:
-                            thr_val = round(max_gust, 2)
-                            thr_unit = "m/s"
-                        safety["reasons"].append(f"gust>{thr_val} {thr_unit}")
-                    except Exception:
-                        safety["reasons"].append(f"gust>{max_gust}")
-                elif gust > (0.9 * max_gust):
-                    safety["caution"] = True
-                    safety["reasons"].append("gust_near_limit")
-
-            min_vis = _to_float_safe(safety_limits.get("min_visibility_km"))
-            vis = _get_at("visibility_km", use_index) if "visibility_km" in data else None
-            if min_vis is not None and vis is not None:
-                if vis < min_vis:
-                    safety["unsafe"] = True
-                    safety["reasons"].append(f"vis<{min_vis}")
-                elif vis < (1.1 * min_vis):
-                    safety["caution"] = True
-                    safety["reasons"].append("vis_near_limit")
-
-            min_swell = _to_float_safe(safety_limits.get("min_swell_period_s"))
-            swell = swell_period
-            if min_swell is not None and swell is not None:
-                if swell < min_swell:
-                    safety["unsafe"] = True
-                    safety["reasons"].append(f"swell<{min_swell}")
-                elif swell < (1.1 * min_swell):
-                    safety["caution"] = True
-                    safety["reasons"].append("swell_near_limit")
-
-            max_precip = _to_float_safe(safety_limits.get("max_precip_chance_pct"))
-            precip = _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None
-            if max_precip is not None and precip is not None:
-                if precip > max_precip:
-                    safety["unsafe"] = True
-                    safety["reasons"].append(f"precip>{max_precip}")
-                elif precip > (0.9 * max_precip):
-                    safety["caution"] = True
-                    safety["reasons"].append("precip_near_limit")
-
-    except Exception:
-        _LOGGER.debug("Safety evaluation failed", exc_info=True)
-
-    try:
-        reason_codes = safety.get("reasons", []) or []
-        safety["reason_strings"] = [_format_safety_reason(rc, safety_limits, units) for rc in reason_codes]
-    except Exception:
-        safety["reason_strings"] = []
-
+    # Breaches: a simple list based on species preference mismatches (kept minimal)
     breaches: List[Dict[str, Any]] = []
+    # temperature breach
     try:
-        def _add_breach(variable: str, value: Any, unit: Optional[str] = None, expected_min: Any = None, expected_max: Any = None, expected_pref_min: Any = None, expected_pref_max: Any = None, severity: str = "caution", reason: Optional[str] = None, advice: Optional[str] = None):
-            item: Dict[str, Any] = {"variable": variable, "value": value, "severity": severity, "reason": reason or f"{variable}_breach", "category": "species"}
-            if unit is not None:
-                item["unit"] = unit
-            if expected_min is not None:
-                item["expected_min"] = expected_min
-            if expected_max is not None:
-                item["expected_max"] = expected_max
-            if expected_pref_min is not None:
-                item["expected_pref_min"] = expected_pref_min
-            if expected_pref_max is not None:
-                item["expected_pref_max"] = expected_pref_max
-            breaches.append(item)
-
-        # TEMPERATURE breach detection
-        try:
-            pref_temp = profile.get("preferred_temp_c")
-            if temp is not None and pref_temp is not None:
-                if isinstance(pref_temp, (list, tuple)) and len(pref_temp) >= 2:
-                    pmin, pmax = float(pref_temp[0]), float(pref_temp[1])
-                else:
-                    pmin = pmax = float(pref_temp)
-                tol = _to_float_safe(profile.get("preferred_temp_tol_c")) or 5.0
-                allowed_low = pmin - tol
-                allowed_high = pmax + tol
-                if temp < allowed_low:
-                    sev = "unsafe" if (allowed_low - temp) > (2 * tol) else "caution"
-                    _add_breach("temperature", temp, unit="°C", expected_min=allowed_low, expected_max=allowed_high, expected_pref_min=pmin, expected_pref_max=pmax, severity=sev, reason="temperature<preferred_min", advice=f"{profile.get('common_name','Species')} prefers warmer water")
-                elif temp > allowed_high:
-                    sev = "unsafe" if (temp - allowed_high) > (2 * tol) else "caution"
-                    _add_breach("temperature", temp, unit="°C", expected_min=allowed_low, expected_max=allowed_high, expected_pref_min=pmin, expected_pref_max=pmax, severity=sev, reason="temperature>preferred_max", advice=f"{profile.get('common_name','Species')} prefers cooler water")
-        except Exception:
-            pass
-
-        # WAVE breach detection
-        try:
-            max_wave_pref = profile.get("max_wave_height_m")
-            if wave is not None and max_wave_pref is not None:
-                max_w = float(max_wave_pref)
-                if wave > max_w:
-                    _add_breach("wave", wave, unit="m", expected_min=None, expected_max=max_w, expected_pref_min=None, expected_pref_max=max_w, severity="unsafe", reason="wave>max_wave_height_m", advice=f"{profile.get('common_name','Species')} prefers lower waves")
-                elif wave > (0.9 * max_w):
-                    _add_breach("wave", wave, unit="m", expected_min=None, expected_max=max_w, expected_pref_min=None, expected_pref_max=max_w, severity="caution", reason="wave_near_max", advice="Wave height approaching species preferred maximum")
-        except Exception:
-            pass
-
-        # WIND breach detection
-        try:
-            pref_wind = profile.get("preferred_wind_m_s")
-            if wind is not None and pref_wind is not None:
-                if isinstance(pref_wind, (list, tuple)) and len(pref_wind) >= 2:
-                    _, pw_max = float(pref_wind[0]), float(pref_wind[1])
-                else:
-                    pw_max = float(pref_wind)
-                tol_w = _to_float_safe(profile.get("preferred_wind_tol_m_s")) or max(1.0, 0.2 * max(1.0, pw_max))
-                allowed_max = pw_max + tol_w
-                if wind > (allowed_max):
-                    _add_breach("wind", wind, unit="m/s", expected_min=None, expected_max=allowed_max, expected_pref_min=None, expected_pref_max=pw_max, severity="unsafe", reason="wind>preferred_max", advice=f"{profile.get('common_name','Species')} prefers lighter winds")
-                elif wind > (pw_max + 0.9 * tol_w):
-                    _add_breach("wind", wind, unit="m/s", expected_min=None, expected_max=allowed_max, expected_pref_min=None, expected_pref_max=pw_max, severity="caution", reason="wind_near_preferred_max", advice="Wind approaching species preferred maximum")
-        except Exception:
-            pass
-
-        # TIME breach detection
-        try:
-            if profile.get("preferred_times"):
-                try:
-                    t_dt_utc = _coerce_datetime(timestamps[use_index])
-                    local_dt = t_dt_utc.astimezone(ZoneInfo(tz_str)) if t_dt_utc else None
-                    hour = local_dt.hour if local_dt else None
-                except Exception:
-                    hour = None
-                if 'normalized_hours' in locals() and normalized_hours and hour is not None:
-                    def hour_distance(a: int, b: int) -> int:
-                        d = abs(a - b) % 24
-                        return min(d, 24 - d)
-                    min_dist = min(hour_distance(hour, pt) for pt in normalized_hours)
-                    if min_dist > 3:
-                        _add_breach(
-                            "time",
-                            hour,
-                            unit="hour",
-                            expected_min=min(normalized_hours),
-                            expected_max=max(normalized_hours),
-                            expected_pref_min=min(normalized_hours),
-                            expected_pref_max=max(normalized_hours),
-                            severity="caution",
-                            reason="time_out_of_preference",
-                            advice=f"{profile.get('common_name','Species')} prefers different times of day",
-                        )
-        except Exception:
-            pass
-
-        # TIDE PHASE breach detection
-        try:
-            pref_tide_phase_check = profile.get("preferred_tide_phase", []) or []
-            pref_tide_phase_check = [str(p).strip().lower() for p in pref_tide_phase_check if str(p).strip().lower() not in ("any", "none", "")]
-            if pref_tide_phase_check:
-                tide_phase_val = None
-                if "tide_phase" in data:
-                    tp = data.get("tide_phase")
-                    if isinstance(tp, (list, tuple)):
-                        tide_phase_val = tp[use_index] if use_index < len(tp) else None
-                    else:
-                        tide_phase_val = tp
-                elif "tide" in data and isinstance(data.get("tide"), dict):
-                    tp = data.get("tide").get("tide_phase")
-                    if isinstance(tp, (list, tuple)):
-                        tide_phase_val = tp[use_index] if use_index < len(tp) else None
-                    else:
-                        tide_phase_val = tp
-
-                if tide_phase_val is None or not isinstance(tide_phase_val, str):
-                    raise MissingDataError("tide_phase (string) required by species profile but missing or not a string")
-
-                desired = [str(p).lower() for p in pref_tide_phase_check]
-                if str(tide_phase_val).lower() not in desired:
-                    _add_breach("tide_phase", tide_phase_val, unit=None, expected_min=None, expected_max=None, expected_pref_min=None, expected_pref_max=None, severity="caution", reason="tide_phase_mismatch", advice=f"{profile.get('common_name','Species')} prefers tide phases {pref_tide_phase_check}; current phase differs")
-        except MissingDataError:
-            raise
-        except Exception:
-            pass
-
-        # MOON preference mismatch
-        try:
-            moon_pref_check = profile.get("moon_preference", []) or []
-            if moon_pref_check and moon_phase_val is not None:
-                if not matches_moon_preference(moon_phase_val, moon_pref_check, tolerance=0.05):
-                    _add_breach("moon_phase", moon_phase_val, unit=None, expected_min=None, expected_max=None, expected_pref_min=None, expected_pref_max=None, severity="caution", reason="moon_preference_mismatch", advice="Moon phase differs from species preference")
-        except Exception:
-            pass
-
-    except Exception:
-        _LOGGER.debug("Failed to compute species breaches", exc_info=True)
-
-    # deduplicate breaches (preserve order)
-    try:
-        unique_breaches: List[Dict[str, Any]] = []
-        seen_keys = set()
-        for b in breaches:
-            key = (b.get("variable"), b.get("reason"), str(b.get("value")), b.get("severity"))
-            if key not in seen_keys:
-                seen_keys.add(key)
-                unique_breaches.append(b)
-        breaches = unique_breaches
+        if pref_temp and temp is not None:
+            if temp < (pmin - tol):
+                breaches.append({"variable": "temperature", "value": temp, "severity": "unsafe"})
+            elif temp < pmin:
+                breaches.append({"variable": "temperature", "value": temp, "severity": "caution"})
     except Exception:
         pass
 
     result = {
         "score_10": overall_10,
         "score_100": overall_100,
-        "components": comp,
+        "components": {k: {"score_10": round(v["score_10"], 3)} for k, v in components.items()},
         "raw": {
-            # Removed tide height from raw output (tide heights intentionally omitted)
-            "tide_phase_name": (data.get("tide_phase_name")[use_index] if isinstance(data.get("tide_phase_name"), (list, tuple)) and use_index < len(data.get("tide_phase_name")) else (data.get("tide_phase_name") if "tide_phase_name" in data else None)),
             "wind": wind,
             "wave": wave,
             "pressure_delta": pressure_delta,
             "temperature": temp,
             "timestamp": timestamps[use_index],
-            "moon_phase": moon_phase_val,
-            "wind_gust": _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None,
+            "moon_phase": moon_val,
+            "wind_gust": gust,
             "swell_period_s": swell_period,
-            "precipitation_probability": _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None,
         },
-        # Change: provide the resolved species profile as a dict so downstream display code can augment it.
-        "profile_used": dict(profile),
+        "profile_used": dict(species_profile),
         "safety": safety,
         "breaches": breaches,
     }
@@ -1001,28 +402,20 @@ def compute_forecast(
     out: List[Dict[str, Any]] = []
     if not payload or "timestamps" not in payload:
         return out
-    timestamps = payload.get("timestamps") or []
+    timestamps = payload["timestamps"]
     for idx, ts in enumerate(timestamps):
         try:
-            res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
-            tide_phase_name = (payload.get("tide_phase_name")[idx] if isinstance(payload.get("tide_phase_name"), (list, tuple)) and idx < len(payload.get("tide_phase_name")) else (payload.get("tide_phase_name") if "tide_phase_name" in payload else None))
-
-            formatted_swell = payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) and idx < len(payload.get("swell_period_s")) else (payload.get("swell_period_s") if "swell_period_s" in payload else None)
-            formatted_wave_period = payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) and idx < len(payload.get("wave_period_s")) else (payload.get("wave_period_s") if "wave_period_s" in payload else None)
-
+            res = compute_score(payload, species_profile=species_profile or {}, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
             forecast_raw = {
                 "formatted_weather": {
                     "temperature": payload.get("temperature_c")[idx] if isinstance(payload.get("temperature_c"), (list, tuple)) else payload.get("temperature_c"),
                     "wind": payload.get("wind_m_s")[idx] if isinstance(payload.get("wind_m_s"), (list, tuple)) else payload.get("wind_m_s"),
                     "wind_gust": payload.get("wind_max_m_s")[idx] if isinstance(payload.get("wind_max_m_s"), (list, tuple)) else payload.get("wind_max_m_s"),
-                    "swell_period_s": formatted_swell,
-                    "pressure_hpa": payload.get("pressure_hpa")[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
                     "wave_height_m": payload.get("wave_height_m")[idx] if isinstance(payload.get("wave_height_m"), (list, tuple)) else payload.get("wave_height_m"),
-                    "wave_period_s": formatted_wave_period,
-                    # tide_height_m removed
-                    "tide_phase_name": tide_phase_name,
+                    "wave_period_s": payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) else payload.get("wave_period_s"),
+                    "swell_period_s": payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) else payload.get("swell_period_s"),
+                    "pressure_hpa": payload.get("pressure_hpa")[idx] if isinstance(payload.get("pressure_hpa"), (list, tuple)) else payload.get("pressure_hpa"),
                 },
-                "astro_used": {"moon_phase": (payload.get("moon_phase")[idx] if isinstance(payload.get("moon_phase"), (list, tuple)) and idx < len(payload.get("moon_phase")) else payload.get("moon_phase"))} if "moon_phase" in payload else None,
                 "score_calc": res,
             }
             entry = {
@@ -1037,21 +430,18 @@ def compute_forecast(
                 "breaches": res.get("breaches", []),
             }
         except MissingDataError as mde:
-            err_text = str(mde)
-            _LOGGER.debug("compute_forecast: missing data for index %s (%s): %s", idx, ts, err_text)
             entry = {
                 "timestamp": ts,
                 "index": idx,
                 "score_10": None,
                 "score_100": None,
                 "components": None,
-                "forecast_raw": {"error": "missing required data", "details": err_text},
+                "forecast_raw": {"error": "missing required data", "details": str(mde)},
                 "profile_used": None,
-                "safety": {"unsafe": False, "caution": False, "reasons": [], "reason_strings": []},
+                "safety": {"unsafe": False, "caution": False, "reasons": []},
                 "breaches": [],
             }
         except Exception:
-            _LOGGER.debug("Failed to compute forecast index %s", idx, exc_info=True)
             entry = {
                 "timestamp": ts,
                 "index": idx,
@@ -1060,7 +450,7 @@ def compute_forecast(
                 "components": None,
                 "forecast_raw": {"error": "unexpected error"},
                 "profile_used": None,
-                "safety": {"unsafe": False, "caution": False, "reasons": [], "reason_strings": []},
+                "safety": {"unsafe": False, "caution": False, "reasons": []},
                 "breaches": [],
             }
         out.append(entry)
