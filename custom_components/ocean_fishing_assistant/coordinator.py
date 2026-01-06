@@ -286,6 +286,35 @@ class OFACoordinator(DataUpdateCoordinator):
             # Set validated tide object strictly under 'tide' key (no backward-compat top-level copies)
             raw["tide"] = tide_validated
 
+            # COPY moon_phase from tide into raw['hourly'] if hourly doesn't already have it.
+            # This does NOT compute moon phases  it only preserves what TideProxy produced.
+            try:
+                # Only copy when hourly lacks moon_phase and tide provided an array with matching length
+                if isinstance(raw.get("hourly"), dict) and "moon_phase" not in raw["hourly"]:
+                    mp = tide_validated.get("moon_phase")
+                    if isinstance(mp, (list, tuple)):
+                        if len(mp) == len(timestamps):
+                            raw["hourly"]["moon_phase"] = list(mp)
+                            none_indices = [i for i, v in enumerate(mp) if v is None]
+                            if none_indices:
+                                _LOGGER.warning(
+                                    "TideProxy produced moon_phase with None entries at indices %s for %s,%s \u2014 copying into raw['hourly'] anyway (strict expects moon_phase).",
+                                    none_indices,
+                                    self.lat,
+                                    self.lon,
+                                )
+                        else:
+                            _LOGGER.warning(
+                                "TideProxy moon_phase length %d does not match timestamps length %d for %s,%s; not copying into raw['hourly'].",
+                                len(mp),
+                                len(timestamps),
+                                self.lat,
+                                self.lon,
+                            )
+            except Exception:
+                # Never compute moon phase here; if copying fails, log and continue  downstream strict checks will catch missing moon_phase.
+                _LOGGER.exception("Failed while attempting to copy tide['moon_phase'] into raw['hourly']")
+
             # Precompute period indices using TideProxy + Skyfield (strict)
             # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
             _LOGGER.debug(
