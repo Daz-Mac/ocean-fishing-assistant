@@ -348,4 +348,46 @@ class OFACoordinator(DataUpdateCoordinator):
                 precomputed_period_indices=period_indices,
             )
 
+            # Strict validation: ensure the per-timestamp forecast covering the current UTC hour
+            # contains a numeric score_100. If not, fail fast so the integration does not start in an
+            # inconsistent state.
+            try:
+                from homeassistant.util import dt as dt_util
+
+                forecasts = data.get("per_timestamp_forecasts") or []
+                if not isinstance(forecasts, list) or not forecasts:
+                    raise RuntimeError("Formatter produced empty per_timestamp_forecasts (strict)")
+
+                now_z = dt_util.utcnow().replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+
+                found = None
+                # exact match first
+                for entry in forecasts:
+                    ts = entry.get("timestamp")
+                    if ts is None:
+                        continue
+                    if ts == now_z:
+                        found = entry
+                        break
+
+                # fallback to first future timestamp (strict but deterministic)
+                if found is None:
+                    for entry in forecasts:
+                        ts = entry.get("timestamp")
+                        if ts is None:
+                            continue
+                        if ts >= now_z:
+                            found = entry
+                            break
+
+                if found is None:
+                    raise RuntimeError("Formatter did not produce a forecast covering current time (strict)")
+
+                if found.get("score_100") is None:
+                    _LOGGER.error("Strict validation failed: current per-timestamp forecast missing score_100; forecast_raw=%s", found.get("forecast_raw"))
+                    raise RuntimeError("Per-timestamp forecast covering current time missing score_100 (strict)")
+            except Exception:
+                _LOGGER.exception("Strict validation of current forecast failed")
+                raise
+
             return data
