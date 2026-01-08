@@ -41,20 +41,11 @@ class DataFormatter:
     }
 
     def __init__(self, config_entry_data: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Optionally accept config_entry_data (the entry.data dict). If provided,
-        DataFormatter will look for CONF_FACTOR_WEIGHTS there when validate() is called
-        so saved per-entry factor weights are applied automatically.
-        """
         self._config_entry_data = config_entry_data or {}
 
     def _extract_factor_weights_from_self(self) -> Optional[Dict[str, float]]:
-        try:
-            if isinstance(self._config_entry_data, dict) and self._config_entry_data.get(CONF_FACTOR_WEIGHTS):
-                return self._config_entry_data.get(CONF_FACTOR_WEIGHTS)
-        except Exception:
-            pass
-        # no other stored locations expected in this project, return None
+        if isinstance(self._config_entry_data, dict) and self._config_entry_data.get(CONF_FACTOR_WEIGHTS):
+            return self._config_entry_data.get(CONF_FACTOR_WEIGHTS)
         return None
 
     def validate(
@@ -66,15 +57,6 @@ class DataFormatter:
         precomputed_period_indices: Optional[Dict[str, Dict[str, Any]]] = None,
         factor_weights: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        """
-        Validate and normalize the raw_payload and produce the canonical 'data'
-        structure expected by the rest of the integration.
-
-        The function will forward factor_weights (if provided) to ocean_scoring.compute_forecast.
-        If factor_weights is None, it will attempt to use self._config_entry_data[CONF_FACTOR_WEIGHTS]
-        so saved per-entry factor weights are applied without modifying other call sites.
-        """
-
         if not isinstance(raw_payload, dict):
             raise ValueError("raw_payload must be a dict (strict)")
 
@@ -93,13 +75,10 @@ class DataFormatter:
         for t in raw_timestamps:
             parsed = dt_util.parse_datetime(str(t)) if t is not None else None
             if parsed is None:
-                try:
-                    v = float(t)
-                    if v > 1e12:
-                        v = v / 1000.0
-                    parsed = datetime.fromtimestamp(v, tz=timezone.utc)
-                except Exception as exc:
-                    raise ValueError(f"Unable to parse timestamp '{t}': {exc}") from exc
+                v = float(t)
+                if v > 1e12:
+                    v = v / 1000.0
+                parsed = datetime.fromtimestamp(v, tz=timezone.utc)
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             else:
@@ -113,12 +92,9 @@ class DataFormatter:
         canonical: Dict[str, Any] = {}
         canonical["timestamps"] = timestamps
 
-        # If coordinator provided a location timezone, preserve it in canonical so scoring can use it
         if isinstance(raw_payload.get("location_tz"), str):
             canonical["location_tz"] = raw_payload.get("location_tz")
 
-        # If precomputed period indices were provided by coordinator, expose them to scoring as 'period_forecasts'
-        # so ocean_scoring can use dawn/dusk indices when computing per-timestamp scores.
         if precomputed_period_indices is not None:
             canonical["period_forecasts"] = precomputed_period_indices
 
@@ -159,10 +135,7 @@ class DataFormatter:
                         if v is None:
                             converted.append(None)
                             continue
-                        try:
-                            fv = float(v)
-                        except Exception:
-                            raise ValueError(f"Non-numeric visibility value: {v!r} (strict)")
+                        fv = float(v)
                         if "km" in uh:
                             converted.append(float(fv))
                         elif "m" in uh:
@@ -174,10 +147,7 @@ class DataFormatter:
                     canonical[canon_key] = list(arr)
 
         tide_obj = raw_payload.get("tide")
-        moon_phase_set = False
         if isinstance(tide_obj, dict):
-            # copy tide object but explicitly strip any tide height fields and drop 'tide_phase_name' from canonical
-            # Keep a sanitized tide object under canonical['tide'] but do not promote human-friendly names to top-level.
             tide_copy = {k: v for k, v in tide_obj.items() if k not in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name")}
             canonical["tide"] = tide_copy
             tide_ts = tide_obj.get("timestamps")
@@ -185,21 +155,17 @@ class DataFormatter:
                 for k, v in tide_obj.items():
                     if k == "timestamps":
                         continue
-                    # skip explicit tide height keys and human-friendly names
                     if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
                         continue
                     if isinstance(v, (list, tuple)):
                         _ensure_list_length_equal(k, timestamps, list(v))
-                        # Only promote machine-friendly 'tide_phase' to top-level; keep other arrays under canonical['tide']
                         if k == "tide_phase":
                             canonical[k] = list(v)
                         else:
                             tide_copy[k] = list(v)
                     else:
-                        # scalars (e.g. tide_strength, next_high/low) remain under canonical['tide']
                         tide_copy[k] = v
             else:
-                # best-effort promotion for arrays matching timestamps length
                 for k, v in tide_obj.items():
                     if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
                         continue
@@ -223,7 +189,6 @@ class DataFormatter:
         if mp is not None:
             if not isinstance(mp, (list, tuple)):
                 raise ValueError("moon_phase must be an array aligned to timestamps (strict)")
-            # Coerce to floats; allow exceptions to propagate (fail-fast) on invalid values.
             canonical["moon_phase"] = [float(x) for x in list(mp)]
             moon_phase_set = True
         else:
@@ -268,9 +233,6 @@ class DataFormatter:
                 len_t = len(timestamps)
                 if len_p < len_t:
                     missing_keys.append(f"pressure_hpa_series_too_short ({len_p} < {len_t})")
-                else:
-                    # len_p >= len_t is acceptable; keep canonical as-is
-                    pass
 
         if not any(k in canonical for k in ("moon_phase", "tide_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
             missing_keys.append("moon_phase/astro/tide_phase")
@@ -279,18 +241,12 @@ class DataFormatter:
             raise ValueError(f"Insufficient canonical keys to compute strict forecasts (missing {missing_keys})")
 
         # Determine factor weights to use: explicit param -> self._config_entry_data -> None
-        fw = None
-        if factor_weights is not None:
-            fw = factor_weights
-        else:
-            fw = self._extract_factor_weights_from_self()
+        fw = factor_weights if factor_weights is not None else self._extract_factor_weights_from_self()
 
-        # --- IMPORTANT: pass canonical (with location_tz and precomputed period indices if provided)
         per_ts_forecasts: List[Dict[str, Any]] = ocean_scoring.compute_forecast(
             canonical, species_profile=species_profile, safety_limits=safety_limits, units=units, factor_weights=fw
         )
 
-        # Respect expose_raw setting: when raw is not exposed, limit breach examples
         expose_raw = bool(self._config_entry_data.get("expose_raw", False))
         max_breach_examples = 4 if expose_raw else 1
 
@@ -300,64 +256,49 @@ class DataFormatter:
                 details = entry.get("forecast_raw") or {}
                 raise ValueError(f"Incomplete scoring at index={i} timestamp={ts}: missing required inputs or scoring failed; details={details}")
 
-        # helper: merge breach 'value' + 'unit' into single display string and remove 'unit' key
         def _merge_breach_example(ex: Dict[str, Any], units_local: str) -> Dict[str, Any]:
+            u = ex.pop("unit", None)
+            v = ex.get("value")
+            if u is None or v is None:
+                return ex
+            if isinstance(v, str) and isinstance(u, str) and u in v:
+                ex["value"] = v
+                return ex
             try:
-                u = ex.pop("unit", None)
-                v = ex.get("value")
-                if u is None or v is None:
-                    return ex
-                # If value already a string that includes the unit, nothing to do
-                if isinstance(v, str) and isinstance(u, str) and u in v:
-                    ex["value"] = v
-                    return ex
-                # Try numeric formatting
-                try:
-                    num = float(v)
-                except Exception:
-                    # fallback to concatenation
-                    ex["value"] = f"{v} {u}"
-                    return ex
-
-                # m/s conversion/display using unit_helpers if needed
-                if u == "m/s":
-                    try:
-                        if units_local == "metric":
-                            conv = unit_helpers.m_s_to_kmh(num)
-                            label = "km/h"
-                        elif units_local == "imperial":
-                            conv = unit_helpers.m_s_to_mph(num)
-                            label = "mph"
-                        else:
-                            conv = num
-                            label = "m/s"
-                        ex["value"] = f"{round(conv, 2)} {label}"
-                        return ex
-                    except Exception:
-                        ex["value"] = f"{round(num, 2)} {u}"
-                        return ex
-
-                # choose rounding: hours -> int, °C -> 1dp, default 3dp for meters etc.
-                nd = 3
-                if isinstance(u, str) and ("hour" in u):
-                    nd = 0
-                elif isinstance(u, str) and ("°C" in u or "hPa" in u):
-                    nd = 1
-                ex["value"] = f"{round(num, nd)} {u}"
-                return ex
+                num = float(v)
             except Exception:
+                ex["value"] = f"{v} {u}"
                 return ex
+
+            if u == "m/s":
+                if units_local == "metric":
+                    conv = unit_helpers.m_s_to_kmh(num)
+                    label = "km/h"
+                elif units_local == "imperial":
+                    conv = unit_helpers.m_s_to_mph(num)
+                    label = "mph"
+                else:
+                    conv = num
+                    label = "m/s"
+                ex["value"] = f"{round(conv, 2)} {label}"
+                return ex
+
+            nd = 3
+            if isinstance(u, str) and ("hour" in u):
+                nd = 0
+            elif isinstance(u, str) and ("°C" in u or "hPa" in u):
+                nd = 1
+            ex["value"] = f"{round(num, nd)} {u}"
+            return ex
 
         hourly_like: List[Dict[str, Any]] = []
-        length = len(timestamps)
         for i, ts in enumerate(timestamps):
             row: Dict[str, Any] = {"time": ts}
             for src_key in ("temperature_c", "wind_m_s", "wind_max_m_s", "pressure_hpa", "cloud_cover", "precipitation_probability",
                             "wave_height_m", "wave_period_s", "swell_height_m", "swell_period_s"):
                 arr = canonical.get(src_key)
-                if isinstance(arr, (list, tuple)):
-                    if i < len(arr):
-                        row[src_key] = arr[i]
+                if isinstance(arr, (list, tuple)) and i < len(arr):
+                    row[src_key] = arr[i]
             if i < len(per_ts_forecasts):
                 row["_forecast_entry"] = per_ts_forecasts[i]
             hourly_like.append(row)
@@ -424,7 +365,6 @@ class DataFormatter:
                             if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
                                 tide_phase = tp_arr[first_idx]
                     else:
-                        # try nested canonical tide
                         tcan = canonical.get("tide")
                         if isinstance(tcan, dict) and isinstance(tcan.get("tide_phase"), (list, tuple)):
                             if indices and isinstance(indices[0], int):
@@ -515,7 +455,6 @@ class DataFormatter:
                             if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
                                 tide_phase = tp_arr[first_idx]
                     else:
-                        # try nested canonical tide
                         tcan = canonical.get("tide")
                         if isinstance(tcan, dict) and isinstance(tcan.get("tide_phase"), (list, tuple)):
                             if indices and isinstance(indices[0], int):
@@ -537,16 +476,13 @@ class DataFormatter:
                     period_forecasts[date_key][pname] = summary
 
         # enforce breach examples limit per expose_raw setting (post-process safety)
-        try:
-            for date_key, pmap in period_forecasts.items():
-                for pname, pdata in pmap.items():
-                    breaches = pdata.get("breaches") or {}
-                    ex = breaches.get("examples") if isinstance(breaches, dict) else None
-                    if ex and isinstance(ex, list):
-                        breaches["examples"] = ex[:max_breach_examples]
-                        pdata["breaches"] = breaches
-        except Exception:
-            pass
+        for date_key, pmap in period_forecasts.items():
+            for pname, pdata in pmap.items():
+                breaches = pdata.get("breaches") or {}
+                ex = breaches.get("examples") if isinstance(breaches, dict) else None
+                if ex and isinstance(ex, list):
+                    breaches["examples"] = ex[:max_breach_examples]
+                    pdata["breaches"] = breaches
 
         final_out = {
             "timestamps": timestamps,
@@ -574,18 +510,12 @@ class DataFormatter:
             t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
             if t_raw is None:
                 continue
-            try:
-                t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-            except Exception:
-                t = None
+            t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
             if t is None:
-                try:
-                    tnum = float(t_raw)
-                    if tnum > 1e12:
-                        tnum = tnum / 1000.0
-                    t = datetime.fromtimestamp(tnum, tz=timezone.utc)
-                except Exception:
-                    continue
+                tnum = float(t_raw)
+                if tnum > 1e12:
+                    tnum = tnum / 1000.0
+                t = datetime.fromtimestamp(tnum, tz=timezone.utc)
             if t.tzinfo is None:
                 t = t.replace(tzinfo=timezone.utc)
             date_key = t.date().isoformat()
@@ -607,30 +537,13 @@ class DataFormatter:
                         "indices": [],
                     })
                     agg = per_date_periods[date_key][pname]
-                    try:
-                        temp = float(entry.get("temperature_c")) if entry.get("temperature_c") is not None else None
-                    except Exception:
-                        temp = None
-                    try:
-                        wind_m_s = float(entry.get("wind_m_s")) if entry.get("wind_m_s") is not None else None
-                    except Exception:
-                        wind_m_s = None
-                    try:
-                        gust_m_s = float(entry.get("wind_max_m_s")) if entry.get("wind_max_m_s") is not None else None
-                    except Exception:
-                        gust_m_s = None
-                    try:
-                        cloud = int(entry.get("cloud_cover")) if entry.get("cloud_cover") is not None else None
-                    except Exception:
-                        cloud = None
-                    try:
-                        pop = int(entry.get("precipitation_probability")) if entry.get("precipitation_probability") is not None else None
-                    except Exception:
-                        pop = None
-                    try:
-                        pressure = float(entry.get("pressure_hpa")) if entry.get("pressure_hpa") is not None else None
-                    except Exception:
-                        pressure = None
+
+                    temp = float(entry.get("temperature_c")) if entry.get("temperature_c") is not None else None
+                    wind_m_s = float(entry.get("wind_m_s")) if entry.get("wind_m_s") is not None else None
+                    gust_m_s = float(entry.get("wind_max_m_s")) if entry.get("wind_max_m_s") is not None else None
+                    cloud = int(entry.get("cloud_cover")) if entry.get("cloud_cover") is not None else None
+                    pop = int(entry.get("precipitation_probability")) if entry.get("precipitation_probability") is not None else None
+                    pressure = float(entry.get("pressure_hpa")) if entry.get("pressure_hpa") is not None else None
 
                     if temp is not None:
                         agg["temperature_sum"] += temp
@@ -661,37 +574,30 @@ class DataFormatter:
                 cnt = agg.get("count", 0) or 0
                 if cnt == 0:
                     continue
-                try:
-                    mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
-                    mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt if agg.get("wind_speed_sum") is not None else None
-                    gust_m_s = float(agg["gust_max"]) if agg.get("gust_max") is not None else None
-                    pressure = float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None
-                    cloud = int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None
-                    precip = int(round(float(agg["precip_max"]))) if agg.get("precip_max") is not None else None
-                except Exception:
-                    _LOGGER.debug("Failed to finalize aggregation for %s %s; skipping", date_key, pname)
-                    continue
+
+                mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
+                mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt if agg.get("wind_speed_sum") is not None else None
+                gust_m_s = float(agg["gust_max"]) if agg.get("gust_max") is not None else None
+                pressure = float(agg["pressure_sum"]) / cnt if agg["pressure_sum"] is not None else None
+                cloud = int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None
+                precip = int(round(float(agg["precip_max"]))) if agg.get("precip_max") is not None else None
 
                 wind_out = None
                 gust_out = None
-                try:
-                    if mean_wind_m_s is not None:
-                        if out_wind_unit in ("km/h", "kph", "kmh"):
-                            wind_out = unit_helpers.m_s_to_kmh(mean_wind_m_s)
-                        elif out_wind_unit in ("mph",):
-                            wind_out = unit_helpers.m_s_to_mph(mean_wind_m_s)
-                        else:
-                            wind_out = mean_wind_m_s
-                    if gust_m_s is not None:
-                        if out_wind_unit in ("km/h", "kph", "kmh"):
-                            gust_out = unit_helpers.m_s_to_kmh(gust_m_s)
-                        elif out_wind_unit in ("mph",):
-                            gust_out = unit_helpers.m_s_to_mph(gust_m_s)
-                        else:
-                            gust_out = gust_m_s
-                except Exception:
-                    wind_out = None
-                    gust_out = None
+                if mean_wind_m_s is not None:
+                    if out_wind_unit in ("km/h", "kph", "kmh"):
+                        wind_out = unit_helpers.m_s_to_kmh(mean_wind_m_s)
+                    elif out_wind_unit in ("mph",):
+                        wind_out = unit_helpers.m_s_to_mph(mean_wind_m_s)
+                    else:
+                        wind_out = mean_wind_m_s
+                if gust_m_s is not None:
+                    if out_wind_unit in ("km/h", "kph", "kmh"):
+                        gust_out = unit_helpers.m_s_to_kmh(gust_m_s)
+                    elif out_wind_unit in ("mph",):
+                        gust_out = unit_helpers.m_s_to_mph(gust_m_s)
+                    else:
+                        gust_out = gust_m_s
 
                 final[date_key][pname] = {
                     "temperature": mean_temp,
@@ -707,12 +613,9 @@ class DataFormatter:
         return final
 
     def _convert_wind_array_value(self, v: Any, unit_hint: str) -> float:
-        try:
-            if v is None:
-                raise ValueError("None wind value")
-            val = float(v)
-        except Exception as exc:
-            raise ValueError(f"Non-numeric wind value: {v!r}") from exc
+        if v is None:
+            raise ValueError("None wind value")
+        val = float(v)
         u = str(unit_hint).strip().lower() if unit_hint is not None else "m/s"
         if u in ("km/h", "kph", "kmh"):
             out = unit_helpers.kmh_to_m_s(val)
