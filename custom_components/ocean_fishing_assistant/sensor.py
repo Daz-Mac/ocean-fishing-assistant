@@ -582,6 +582,18 @@ class OFASensor(CoordinatorEntity):
         current_copy.pop("tide_phase_name", None)
         current_copy["tide_phase"] = tide_phases[idx]
 
+        # Ensure components.tide uses canonical machine-friendly tide_phase (remove human-friendly tide_phase_name)
+        try:
+            ccomps = current_copy.get("components")
+            if isinstance(ccomps, dict):
+                tcomp = ccomps.get("tide")
+                if isinstance(tcomp, dict):
+                    tcomp.pop("tide_phase_name", None)
+                    tcomp["tide_phase"] = tide_phases[idx]
+        except Exception:
+            # best-effort; do not break attribute construction
+            pass
+
         attrs["current_forecast"] = current_copy
 
         # --- Grouped period views (remainder_of_today_periods, next_5_day_periods) ---
@@ -685,6 +697,18 @@ class OFASensor(CoordinatorEntity):
                 sanitized.pop("tide_phase_name", None)
                 sanitized["tide_phase"] = tide_phases[first_idx]
 
+                # Ensure period components.tide carries the canonical tide_phase and remove human-friendly key
+                try:
+                    pcomps = sanitized.get("components")
+                    if isinstance(pcomps, dict):
+                        tcomp = pcomps.get("tide")
+                        if isinstance(tcomp, dict):
+                            tcomp.pop("tide_phase_name", None)
+                            tcomp["tide_phase"] = tide_phases[first_idx]
+                except Exception:
+                    # best-effort
+                    pass
+
                 # augment components similarly (period-level components are aggregated; provide aggregated raw)
                 comps = sanitized.get("components")
                 sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units, self._is_raw_enabled())
@@ -725,6 +749,18 @@ class OFASensor(CoordinatorEntity):
                                 raise RuntimeError("Per-timestamp entry index out of range for tide_phase (strict)")
                             e_copy.pop("tide_phase_name", None)
                             e_copy["tide_phase"] = tide_phases[idx]
+
+                            # Also reflect canonical tide_phase inside component block of the raw entry
+                            try:
+                                ccomps = e_copy.get("components")
+                                if isinstance(ccomps, dict):
+                                    tcomp = ccomps.get("tide")
+                                    if isinstance(tcomp, dict):
+                                        tcomp.pop("tide_phase_name", None)
+                                        tcomp["tide_phase"] = tide_phases[idx]
+                            except Exception:
+                                # best-effort per-entry
+                                pass
 
                         sanitized_list.append(e_copy)
                     except Exception:
