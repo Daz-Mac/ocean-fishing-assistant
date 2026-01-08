@@ -415,16 +415,23 @@ class DataFormatter:
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
 
-                    # determine tide_phase_name for the period (most-common non-empty value)
-                    tide_names = [
-                        (e.get("forecast_raw") or {}).get("formatted_weather", {}).get("tide_phase_name")
-                        for e in per_ts_entries
-                    ]
-                    tide_names = [tn for tn in tide_names if tn]
-                    tide_phase_name = None
-                    if tide_names:
-                        from collections import Counter
-                        tide_phase_name = Counter(tide_names).most_common(1)[0][0]
+                    # determine tide_phase for the period using canonical tide_phase array (first index representative)
+                    tide_phase = None
+                    if isinstance(canonical.get("tide_phase"), (list, tuple)):
+                        if indices and isinstance(indices[0], int):
+                            first_idx = indices[0]
+                            tp_arr = canonical.get("tide_phase")
+                            if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
+                                tide_phase = tp_arr[first_idx]
+                    else:
+                        # try nested canonical tide
+                        tcan = canonical.get("tide")
+                        if isinstance(tcan, dict) and isinstance(tcan.get("tide_phase"), (list, tuple)):
+                            if indices and isinstance(indices[0], int):
+                                first_idx = indices[0]
+                                tp_arr = tcan.get("tide_phase")
+                                if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
+                                    tide_phase = tp_arr[first_idx]
 
                     summary = {
                         "score_10": round(score_10, 3) if score_10 is not None else None,
@@ -432,7 +439,7 @@ class DataFormatter:
                         "components": components,
                         "profile_used": profile_used,
                         "safety": safety,
-                        "tide_phase_name": tide_phase_name,
+                        "tide_phase": tide_phase,
                         "start": pdata.get("start"),
                         "end": pdata.get("end"),
                         "indices": list(indices),
@@ -499,16 +506,23 @@ class DataFormatter:
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
 
-                    # determine tide_phase_name for the period (most-common non-empty value)
-                    tide_names = [
-                        (e.get("forecast_raw") or {}).get("formatted_weather", {}).get("tide_phase_name")
-                        for e in per_ts_entries
-                    ]
-                    tide_names = [tn for tn in tide_names if tn]
-                    tide_phase_name = None
-                    if tide_names:
-                        from collections import Counter
-                        tide_phase_name = Counter(tide_names).most_common(1)[0][0]
+                    # determine tide_phase for the period using canonical tide_phase array (first index representative)
+                    tide_phase = None
+                    if isinstance(canonical.get("tide_phase"), (list, tuple)):
+                        if indices and isinstance(indices[0], int):
+                            first_idx = indices[0]
+                            tp_arr = canonical.get("tide_phase")
+                            if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
+                                tide_phase = tp_arr[first_idx]
+                    else:
+                        # try nested canonical tide
+                        tcan = canonical.get("tide")
+                        if isinstance(tcan, dict) and isinstance(tcan.get("tide_phase"), (list, tuple)):
+                            if indices and isinstance(indices[0], int):
+                                first_idx = indices[0]
+                                tp_arr = tcan.get("tide_phase")
+                                if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
+                                    tide_phase = tp_arr[first_idx]
 
                     summary = dict(pdata)
                     summary.update({
@@ -517,7 +531,7 @@ class DataFormatter:
                         "components": components,
                         "profile_used": profile_used,
                         "safety": safety,
-                        "tide_phase_name": tide_phase_name,
+                        "tide_phase": tide_phase,
                         "breaches": breaches_summary,
                     })
                     period_forecasts[date_key][pname] = summary

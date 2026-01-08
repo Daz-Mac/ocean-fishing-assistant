@@ -400,15 +400,10 @@ def compute_score(
         tide_score = _clamp_0_10(tide_score)
         comp_tide: Dict[str, Any] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
 
-        PHASE_NAME_MAP = {
-            "rising": "Rising",
-            "falling": "Falling",
-            "high": "High Tide",
-            "low": "Low Tide",
-        }
+        # Provide machine-friendly string tide_phase in the component (no human-friendly duplicate)
         try:
             if tide_phase_val is not None and isinstance(tide_phase_val, str):
-                comp_tide["tide_phase_name"] = PHASE_NAME_MAP.get(tide_phase_val.lower(), tide_phase_val)
+                comp_tide["tide_phase"] = tide_phase_val
         except Exception:
             pass
 
@@ -971,8 +966,8 @@ def compute_score(
         "score_100": overall_100,
         "components": comp,
         "raw": {
-            # Removed tide height from raw output (tide heights intentionally omitted)
-            "tide_phase_name": (data.get("tide_phase_name")[use_index] if isinstance(data.get("tide_phase_name"), (list, tuple)) and use_index < len(data.get("tide_phase_name")) else (data.get("tide_phase_name") if "tide_phase_name" in data else None)),
+            # Provide canonical tide_phase (machine-friendly) in raw if present
+            "tide_phase": (data.get("tide_phase")[use_index] if isinstance(data.get("tide_phase"), (list, tuple)) and use_index < len(data.get("tide_phase")) else (data.get("tide_phase") if "tide_phase" in data else (data.get("tide").get("tide_phase")[use_index] if "tide" in data and isinstance(data.get("tide"), dict) and isinstance(data.get("tide").get("tide_phase"), (list,tuple)) and use_index < len(data.get("tide").get("tide_phase")) else (data.get("tide").get("tide_phase") if "tide" in data and isinstance(data.get("tide"), dict) and "tide_phase" in data.get("tide") else None)))),
             "wind": wind,
             "wave": wave,
             "pressure_delta": pressure_delta,
@@ -1005,7 +1000,21 @@ def compute_forecast(
     for idx, ts in enumerate(timestamps):
         try:
             res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
-            tide_phase_name = (payload.get("tide_phase_name")[idx] if isinstance(payload.get("tide_phase_name"), (list, tuple)) and idx < len(payload.get("tide_phase_name")) else (payload.get("tide_phase_name") if "tide_phase_name" in payload else None))
+
+            # Resolve canonical tide_phase (machine-friendly) for this index (strict)
+            tide_phase = None
+            if "tide_phase" in payload:
+                tp = payload.get("tide_phase")
+                if isinstance(tp, (list, tuple)):
+                    tide_phase = tp[idx] if idx < len(tp) else None
+                else:
+                    tide_phase = tp
+            elif "tide" in payload and isinstance(payload.get("tide"), dict):
+                tp = payload.get("tide").get("tide_phase")
+                if isinstance(tp, (list, tuple)):
+                    tide_phase = tp[idx] if idx < len(tp) else None
+                else:
+                    tide_phase = tp
 
             formatted_swell = payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) and idx < len(payload.get("swell_period_s")) else (payload.get("swell_period_s") if "swell_period_s" in payload else None)
             formatted_wave_period = payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) and idx < len(payload.get("wave_period_s")) else (payload.get("wave_period_s") if "wave_period_s" in payload else None)
@@ -1020,7 +1029,7 @@ def compute_forecast(
                     "wave_height_m": payload.get("wave_height_m")[idx] if isinstance(payload.get("wave_height_m"), (list, tuple)) else payload.get("wave_height_m"),
                     "wave_period_s": formatted_wave_period,
                     # tide_height_m removed
-                    "tide_phase_name": tide_phase_name,
+                    "tide_phase": tide_phase,
                 },
                 "astro_used": {"moon_phase": (payload.get("moon_phase")[idx] if isinstance(payload.get("moon_phase"), (list, tuple)) and idx < len(payload.get("moon_phase")) else payload.get("moon_phase"))} if "moon_phase" in payload else None,
                 "score_calc": res,

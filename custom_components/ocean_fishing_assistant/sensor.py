@@ -583,16 +583,11 @@ class OFASensor(CoordinatorEntity):
         current_copy["tide_phase"] = tide_phases[idx]
 
         # Ensure components.tide uses canonical machine-friendly tide_phase (remove human-friendly tide_phase_name)
-        try:
-            ccomps = current_copy.get("components")
-            if isinstance(ccomps, dict):
-                tcomp = ccomps.get("tide")
-                if isinstance(tcomp, dict):
-                    tcomp.pop("tide_phase_name", None)
-                    tcomp["tide_phase"] = tide_phases[idx]
-        except Exception:
-            # best-effort; do not break attribute construction
-            pass
+        # Strict: expect components.tide to exist and be a dict. Fail-fast if not.
+        ccomps = current_copy["components"]
+        tcomp = ccomps["tide"]
+        tcomp.pop("tide_phase_name", None)
+        tcomp["tide_phase"] = tide_phases[idx]
 
         attrs["current_forecast"] = current_copy
 
@@ -698,16 +693,11 @@ class OFASensor(CoordinatorEntity):
                 sanitized["tide_phase"] = tide_phases[first_idx]
 
                 # Ensure period components.tide carries the canonical tide_phase and remove human-friendly key
-                try:
-                    pcomps = sanitized.get("components")
-                    if isinstance(pcomps, dict):
-                        tcomp = pcomps.get("tide")
-                        if isinstance(tcomp, dict):
-                            tcomp.pop("tide_phase_name", None)
-                            tcomp["tide_phase"] = tide_phases[first_idx]
-                except Exception:
-                    # best-effort
-                    pass
+                # Strict: expect sanitized['components']['tide'] to exist and be a dict.
+                pcomps = sanitized["components"]
+                tcomp = pcomps["tide"]
+                tcomp.pop("tide_phase_name", None)
+                tcomp["tide_phase"] = tide_phases[first_idx]
 
                 # augment components similarly (period-level components are aggregated; provide aggregated raw)
                 comps = sanitized.get("components")
@@ -751,16 +741,11 @@ class OFASensor(CoordinatorEntity):
                             e_copy["tide_phase"] = tide_phases[idx]
 
                             # Also reflect canonical tide_phase inside component block of the raw entry
-                            try:
-                                ccomps = e_copy.get("components")
-                                if isinstance(ccomps, dict):
-                                    tcomp = ccomps.get("tide")
-                                    if isinstance(tcomp, dict):
-                                        tcomp.pop("tide_phase_name", None)
-                                        tcomp["tide_phase"] = tide_phases[idx]
-                            except Exception:
-                                # best-effort per-entry
-                                pass
+                            # Strict: expect e_copy['components']['tide'] to exist and be a dict.
+                            ccomps = e_copy["components"]
+                            tcomp = ccomps["tide"]
+                            tcomp.pop("tide_phase_name", None)
+                            tcomp["tide_phase"] = tide_phases[idx]
 
                         sanitized_list.append(e_copy)
                     except Exception:
