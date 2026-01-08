@@ -504,6 +504,12 @@ class OFASensor(CoordinatorEntity):
         attrs: Dict[str, Any] = {}
         entry_units = getattr(self.coordinator, "units", "metric") or "metric"
 
+        # Read canonical tide_phase array once (machine-friendly)
+        tide_phases = None
+        tide_container = data.get("tide")
+        if isinstance(tide_container, dict):
+            tide_phases = tide_container.get("tide_phase")
+
         # current forecast
         current = self._get_current_forecast()
         if current is None:
@@ -563,6 +569,18 @@ class OFASensor(CoordinatorEntity):
         except Exception:
             # best-effort only
             pass
+
+        # Attach canonical machine-friendly tide_phase to the current forecast (strict, fail-fast).
+        # This replaces any human-friendly tide_phase_name emitted earlier.
+        if tide_phases is None:
+            raise RuntimeError("Coordinator tide_phase missing (strict)")
+        idx = current.get("index")
+        if not isinstance(idx, int):
+            raise RuntimeError("Current forecast missing index (strict)")
+        if idx < 0 or idx >= len(tide_phases):
+            raise RuntimeError("Current forecast index out of range for tide_phase (strict)")
+        current_copy.pop("tide_phase_name", None)
+        current_copy["tide_phase"] = tide_phases[idx]
 
         attrs["current_forecast"] = current_copy
 
@@ -657,6 +675,16 @@ class OFASensor(CoordinatorEntity):
                     # on any failure, leave raw_agg empty so augmentation just won't inject values
                     raw_agg = {}
 
+                # Replace human-friendly tide_phase_name with canonical machine-friendly tide_phase for this period
+                # Use the first index as the representative index for the period (simple, deterministic).
+                if tide_phases is None:
+                    raise RuntimeError("Coordinator tide_phase missing (strict)")
+                first_idx = indices[0]
+                if not isinstance(first_idx, int) or first_idx < 0 or first_idx >= len(tide_phases):
+                    raise RuntimeError("Period indices out of range for tide_phase (strict)")
+                sanitized.pop("tide_phase_name", None)
+                sanitized["tide_phase"] = tide_phases[first_idx]
+
                 # augment components similarly (period-level components are aggregated; provide aggregated raw)
                 comps = sanitized.get("components")
                 sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units, self._is_raw_enabled())
@@ -687,9 +715,20 @@ class OFASensor(CoordinatorEntity):
                         # Remove per-entry profile_used and safety to ensure single top-level source.
                         e_copy.pop("profile_used", None)
                         e_copy.pop("safety", None)
+
+                        # Replace human-friendly tide_phase_name in per-timestamp raw output with canonical tide_phase
+                        if tide_phases is None:
+                            raise RuntimeError("Coordinator tide_phase missing (strict)")
+                        idx = e_copy.get("index")
+                        if isinstance(idx, int):
+                            if idx < 0 or idx >= len(tide_phases):
+                                raise RuntimeError("Per-timestamp entry index out of range for tide_phase (strict)")
+                            e_copy.pop("tide_phase_name", None)
+                            e_copy["tide_phase"] = tide_phases[idx]
+
                         sanitized_list.append(e_copy)
                     except Exception:
-                        # If deep-copy fails for any entry, fall back to original
+                        # If deep-copy or modification fails for any entry, fall back to original
                         sanitized_list.append(entry)
                 attrs["per_timestamp_forecasts"] = sanitized_list
             else:
