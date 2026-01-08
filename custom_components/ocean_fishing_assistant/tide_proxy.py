@@ -606,30 +606,28 @@ class TideProxy:
         except Exception:
             tide_strength_value = 0.5
 
-        # Compute moon phases (try Skyfield; non-fatal)
-        moon_phases: List[Optional[float]] = []
-        try:
-            await self._ensure_loaded()
-            sf_ts = self._sf_ts
-            sf_eph = self._sf_eph
-            earth = sf_eph["earth"]
-            sun_obj = sf_eph["sun"]
-            moon_obj = sf_eph["moon"]
-            times_list = [sf_ts.from_datetime(dt) for dt in dt_objs]
-            for t in times_list:
-                try:
-                    sun_app = earth.at(t).observe(sun_obj).apparent()
-                    moon_app = earth.at(t).observe(moon_obj).apparent()
-                    sun_ecl = sun_app.frame_latlon(ecliptic_frame)
-                    moon_ecl = moon_app.frame_latlon(ecliptic_frame)
-                    lon_sun = float(sun_ecl[1].degrees)
-                    lon_moon = float(moon_ecl[1].degrees)
-                    diff = (lon_moon - lon_sun) % 360.0
-                    moon_phases.append(diff / 360.0)
-                except Exception:
-                    moon_phases.append(None)
-        except Exception:
-            moon_phases = [None] * len(dt_objs)
+        # Compute moon phases (MANDATORY, strict): use Skyfield and fail loudly on any error
+        await self._ensure_loaded()
+        sf_ts = self._sf_ts
+        sf_eph = self._sf_eph
+        earth = sf_eph["earth"]
+        sun_obj = sf_eph["sun"]
+        moon_obj = sf_eph["moon"]
+        times_list = [sf_ts.from_datetime(dt) for dt in dt_objs]
+        moon_phases: List[float] = []
+        for t in times_list:
+            # Any exception here should propagate up and fail loudly
+            sun_app = earth.at(t).observe(sun_obj).apparent()
+            moon_app = earth.at(t).observe(moon_obj).apparent()
+            sun_ecl = sun_app.frame_latlon(ecliptic_frame)
+            moon_ecl = moon_app.frame_latlon(ecliptic_frame)
+            lon_sun = float(sun_ecl[1].degrees)
+            lon_moon = float(moon_ecl[1].degrees)
+            diff = (lon_moon - lon_sun) % 360.0
+            moon_phases.append(diff / 360.0)
+        # Validate we produced a numeric moon phase for each timestamp
+        if len(moon_phases) != len(dt_objs) or any(mp is None for mp in moon_phases):
+            raise RuntimeError("Failed to compute moon_phase for all timestamps (strict)")
 
         ts_isoz = [dt.isoformat().replace("+00:00", "Z") for dt in dt_objs]
 

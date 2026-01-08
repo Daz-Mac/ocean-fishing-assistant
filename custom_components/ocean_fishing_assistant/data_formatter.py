@@ -174,53 +174,84 @@ class DataFormatter:
                     canonical[canon_key] = list(arr)
 
         tide_obj = raw_payload.get("tide")
+        moon_phase_set = False
         if isinstance(tide_obj, dict):
-            # copy tide object but explicitly strip any tide height fields (tide heights are intentionally omitted)
-            canonical["tide"] = tide_obj
+            # copy tide object but explicitly strip any tide height fields and drop 'tide_phase_name' from canonical
+            # Keep a sanitized tide object under canonical['tide'] but do not promote human-friendly names to top-level.
+            tide_copy = {k: v for k, v in tide_obj.items() if k not in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name")}
+            canonical["tide"] = tide_copy
             tide_ts = tide_obj.get("timestamps")
-            if tide_ts and isinstance(tide_ts, (list, tuple)):
-                if len(tide_ts) == len(timestamps):
-                    for k, v in tide_obj.items():
-                        if k == "timestamps":
-                            continue
-                        # skip explicit tide height keys
-                        if k in ("tide_height_m", "next_high_height_m", "next_low_height_m"):
-                            continue
-                        if isinstance(v, (list, tuple)):
-                            _ensure_list_length_equal(k, timestamps, list(v))
+            if tide_ts and isinstance(tide_ts, (list, tuple)) and len(tide_ts) == len(timestamps):
+                for k, v in tide_obj.items():
+                    if k == "timestamps":
+                        continue
+                    # skip explicit tide height keys and human-friendly names
+                    if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
+                        continue
+                    if isinstance(v, (list, tuple)):
+                        _ensure_list_length_equal(k, timestamps, list(v))
+                        # Only promote machine-friendly 'tide_phase' to top-level; keep other arrays under canonical['tide']
+                        if k == "tide_phase":
                             canonical[k] = list(v)
                         else:
-                            canonical[k] = v
+                            tide_copy[k] = list(v)
+                    else:
+                        # scalars (e.g. tide_strength, next_high/low) remain under canonical['tide']
+                        tide_copy[k] = v
             else:
+                # best-effort promotion for arrays matching timestamps length
                 for k, v in tide_obj.items():
-                    if k in ("tide_height_m", "next_high_height_m", "next_low_height_m"):
+                    if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
                         continue
                     if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
-                        canonical[k] = list(v)
+                        if k == "tide_phase":
+                            canonical[k] = list(v)
+                        else:
+                            tide_copy[k] = list(v)
                     elif not isinstance(v, (list, tuple)):
-                        canonical[k] = v
+                        tide_copy[k] = v
 
-        moon_phase_set = False
-        if "moon_phase" in raw_payload:
-            mp = raw_payload.get("moon_phase")
+        # Moon phase handling: require numeric moon_phase present and validate consistency between sources
+        def _normalize_mp(mp):
+            if mp is None:
+                return None
             if isinstance(mp, (list, tuple)):
                 _ensure_list_length_equal("moon_phase", timestamps, list(mp))
-                canonical["moon_phase"] = list(mp)
+                return list(mp)
             else:
-                canonical["moon_phase"] = [mp] * len(timestamps)
-            moon_phase_set = True
+                return [mp] * len(timestamps)
 
-        # IMPORTANT: Do NOT map tide.tide_phase (string) into numeric moon_phase.
-        # Use numeric tide['moon_phase'] if available.
-        if not moon_phase_set and "tide" in canonical and isinstance(canonical["tide"], dict) and "moon_phase" in canonical["tide"]:
-            tp = canonical["tide"].get("moon_phase")
-            if tp is not None:
-                if isinstance(tp, (list, tuple)):
-                    _ensure_list_length_equal("tide.moon_phase", timestamps, list(tp))
-                    canonical["moon_phase"] = list(tp)
-                else:
-                    canonical["moon_phase"] = [tp] * len(timestamps)
+        mp_raw = raw_payload.get("moon_phase")
+        mp_tide = canonical.get("tide", {}).get("moon_phase") if isinstance(canonical.get("tide"), dict) else None
+        norm_raw = _normalize_mp(mp_raw)
+        norm_tide = _normalize_mp(mp_tide)
+
+        try:
+            if norm_raw is not None and norm_tide is not None:
+                # both present -> ensure exact numeric equality for strictness
+                if len(norm_raw) != len(norm_tide):
+                    raise ValueError("moon_phase arrays from payload and tide data have different lengths (strict)")
+                for a, b in zip(norm_raw, norm_tide):
+                    try:
+                        fa = float(a)
+                        fb = float(b)
+                    except Exception:
+                        raise ValueError("Non-numeric moon_phase values present (strict)")
+                    if fa != fb:
+                        raise ValueError("Conflicting moon_phase values between payload and tide data (strict)")
+                canonical["moon_phase"] = [float(x) for x in norm_raw]
                 moon_phase_set = True
+            elif norm_raw is not None:
+                canonical["moon_phase"] = [float(x) for x in norm_raw]
+                moon_phase_set = True
+            elif norm_tide is not None:
+                canonical["moon_phase"] = [float(x) for x in norm_tide]
+                moon_phase_set = True
+            else:
+                moon_phase_set = False
+        except Exception:
+            # propagate strict errors for moon_phase conflicts or non-numeric values
+            raise
 
         for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "moon_phase"):
             if key in raw_payload and key not in canonical:
