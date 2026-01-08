@@ -211,47 +211,23 @@ class DataFormatter:
                     elif not isinstance(v, (list, tuple)):
                         tide_copy[k] = v
 
-        # Moon phase handling: require numeric moon_phase present and validate consistency between sources
-        def _normalize_mp(mp):
-            if mp is None:
-                return None
-            if isinstance(mp, (list, tuple)):
-                _ensure_list_length_equal("moon_phase", timestamps, list(mp))
-                return list(mp)
-            else:
-                return [mp] * len(timestamps)
+        # Moon phase handling: trust TideProxy for moon_phase. Prefer canonical['tide']['moon_phase'] if present,
+        # otherwise fall back to raw_payload['moon_phase']. Conversion to float is performed once and will fail-fast
+        # if upstream provided non-numeric values.
+        mp = None
+        if isinstance(canonical.get("tide"), dict) and "moon_phase" in canonical["tide"]:
+            mp = canonical["tide"]["moon_phase"]
+        elif "moon_phase" in raw_payload:
+            mp = raw_payload["moon_phase"]
 
-        mp_raw = raw_payload.get("moon_phase")
-        mp_tide = canonical.get("tide", {}).get("moon_phase") if isinstance(canonical.get("tide"), dict) else None
-        norm_raw = _normalize_mp(mp_raw)
-        norm_tide = _normalize_mp(mp_tide)
-
-        try:
-            if norm_raw is not None and norm_tide is not None:
-                # both present -> ensure exact numeric equality for strictness
-                if len(norm_raw) != len(norm_tide):
-                    raise ValueError("moon_phase arrays from payload and tide data have different lengths (strict)")
-                for a, b in zip(norm_raw, norm_tide):
-                    try:
-                        fa = float(a)
-                        fb = float(b)
-                    except Exception:
-                        raise ValueError("Non-numeric moon_phase values present (strict)")
-                    if fa != fb:
-                        raise ValueError("Conflicting moon_phase values between payload and tide data (strict)")
-                canonical["moon_phase"] = [float(x) for x in norm_raw]
-                moon_phase_set = True
-            elif norm_raw is not None:
-                canonical["moon_phase"] = [float(x) for x in norm_raw]
-                moon_phase_set = True
-            elif norm_tide is not None:
-                canonical["moon_phase"] = [float(x) for x in norm_tide]
-                moon_phase_set = True
-            else:
-                moon_phase_set = False
-        except Exception:
-            # propagate strict errors for moon_phase conflicts or non-numeric values
-            raise
+        if mp is not None:
+            if not isinstance(mp, (list, tuple)):
+                raise ValueError("moon_phase must be an array aligned to timestamps (strict)")
+            # Coerce to floats; allow exceptions to propagate (fail-fast) on invalid values.
+            canonical["moon_phase"] = [float(x) for x in list(mp)]
+            moon_phase_set = True
+        else:
+            moon_phase_set = False
 
         for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "moon_phase"):
             if key in raw_payload and key not in canonical:

@@ -274,35 +274,10 @@ class OFACoordinator(DataUpdateCoordinator):
                 # If normalization fails for any reason, log but continue — downstream strict checks will catch it.
                 _LOGGER.exception("Failed to normalize tide 'next_high'/'next_low' payload; continuing with original tide object")
 
-            # STRICT: Validate moon_phase presence and integrity from tide data (must be present and numeric for each timestamp)
-            mp = tide.get("moon_phase")
-            if mp is None:
-                raise RuntimeError("TideProxy did not return required 'moon_phase' values (strict)")
-            if not isinstance(mp, (list, tuple)):
-                raise RuntimeError("TideProxy 'moon_phase' must be an array aligned to timestamps (strict)")
-            if len(mp) != len(timestamps):
-                raise RuntimeError(f"TideProxy 'moon_phase' length {len(mp)} does not match forecast timestamps length {len(timestamps)} (strict)")
-            # Ensure all moon phases are numeric and not None
-            normalized_mp: list = []
-            for i, v in enumerate(mp):
-                if v is None:
-                    raise RuntimeError(f"TideProxy returned None moon_phase at index={i} (strict)")
-                try:
-                    fv = float(v)
-                except Exception:
-                    raise RuntimeError(f"TideProxy returned non-numeric moon_phase at index={i}: {v!r} (strict)")
-                normalized_mp.append(fv)
-            # Replace with normalized numeric list
-            tide["moon_phase"] = normalized_mp
-
-            # only attach tide arrays if they are same length as timestamps; attach scalars as well
-            for k, v in tide.items():
-                if isinstance(v, (list, tuple)):
-                    if len(v) != len(timestamps):
-                        raise ValueError(f"Tide array '{k}' length {len(v)} does not match timestamps length {len(timestamps)} (strict)")
-                    raw.setdefault("tide", {})[k] = list(v)
-                else:
-                    raw.setdefault("tide", {})[k] = v
+            # Trust TideProxy: it is responsible for producing normalized moon_phase arrays and ensuring
+            # all tide arrays are aligned to the provided timestamps. Attach the tide dict as-is and allow
+            # any upstream exceptions to propagate (fail-fast).
+            raw["tide"] = tide
 
             # Precompute period indices using TideProxy + Skyfield (strict)
             # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
