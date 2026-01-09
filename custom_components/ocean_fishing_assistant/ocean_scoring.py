@@ -53,6 +53,27 @@ def _to_float_safe(v: Any) -> Optional[float]:
         return None
 
 
+
+def _resolve_tide_phase_at(data: Dict[str, Any], index: int) -> Optional[Any]:
+    """Resolve tide_phase from top-level or tide block for a given index.
+    Returns the raw value or None if not present / out of range.
+    """
+    if not isinstance(data, dict):
+        return None
+    if "tide_phase" in data:
+        tp = data.get("tide_phase")
+        if isinstance(tp, (list, tuple)):
+            return tp[index] if index < len(tp) else None
+        return tp
+    tide = data.get("tide")
+    if isinstance(tide, dict):
+        tp = tide.get("tide_phase")
+        if isinstance(tp, (list, tuple)):
+            return tp[index] if index < len(tp) else None
+        return tp
+    return None
+
+
 def _linear_within_score_10(value: float, pref_min: float, pref_max: float, tolerance: float) -> float:
     if math.isclose(pref_min, pref_max):
         low = pref_min - tolerance
@@ -260,7 +281,7 @@ def compute_score(
     # Enforce a resolved species profile dict (no fallback)
     if not isinstance(species_profile, dict):
         raise MissingDataError(f"species_profile must be a resolved dict (species metadata). Received: {species_profile!r}")
-    profile = species_profile
+    profile = dict(species_profile)
 
     # Validate factor weights (either defaults or provided)
     try:
@@ -877,7 +898,7 @@ def compute_score(
         "components": comp,
         "raw": {
             # Provide canonical tide_phase (machine-friendly) in raw if present
-            "tide_phase": (data.get("tide_phase")[use_index] if isinstance(data.get("tide_phase"), (list, tuple)) and use_index < len(data.get("tide_phase")) else (data.get("tide_phase") if "tide_phase" in data else (data.get("tide").get("tide_phase")[use_index] if "tide" in data and isinstance(data.get("tide"), dict) and isinstance(data.get("tide").get("tide_phase"), (list,tuple)) and use_index < len(data.get("tide").get("tide_phase")) else (data.get("tide").get("tide_phase") if "tide" in data and isinstance(data.get("tide"), dict) and "tide_phase" in data.get("tide") else None)))),
+            "tide_phase": _resolve_tide_phase_at(data, use_index),
             "wind": wind,
             "wave": wave,
             "pressure_delta": pressure_delta,
@@ -911,20 +932,7 @@ def compute_forecast(
         # Fail-fast: do not swallow exceptions. compute_score will raise on missing/invalid data.
         res = compute_score(payload, species_profile=species_profile, use_index=idx, safety_limits=safety_limits, units=units, factor_weights=factor_weights)
 
-        # Resolve canonical tide_phase (machine-friendly) for this index (strict)
-        tide_phase = None
-        if "tide_phase" in payload:
-            tp = payload.get("tide_phase")
-            if isinstance(tp, (list, tuple)):
-                tide_phase = tp[idx] if idx < len(tp) else None
-            else:
-                tide_phase = tp
-        elif "tide" in payload and isinstance(payload.get("tide"), dict):
-            tp = payload.get("tide").get("tide_phase")
-            if isinstance(tp, (list, tuple)):
-                tide_phase = tp[idx] if idx < len(tp) else None
-            else:
-                tide_phase = tp
+        tide_phase = _resolve_tide_phase_at(payload, idx)
 
         formatted_swell = payload.get("swell_period_s")[idx] if isinstance(payload.get("swell_period_s"), (list, tuple)) and idx < len(payload.get("swell_period_s")) else (payload.get("swell_period_s") if "swell_period_s" in payload else None)
         formatted_wave_period = payload.get("wave_period_s")[idx] if isinstance(payload.get("wave_period_s"), (list, tuple)) and idx < len(payload.get("wave_period_s")) else (payload.get("wave_period_s") if "wave_period_s" in payload else None)

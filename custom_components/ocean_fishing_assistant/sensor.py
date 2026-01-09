@@ -162,6 +162,49 @@ def _collect_safety_values(score_calc_raw: Optional[Dict[str, Any]], entry_units
     return out
 
 
+def _get_tide_phase_for_index(data: Dict[str, Any], idx: int) -> Optional[Any]:
+    """
+    Safely resolve a tide_phase for a given index from canonical payload structures.
+    - Prefer top-level `tide_phase` (list or scalar).
+    - Fallback to `tide` dict's `tide_phase` (list or scalar).
+    - Fallback to per-timestamp forecast entry `per_timestamp_forecasts[idx].tide_phase`.
+    Returns None if not available.
+    """
+    try:
+        if not isinstance(idx, int):
+            return None
+    except Exception:
+        return None
+
+    # Top-level tide_phase
+    tp = data.get("tide_phase")
+    if isinstance(tp, (list, tuple)):
+        if 0 <= idx < len(tp):
+            return tp[idx]
+    elif tp is not None:
+        return tp
+
+    # tide.tide_phase
+    tide_obj = data.get("tide")
+    if isinstance(tide_obj, dict):
+        tp2 = tide_obj.get("tide_phase")
+        if isinstance(tp2, (list, tuple)):
+            if 0 <= idx < len(tp2):
+                return tp2[idx]
+        elif tp2 is not None:
+            return tp2
+
+    # per_timestamp_forecasts fallback (some payloads may carry tide_phase there)
+    per_ts = data.get("per_timestamp_forecasts")
+    if isinstance(per_ts, (list, tuple)) and 0 <= idx < len(per_ts):
+        entry = per_ts[idx] or {}
+        tp3 = entry.get("tide_phase")
+        if tp3 is not None:
+            return tp3
+
+    return None
+
+
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     _LOGGER.debug("ocean_fishing_assistant: options updated for %s -> %s", entry.entry_id, entry.options)
     coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
@@ -283,11 +326,10 @@ class OFASensor(CoordinatorEntity):
         attrs: Dict[str, Any] = {}
         entry_units = getattr(self.coordinator, "units", "metric") or "metric"
 
-        # Standardized: tide_phase is expected at top-level canonical['tide_phase']
-        tide_phases = data.get("tide_phase")
+        # Ensure timestamps present (strict). Do NOT require tide_phase to be pre-aligned.
         timestamps = data.get("timestamps")
-        if not isinstance(tide_phases, (list, tuple)) or not isinstance(timestamps, (list, tuple)) or len(tide_phases) != len(timestamps):
-            raise RuntimeError("Canonical 'tide_phase' missing or not aligned with timestamps (strict)")
+        if not isinstance(timestamps, (list, tuple)):
+            raise RuntimeError("Canonical 'timestamps' missing or not a list (strict)")
 
         current = self._get_current_forecast()
 
@@ -331,21 +373,21 @@ class OFASensor(CoordinatorEntity):
                 sanitized.append(ex)
             current_copy["breaches"] = sanitized
 
-        # Use index to attach tide_phase — upfront assertion ensures index is valid
+        # Use index to attach tide_phase — resolve safely via helper
         idx = current.get("index")
         if not isinstance(idx, int):
             raise RuntimeError("Current forecast missing index (strict)")
 
         # Replace potential human-friendly key with machine-friendly tide_phase
         current_copy.pop("tide_phase_name", None)
-        current_copy["tide_phase"] = tide_phases[idx]
+        current_copy["tide_phase"] = _get_tide_phase_for_index(data, idx)
 
         # Also attach tide_phase into the tide component if present
         ccomps = current_copy.get("components") or {}
         tcomp = ccomps.get("tide")
         if isinstance(tcomp, dict):
             tcomp.pop("tide_phase_name", None)
-            tcomp["tide_phase"] = tide_phases[idx]
+            tcomp["tide_phase"] = _get_tide_phase_for_index(data, idx)
 
         attrs["current_forecast"] = current_copy
 
@@ -415,16 +457,16 @@ class OFASensor(CoordinatorEntity):
                 for k in list(raw_agg.keys()):
                     raw_agg[k] = raw_agg[k] / (counts.get(k, 1) or 1)
 
-                # Representative tide_phase is the first index of the period (upfront alignment assertion ensures index valid)
+                # Representative tide_phase is the first index of the period (resolve safely)
                 first_idx = indices[0]
                 sanitized.pop("tide_phase_name", None)
-                sanitized["tide_phase"] = tide_phases[first_idx]
+                sanitized["tide_phase"] = _get_tide_phase_for_index(data, first_idx)
 
                 pcomps = sanitized.get("components") or {}
                 tcomp = pcomps.get("tide")
                 if isinstance(tcomp, dict):
                     tcomp.pop("tide_phase_name", None)
-                    tcomp["tide_phase"] = tide_phases[first_idx]
+                    tcomp["tide_phase"] = _get_tide_phase_for_index(data, first_idx)
 
                 comps = sanitized.get("components")
                 sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units, self._is_raw_enabled())
@@ -452,15 +494,17 @@ class OFASensor(CoordinatorEntity):
                     e_copy.pop("safety", None)
 
                     idx = e_copy.get("index")
-                    if isinstance(idx, int) and idx < len(tide_phases):
-                        e_copy.pop("tide_phase_name", None)
-                        e_copy["tide_phase"] = tide_phases[idx]
+                    if isinstance(idx, int):
+                        tp_val = _get_tide_phase_for_index(data, idx)
+                        if tp_val is not None:
+                            e_copy.pop("tide_phase_name", None)
+                            e_copy["tide_phase"] = tp_val
 
-                        ccomps = e_copy.get("components") or {}
-                        tcomp = ccomps.get("tide")
-                        if isinstance(tcomp, dict):
-                            tcomp.pop("tide_phase_name", None)
-                            tcomp["tide_phase"] = tide_phases[idx]
+                            ccomps = e_copy.get("components") or {}
+                            tcomp = ccomps.get("tide")
+                            if isinstance(tcomp, dict):
+                                tcomp.pop("tide_phase_name", None)
+                                tcomp["tide_phase"] = tp_val
 
                     sanitized_list.append(e_copy)
                 attrs["per_timestamp_forecasts"] = sanitized_list

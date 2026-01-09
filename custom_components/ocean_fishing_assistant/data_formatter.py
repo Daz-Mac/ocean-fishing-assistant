@@ -18,11 +18,6 @@ from .const import CONF_FACTOR_WEIGHTS
 _LOGGER = logging.getLogger(__name__)
 
 
-def _ensure_list_length_equal(key: str, timestamps: List[Any], arr: List[Any]) -> None:
-    if len(timestamps) != len(arr):
-        raise ValueError(f"Array length mismatch for '{key}': timestamps length={len(timestamps)}, {key} length={len(arr)}")
-
-
 class DataFormatter:
     HOURLY_KEY_MAP = {
         "time": "timestamps",
@@ -115,9 +110,7 @@ class DataFormatter:
                     raise ValueError(f"Hourly key '{om_key}' must be a list/tuple (strict)")
                 # Trust upstream for alignment — do not re-check lengths here.
                 if om_key in ("wind_speed_10m", "windgusts_10m"):
-                    unit_hint = hourly_units.get(om_key) or hourly_units.get("windspeed") or hourly_units.get("wind_speed_10m")
-                    if not unit_hint:
-                        raise ValueError(f"Missing unit hint for hourly key '{om_key}' (strict)")
+                    unit_hint = hourly_units.get(om_key) or hourly_units.get("windspeed") or hourly_units.get("wind_speed_10m") or "m/s"
                     converted: List[Optional[float]] = []
                     for v in arr:
                         if v is None:
@@ -126,9 +119,7 @@ class DataFormatter:
                         converted.append(self._convert_wind_array_value(v, unit_hint))
                     canonical[canon_key] = converted
                 elif om_key == "visibility":
-                    unit_hint = hourly_units.get(om_key) or hourly_units.get("visibility")
-                    if not unit_hint:
-                        raise ValueError("Missing unit hint for 'visibility' hourly key (strict)")
+                    unit_hint = hourly_units.get(om_key) or hourly_units.get("visibility") or "km"
                     converted: List[Optional[float]] = []
                     uh = str(unit_hint).strip().lower()
                     for v in arr:
@@ -141,7 +132,8 @@ class DataFormatter:
                         elif "m" in uh:
                             converted.append(float(fv) / 1000.0)
                         else:
-                            raise ValueError(f"Unknown visibility unit hint '{unit_hint}' (strict)")
+                            # assume kilometers for unknown hints
+                            converted.append(float(fv))
                     canonical[canon_key] = converted
                 else:
                     canonical[canon_key] = list(arr)
