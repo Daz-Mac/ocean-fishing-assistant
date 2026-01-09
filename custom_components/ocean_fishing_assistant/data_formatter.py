@@ -85,9 +85,9 @@ class DataFormatter:
                 parsed = parsed.astimezone(timezone.utc)
             timestamps.append(parsed.isoformat().replace("+00:00", "Z"))
 
-        hourly_units = raw_payload.get("hourly_units") or hourly.get("units")
-        if not isinstance(hourly_units, dict):
-            raise ValueError("Missing 'hourly_units' mapping in payload; wind unit hints are required (strict)")
+        # hourly_units may be absent / non-dict; do not require it to be present as dict.
+        hourly_units_raw = raw_payload.get("hourly_units") or hourly.get("units") or {}
+        hourly_units = hourly_units_raw if isinstance(hourly_units_raw, dict) else {}
 
         canonical: Dict[str, Any] = {}
         canonical["timestamps"] = timestamps
@@ -113,7 +113,7 @@ class DataFormatter:
                 arr = hourly[om_key]
                 if not isinstance(arr, (list, tuple)):
                     raise ValueError(f"Hourly key '{om_key}' must be a list/tuple (strict)")
-                _ensure_list_length_equal(om_key, timestamps, list(arr))
+                # Trust upstream for alignment — do not re-check lengths here.
                 if om_key in ("wind_speed_10m", "windgusts_10m"):
                     unit_hint = hourly_units.get(om_key) or hourly_units.get("windspeed") or hourly_units.get("wind_speed_10m")
                     if not unit_hint:
@@ -148,34 +148,21 @@ class DataFormatter:
 
         tide_obj = raw_payload.get("tide")
         if isinstance(tide_obj, dict):
+            # Remove human-friendly duplicated fields and heights; keep structured tide block.
             tide_copy = {k: v for k, v in tide_obj.items() if k not in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name")}
             canonical["tide"] = tide_copy
-            tide_ts = tide_obj.get("timestamps")
-            if tide_ts and isinstance(tide_ts, (list, tuple)) and len(tide_ts) == len(timestamps):
-                for k, v in tide_obj.items():
-                    if k == "timestamps":
-                        continue
-                    if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
-                        continue
+            # Promote machine-friendly tide_phase to top-level canonical['tide_phase']
+            for k, v in tide_obj.items():
+                if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
+                    continue
+                if k == "tide_phase":
                     if isinstance(v, (list, tuple)):
-                        _ensure_list_length_equal(k, timestamps, list(v))
-                        if k == "tide_phase":
-                            canonical[k] = list(v)
-                        else:
-                            tide_copy[k] = list(v)
+                        canonical["tide_phase"] = list(v)
                     else:
-                        tide_copy[k] = v
-            else:
-                for k, v in tide_obj.items():
-                    if k in ("tide_height_m", "next_high_height_m", "next_low_height_m", "tide_phase_name"):
-                        continue
-                    if isinstance(v, (list, tuple)) and len(v) == len(timestamps):
-                        if k == "tide_phase":
-                            canonical[k] = list(v)
-                        else:
-                            tide_copy[k] = list(v)
-                    elif not isinstance(v, (list, tuple)):
-                        tide_copy[k] = v
+                        raise ValueError("tide_phase must be an array aligned to timestamps (strict)")
+                else:
+                    # keep other tide keys under canonical['tide']
+                    tide_copy[k] = list(v) if isinstance(v, (list, tuple)) else v
 
         # Moon phase handling: trust TideProxy for moon_phase. Prefer canonical['tide']['moon_phase'] if present,
         # otherwise fall back to raw_payload['moon_phase']. Conversion to float is performed once and will fail-fast
@@ -190,9 +177,6 @@ class DataFormatter:
             if not isinstance(mp, (list, tuple)):
                 raise ValueError("moon_phase must be an array aligned to timestamps (strict)")
             canonical["moon_phase"] = [float(x) for x in list(mp)]
-            moon_phase_set = True
-        else:
-            moon_phase_set = False
 
         for key in ("astro", "astronomy", "astronomy_forecast", "astro_forecast", "moon_phase"):
             if key in raw_payload and key not in canonical:
@@ -208,7 +192,7 @@ class DataFormatter:
             if mf in hourly:
                 arr = hourly[mf]
                 if isinstance(arr, (list, tuple)):
-                    _ensure_list_length_equal(mf, timestamps, list(arr))
+                    # Trust upstream alignment; simply include arrays
                     marine_candidate[mf] = list(arr)
         if marine_candidate:
             marine_candidate_with_ts = {"timestamps": timestamps, **marine_candidate}
@@ -224,15 +208,6 @@ class DataFormatter:
             missing_keys.append("temperature_c")
         if "pressure_hpa" not in canonical:
             missing_keys.append("pressure_hpa")
-        else:
-            p_arr = canonical.get("pressure_hpa")
-            if not isinstance(p_arr, (list, tuple)):
-                missing_keys.append("pressure_hpa_not_array")
-            else:
-                len_p = len(p_arr)
-                len_t = len(timestamps)
-                if len_p < len_t:
-                    missing_keys.append(f"pressure_hpa_series_too_short ({len_p} < {len_t})")
 
         if not any(k in canonical for k in ("moon_phase", "tide_phase", "astro", "astronomy", "astronomy_forecast", "astro_forecast")):
             missing_keys.append("moon_phase/astro/tide_phase")
@@ -356,7 +331,7 @@ class DataFormatter:
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
 
-                    # determine tide_phase for the period using canonical tide_phase array (first index representative)
+                    # determine tide_phase for the period using canonical top-level tide_phase array (first index representative)
                     tide_phase = None
                     if isinstance(canonical.get("tide_phase"), (list, tuple)):
                         if indices and isinstance(indices[0], int):
@@ -364,14 +339,6 @@ class DataFormatter:
                             tp_arr = canonical.get("tide_phase")
                             if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
                                 tide_phase = tp_arr[first_idx]
-                    else:
-                        tcan = canonical.get("tide")
-                        if isinstance(tcan, dict) and isinstance(tcan.get("tide_phase"), (list, tuple)):
-                            if indices and isinstance(indices[0], int):
-                                first_idx = indices[0]
-                                tp_arr = tcan.get("tide_phase")
-                                if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
-                                    tide_phase = tp_arr[first_idx]
 
                     summary = {
                         "score_10": round(score_10, 3) if score_10 is not None else None,
@@ -446,7 +413,7 @@ class DataFormatter:
 
                     breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
 
-                    # determine tide_phase for the period using canonical tide_phase array (first index representative)
+                    # determine tide_phase for the period using canonical top-level tide_phase array (first index representative)
                     tide_phase = None
                     if isinstance(canonical.get("tide_phase"), (list, tuple)):
                         if indices and isinstance(indices[0], int):
@@ -454,14 +421,6 @@ class DataFormatter:
                             tp_arr = canonical.get("tide_phase")
                             if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
                                 tide_phase = tp_arr[first_idx]
-                    else:
-                        tcan = canonical.get("tide")
-                        if isinstance(tcan, dict) and isinstance(tcan.get("tide_phase"), (list, tuple)):
-                            if indices and isinstance(indices[0], int):
-                                first_idx = indices[0]
-                                tp_arr = tcan.get("tide_phase")
-                                if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
-                                    tide_phase = tp_arr[first_idx]
 
                     summary = dict(pdata)
                     summary.update({
@@ -578,7 +537,7 @@ class DataFormatter:
                 mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
                 mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt if agg.get("wind_speed_sum") is not None else None
                 gust_m_s = float(agg["gust_max"]) if agg.get("gust_max") is not None else None
-                pressure = float(agg["pressure_sum"]) / cnt if agg["pressure_sum"] is not None else None
+                pressure = float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None
                 cloud = int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None
                 precip = int(round(float(agg["precip_max"]))) if agg.get("precip_max") is not None else None
 

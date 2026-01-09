@@ -241,38 +241,35 @@ class OFACoordinator(DataUpdateCoordinator):
             if not self.location_tz:
                 raise RuntimeError("Coordinator missing resolved location_tz (strict) - ensure async_init/resolve_location_tz was called during setup")
             tide = await self._tide_proxy.get_tide_for_timestamps(timestamps, location_tz=self.location_tz)
-            if not isinstance(tide, dict):
-                raise ValueError("TideProxy returned invalid shape (strict)")
 
             # --- Normalization for strict canonical shape ---
-            try:
-                nh = tide.get("next_high")
-                nl = tide.get("next_low")
+            nh = tide.get("next_high")
+            nl = tide.get("next_low")
 
-                def _normalize_entry(entry):
-                    # If already dict, strip any height keys and pass through
-                    if isinstance(entry, dict):
-                        entry_copy = dict(entry)
-                        # Remove any height keys if present (tide heights intentionally removed)
-                        entry_copy.pop("height_m", None)
-                        entry_copy.pop("height", None)
-                        entry_copy.pop("height_meters", None)
-                        return entry_copy
-                    # If a simple timestamp string, convert -> strict dict with only timestamp
-                    if isinstance(entry, str):
-                        return {"timestamp": entry}
-                    # Unknown or missing -> None
+            def _normalize_entry(entry):
+                # If already dict, strip any height keys and pass through
+                if isinstance(entry, dict):
+                    entry_copy = dict(entry)
+                    # Remove any height keys if present (tide heights intentionally removed)
+                    entry_copy.pop("height_m", None)
+                    entry_copy.pop("height", None)
+                    entry_copy.pop("height_meters", None)
+                    return entry_copy
+                # If a simple timestamp string, convert -> strict dict with only timestamp
+                if isinstance(entry, str):
+                    return {"timestamp": entry}
+                # Allow explicit None
+                if entry is None:
                     return None
+                # Unexpected types are strict errors
+                raise ValueError(f"Unexpected tide 'next_high'/'next_low' entry type: {type(entry)} (strict)")
 
-                nh_obj = _normalize_entry(nh)
-                nl_obj = _normalize_entry(nl)
+            nh_obj = _normalize_entry(nh)
+            nl_obj = _normalize_entry(nl)
 
-                # Overwrite canonical keys with normalized objects (may be None)
-                tide["next_high"] = nh_obj
-                tide["next_low"] = nl_obj
-            except Exception:
-                # If normalization fails for any reason, log but continue — downstream strict checks will catch it.
-                _LOGGER.exception("Failed to normalize tide 'next_high'/'next_low' payload; continuing with original tide object")
+            # Overwrite canonical keys with normalized objects (may be None)
+            tide["next_high"] = nh_obj
+            tide["next_low"] = nl_obj
 
             # Trust TideProxy: it is responsible for producing normalized moon_phase arrays and ensuring
             # all tide arrays are aligned to the provided timestamps. Attach the tide dict as-is and allow

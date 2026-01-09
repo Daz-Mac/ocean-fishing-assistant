@@ -87,84 +87,26 @@ def _augment_components_with_values_simple(
     entry_units: str,
     expose_raw: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """
+    Lean augmenter: only fills in known component display values from 'raw' inputs.
+    Avoids complex sibling discovery — we expect canonical structured inputs from upstream.
+    """
     if components is None:
         return None
     if not isinstance(components, dict):
         return components
 
-    comps_copy = copy.deepcopy(components)
+    comps_out: Dict[str, Any] = {}
+    raw = score_calc_raw or {}
 
-    def _merge_sibling_value_unit(cc: Dict[str, Any]) -> None:
-        for unit_key in list(cc.keys()):
-            if not unit_key.endswith("_unit"):
-                continue
-            unit = cc.get(unit_key)
-            base = unit_key[:-5]
-            candidate = None
-
-            for k in cc.keys():
-                if k == unit_key or k.endswith("_unit"):
-                    continue
-                if k.startswith(base):
-                    candidate = k
-                    break
-
-            if candidate is None:
-                for k in cc.keys():
-                    if k == unit_key or k.endswith("_unit"):
-                        continue
-                    if base in k:
-                        candidate = k
-                        break
-
-            if candidate is None:
-                for k in cc.keys():
-                    if k == unit_key or k.endswith("_unit"):
-                        continue
-                    v = cc.get(k)
-                    if isinstance(v, (int, float)):
-                        candidate = k
-                        break
-                    if isinstance(v, str):
-                        s = v.strip()
-                        if s.replace(".", "", 1).lstrip("-").isdigit():
-                            candidate = k
-                            break
-
-            if candidate is None:
-                cc.pop(unit_key, None)
-                continue
-
-            val = cc.get(candidate)
-            if isinstance(val, str) and isinstance(unit, str) and unit in val:
-                cc.pop(unit_key, None)
-                continue
-
-            try:
-                num = float(val)
-            except Exception:
-                cc.pop(unit_key, None)
-                continue
-
-            nd = 3
-            if "wind" in candidate or "gust" in candidate:
-                nd = 2
-            elif "temp" in candidate or "temperature" in candidate:
-                nd = 1
-            elif "height" in candidate or "wave" in candidate or "tide" in candidate or "delta" in candidate or "pressure" in candidate:
-                nd = 3
-
-            cc[candidate] = _format_with_unit(num, unit, ndigits=nd)
-            cc.pop(unit_key, None)
-
-    out: Dict[str, Any] = {}
-    for cname, cobj in comps_copy.items():
+    for cname, cobj in components.items():
         if not isinstance(cobj, dict):
-            out[cname] = cobj
+            comps_out[cname] = cobj
             continue
-        cc = copy.deepcopy(cobj)
+
+        cc = dict(cobj)
         cc.pop("score_10", None)
-        raw = score_calc_raw or {}
+
         if cname == "wind":
             if raw.get("wind") is not None:
                 val, unit = unit_helpers.wind_m_s_to_display(raw.get("wind"), entry_units)
@@ -179,23 +121,23 @@ def _augment_components_with_values_simple(
                 cc["pressure_delta"] = _format_with_unit(val, unit, ndigits=3) if val is not None else None
         elif cname == "moon":
             if raw.get("moon_phase") is not None:
-                mp = raw.get("moon_phase")
-                mpn = moon_coerce_phase(mp)
+                mp = float(raw.get("moon_phase"))
                 if expose_raw:
-                    cc["moon_phase"] = _round_opt(mpn, 6)
-                mname = _moon_phase_name(mpn)
+                    cc["moon_phase"] = _round_opt(mp, 6)
+                mname = _moon_phase_name(mp)
                 if mname:
                     cc["moon_phase_name"] = mname
         elif cname == "temperature":
             if raw.get("temperature") is not None:
-                temp_c = raw.get("temperature")
+                temp_c = float(raw.get("temperature"))
                 val, unit = unit_helpers.temp_c_to_display(temp_c, entry_units)
                 cc["temperature"] = _format_with_unit(val, unit, ndigits=1) if val is not None else None
 
-        _merge_sibling_value_unit(cc)
+        # For tide, we intentionally do not attempt to discover sibling keys;
+        # the caller will set tide_phase/top-level tide data as required.
+        comps_out[cname] = cc
 
-        out[cname] = cc
-    return out
+    return comps_out
 
 
 def _collect_safety_values(score_calc_raw: Optional[Dict[str, Any]], entry_units: str) -> Dict[str, Any]:
@@ -341,10 +283,11 @@ class OFASensor(CoordinatorEntity):
         attrs: Dict[str, Any] = {}
         entry_units = getattr(self.coordinator, "units", "metric") or "metric"
 
-        tide_phases = None
-        tide_container = data.get("tide")
-        if isinstance(tide_container, dict):
-            tide_phases = tide_container.get("tide_phase")
+        # Standardized: tide_phase is expected at top-level canonical['tide_phase']
+        tide_phases = data.get("tide_phase")
+        timestamps = data.get("timestamps")
+        if not isinstance(tide_phases, (list, tuple)) or not isinstance(timestamps, (list, tuple)) or len(tide_phases) != len(timestamps):
+            raise RuntimeError("Canonical 'tide_phase' missing or not aligned with timestamps (strict)")
 
         current = self._get_current_forecast()
 
@@ -388,25 +331,25 @@ class OFASensor(CoordinatorEntity):
                 sanitized.append(ex)
             current_copy["breaches"] = sanitized
 
-        if tide_phases is None:
-            raise RuntimeError("Coordinator tide_phase missing (strict)")
+        # Use index to attach tide_phase — upfront assertion ensures index is valid
         idx = current.get("index")
         if not isinstance(idx, int):
             raise RuntimeError("Current forecast missing index (strict)")
-        if idx < 0 or idx >= len(tide_phases):
-            raise RuntimeError("Current forecast index out of range for tide_phase (strict)")
+
+        # Replace potential human-friendly key with machine-friendly tide_phase
         current_copy.pop("tide_phase_name", None)
         current_copy["tide_phase"] = tide_phases[idx]
 
-        ccomps = current_copy["components"]
-        tcomp = ccomps["tide"]
-        tcomp.pop("tide_phase_name", None)
-        tcomp["tide_phase"] = tide_phases[idx]
+        # Also attach tide_phase into the tide component if present
+        ccomps = current_copy.get("components") or {}
+        tcomp = ccomps.get("tide")
+        if isinstance(tcomp, dict):
+            tcomp.pop("tide_phase_name", None)
+            tcomp["tide_phase"] = tide_phases[idx]
 
         attrs["current_forecast"] = current_copy
 
         period_forecasts = data.get("period_forecasts", {}) or {}
-        timestamps = data.get("timestamps", []) or []
         per_ts_forecasts = data.get("per_timestamp_forecasts", []) or []
 
         now_local = dt_util.now()
@@ -426,9 +369,7 @@ class OFASensor(CoordinatorEntity):
                 for idx in indices:
                     if not isinstance(idx, int):
                         continue
-                    if idx < 0 or idx >= len(timestamps):
-                        continue
-                    ts = timestamps[idx]
+                    ts = data["timestamps"][idx]
                     dt_utc = _parse_dt_isoz(ts)
                     if dt_utc is None:
                         continue
@@ -450,7 +391,7 @@ class OFASensor(CoordinatorEntity):
                 for idx in indices:
                     if not isinstance(idx, int):
                         continue
-                    if idx < 0 or idx >= len(per_ts_forecasts):
+                    if idx >= len(per_ts_forecasts):
                         continue
                     fe = per_ts_forecasts[idx] or {}
                     score_calc = (fe.get("forecast_raw") or {}).get("score_calc") or {}
@@ -474,18 +415,16 @@ class OFASensor(CoordinatorEntity):
                 for k in list(raw_agg.keys()):
                     raw_agg[k] = raw_agg[k] / (counts.get(k, 1) or 1)
 
-                if tide_phases is None:
-                    raise RuntimeError("Coordinator tide_phase missing (strict)")
+                # Representative tide_phase is the first index of the period (upfront alignment assertion ensures index valid)
                 first_idx = indices[0]
-                if not isinstance(first_idx, int) or first_idx < 0 or first_idx >= len(tide_phases):
-                    raise RuntimeError("Period indices out of range for tide_phase (strict)")
                 sanitized.pop("tide_phase_name", None)
                 sanitized["tide_phase"] = tide_phases[first_idx]
 
-                pcomps = sanitized["components"]
-                tcomp = pcomps["tide"]
-                tcomp.pop("tide_phase_name", None)
-                tcomp["tide_phase"] = tide_phases[first_idx]
+                pcomps = sanitized.get("components") or {}
+                tcomp = pcomps.get("tide")
+                if isinstance(tcomp, dict):
+                    tcomp.pop("tide_phase_name", None)
+                    tcomp["tide_phase"] = tide_phases[first_idx]
 
                 comps = sanitized.get("components")
                 sanitized["components"] = _augment_components_with_values_simple(comps, raw_agg or None, entry_units, self._is_raw_enabled())
@@ -512,19 +451,16 @@ class OFASensor(CoordinatorEntity):
                     e_copy.pop("profile_used", None)
                     e_copy.pop("safety", None)
 
-                    if tide_phases is None:
-                        raise RuntimeError("Coordinator tide_phase missing (strict)")
                     idx = e_copy.get("index")
-                    if isinstance(idx, int):
-                        if idx < 0 or idx >= len(tide_phases):
-                            raise RuntimeError("Per-timestamp entry index out of range for tide_phase (strict)")
+                    if isinstance(idx, int) and idx < len(tide_phases):
                         e_copy.pop("tide_phase_name", None)
                         e_copy["tide_phase"] = tide_phases[idx]
 
-                        ccomps = e_copy["components"]
-                        tcomp = ccomps["tide"]
-                        tcomp.pop("tide_phase_name", None)
-                        tcomp["tide_phase"] = tide_phases[idx]
+                        ccomps = e_copy.get("components") or {}
+                        tcomp = ccomps.get("tide")
+                        if isinstance(tcomp, dict):
+                            tcomp.pop("tide_phase_name", None)
+                            tcomp["tide_phase"] = tide_phases[idx]
 
                     sanitized_list.append(e_copy)
                 attrs["per_timestamp_forecasts"] = sanitized_list
@@ -599,7 +535,7 @@ class OFASensor(CoordinatorEntity):
             mp = data.get("moon_phase")
             if isinstance(mp, (list, tuple)):
                 idx = current.get("index")
-                if isinstance(idx, int) and idx < len(mp):
+                if isinstance(idx, int):
                     moon_numeric = mp[idx]
                 else:
                     moon_numeric = mp[0] if mp else None
