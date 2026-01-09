@@ -5,7 +5,7 @@ DOMAIN = "ocean_fishing_assistant"
 DEFAULT_NAME = "Ocean Fishing Assistant"
 
 # Update interval (seconds) default used by coordinator
-DEFAULT_UPDATE_INTERVAL = 15 * 60  # seconds
+DEFAULT_UPDATE_INTERVAL = 30 * 60  # seconds
 
 # Open-Meteo endpoints
 OM_BASE = "https://api.open-meteo.com/v1/forecast"
@@ -38,7 +38,7 @@ DEFAULT_SAFETY_LIMITS = {
 FETCH_CACHE_TTL = DEFAULT_UPDATE_INTERVAL  # seconds (align with DEFAULT_UPDATE_INTERVAL)
 
 # Separate defaults for the three TTLs (Option B)
-TIDE_PROXY_TTL_DEFAULT = 30 * 60       # seconds (default 30 minutes)
+TIDE_PROXY_TTL_DEFAULT = 24 * 60 * 60  # seconds (default 1 day)
 
 # Network / World Tides HTTP defaults
 WORLD_TIDES_TIMEOUT_SECONDS = 15  # per-request timeout (seconds)
@@ -61,7 +61,7 @@ TIDE_MIN_REQUIRED_BRACKETING = True  # require both bracketing extremes for inte
 TIDE_CONFIDENCE_SOURCE = "worldtides_api_extremes_only"
 TIDE_SOURCE = "worldtides_api"
 
-WEATHER_FETCHER_CACHE_TTL_DEFAULT = 30 * 60  # seconds (default 30 minutes)
+WEATHER_FETCHER_CACHE_TTL_DEFAULT = 60 * 60  # seconds (default 1 hour)
 
 # Tide phase offset default (minutes) — allows per-location tuning of tide predictions
 TIDE_PHASE_OFFSET_MINUTES_DEFAULT = 0
