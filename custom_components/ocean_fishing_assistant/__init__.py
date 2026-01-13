@@ -6,9 +6,13 @@ This implementation expects required values (including `units` and
 If they are missing or invalid, setup fails loudly (ValueError / return False).
 """
 import logging
+import time
+from typing import Any, Dict
 
-from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
+from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -37,6 +41,38 @@ from .unit_helpers import convert_safety_display_to_metric, validate_and_normali
 
 _LOGGER = logging.getLogger(__name__)
 
+# --- persistence store config ---
+_STORE_VERSION = 1
+_STORE_KEY = "ocean_fishing_assistant_persisted_cache_v1"
+
+# keys used in the stored JSON blob
+_STORE_COORDINATOR_FETCH_KEY = "coordinator_fetch_cache"
+_STORE_WEATHER_FETCH_KEY = "weather_fetch_cache"
+_STORE_TIDE_CACHE_KEY = "tide_api_cache"
+
+# Helpers to (de)serialize coordinator tuple keys used in memory.
+# Coordinator uses keys like: (lat_r, lon_r, "hourly", int(days))
+def _serialize_coord_cache_key(key: Any) -> str:
+    try:
+        if isinstance(key, (list, tuple)) and len(key) == 4:
+            lat, lon, mode, days = key
+            return f"fetch|{float(lat)}|{float(lon)}|{str(mode)}|{int(days)}"
+    except Exception:
+        pass
+    return str(key)
+
+
+def _deserialize_coord_cache_key(k: str):
+    # expects "fetch|{lat}|{lon}|{mode}|{days}" or fallback to raw repr string
+    try:
+        if k.startswith("fetch|"):
+            _, lat_s, lon_s, mode_s, days_s = k.split("|", 4)
+            return (float(lat_s), float(lon_s), mode_s, int(days_s))
+    except Exception:
+        pass
+    # last-resort: return the string key as-is
+    return k
+
 
 async def async_setup_entry(hass, entry):
     """Set up integration from a config entry (strict)."""
@@ -48,12 +84,151 @@ async def async_setup_entry(hass, entry):
     # Ensure the base domain dict exists
     domain_store = hass.data.setdefault(DOMAIN, {})
 
-    # Initialize shared fetch cache and tide cache/inflight buckets exactly once per integration load.
-    # TideProxy expects these keys to exist; initializing here makes intent explicit and keeps keys
-    # co-located with integration-level state.
-    domain_store.setdefault("fetch_cache", {})
-    domain_store.setdefault(SHARED_TIDE_CACHE_KEY, {})
-    domain_store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
+    # Only initialize/load persisted caches once per HA process (first entry setup).
+    if not domain_store.get("_persist_initialized"):
+        store = Store(hass, _STORE_VERSION, _STORE_KEY)
+        try:
+            persisted = await store.async_load() or {}
+        except Exception:
+            _LOGGER.exception("Failed to load persisted cache store; continuing with empty caches")
+            persisted = {}
+
+        # --- Coordinator shared fetch cache ---
+        raw_coord_cache = persisted.get(_STORE_COORDINATOR_FETCH_KEY) or {}
+        coord_cache: Dict[Any, Any] = {}
+        try:
+            now_ts = int(dt_util.now().timestamp())
+            for k_str, v in raw_coord_cache.items():
+                try:
+                    tup_key = _deserialize_coord_cache_key(k_str)
+                    # expect v to be dict with 'fetched_at' (float) and 'data'
+                    fetched_at = float(v.get("fetched_at", 0))
+                    # prune if older than FETCH_CACHE_TTL
+                    if (now_ts - int(fetched_at)) < int(FETCH_CACHE_TTL):
+                        coord_cache[tup_key] = v
+                except Exception:
+                    _LOGGER.debug("Skipping malformed coordinator cache entry on load: %s", k_str)
+        except Exception:
+            _LOGGER.exception("Failed to reconstruct persisted coordinator fetch cache")
+
+        domain_store.setdefault("fetch_cache", coord_cache)
+
+        # --- Tide shared cache (entries include 'expires' ints) ---
+        raw_tide_cache = persisted.get(_STORE_TIDE_CACHE_KEY) or {}
+        tide_cache: Dict[str, Any] = {}
+        try:
+            now_ts = int(dt_util.now().timestamp())
+            for k_str, v in raw_tide_cache.items():
+                # v expected: {"expires": <int>, ...}
+                try:
+                    expires = int(v.get("expires", 0))
+                    if expires >= now_ts:
+                        tide_cache[k_str] = v
+                    else:
+                        # expired; skip
+                        pass
+                except Exception:
+                    _LOGGER.debug("Skipping malformed tide cache entry on load: %s", k_str)
+        except Exception:
+            _LOGGER.exception("Failed to reconstruct persisted tide cache")
+
+        domain_store.setdefault(SHARED_TIDE_CACHE_KEY, tide_cache)
+        # ensure inflight key exists (not persisted)
+        domain_store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
+
+        # --- WeatherFetcher cache (stored under a different hass.data key historically) ---
+        # WeatherFetcher entries are like: { cache_key: {"data": ..., "time": "<ISO str>"} }
+        raw_weather_cache = persisted.get(_STORE_WEATHER_FETCH_KEY) or {}
+        weather_cache: Dict[str, Any] = {}
+        try:
+            for k_str, v in raw_weather_cache.items():
+                try:
+                    # parse time back into datetime if present
+                    entry_time = v.get("time")
+                    valid = False
+                    if entry_time:
+                        parsed = dt_util.parse_datetime(str(entry_time))
+                        if parsed:
+                            # WeatherFetcher expects a datetime object in memory
+                            weather_cache[k_str] = {"data": v.get("data"), "time": parsed}
+                            valid = True
+                    # if no time field / parse failed, skip if stale; else attempt to accept numeric timestamp
+                    if not valid:
+                        # skip entries we can't parse
+                        _LOGGER.debug("Skipping malformed/old weather cache entry on load: %s", k_str)
+                except Exception:
+                    _LOGGER.debug("Skipping malformed weather cache entry on load: %s", k_str)
+        except Exception:
+            _LOGGER.exception("Failed to reconstruct persisted weather fetch cache")
+
+        # WeatherFetcher historically uses a top-level key "ocean_fishing_assistant_fetch_cache"
+        hass.data.setdefault("ocean_fishing_assistant_fetch_cache", weather_cache)
+
+        # store Store instance and mark initialized
+        domain_store["_persist_store"] = store
+        domain_store["_persist_initialized"] = True
+
+        # Register save-on-stop to persist caches. Use async_listen_once so we save on clean shutdown.
+        async def _save_on_stop(event):
+            try:
+                s = domain_store.get("_persist_store") or store
+                to_save: Dict[str, Any] = {}
+
+                # Serialize coordinator fetch cache: convert tuple keys -> strings
+                coord_cache_local = domain_store.get("fetch_cache", {}) or {}
+                coord_serialized = {}
+                for k, v in coord_cache_local.items():
+                    try:
+                        kstr = _serialize_coord_cache_key(k)
+                        coord_serialized[kstr] = v
+                    except Exception:
+                        _LOGGER.debug("Skipping non-serializable coordinator fetch_cache key on save: %r", k)
+                to_save[_STORE_COORDINATOR_FETCH_KEY] = coord_serialized
+
+                # Serialize tide cache (already JSON-friendly; just copy)
+                tide_cache_local = domain_store.get(SHARED_TIDE_CACHE_KEY, {}) or {}
+                to_save[_STORE_TIDE_CACHE_KEY] = tide_cache_local
+
+                # Serialize weather fetch cache: convert datetime -> ISO string
+                weather_cache_local = hass.data.get("ocean_fishing_assistant_fetch_cache", {}) or {}
+                weather_serialized = {}
+                for k, v in weather_cache_local.items():
+                    try:
+                        # expect v like {"data": ..., "time": datetime}
+                        tval = v.get("time")
+                        t_iso = None
+                        if tval is not None:
+                            try:
+                                t_iso = tval.isoformat()
+                            except Exception:
+                                # fallback: numeric timestamp
+                                try:
+                                    t_iso = str(int(time.mktime(tval.timetuple())))
+                                except Exception:
+                                    t_iso = None
+                        weather_serialized[k] = {"data": v.get("data"), "time": t_iso}
+                    except Exception:
+                        _LOGGER.debug("Skipping non-serializable weather cache entry on save: %s", k)
+                to_save[_STORE_WEATHER_FETCH_KEY] = weather_serialized
+
+                await s.async_save(to_save)
+                _LOGGER.debug("Persisted ocean_fishing_assistant caches on stop: coord=%d tide=%d weather=%d",
+                              len(coord_serialized), len(tide_cache_local), len(weather_serialized))
+            except Exception:
+                _LOGGER.exception("Failed to persist ocean_fishing_assistant caches on stop")
+
+        try:
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _save_on_stop)
+            _LOGGER.debug("Registered Home Assistant stop listener to persist caches")
+        except Exception:
+            _LOGGER.exception("Failed to register stop listener for cache persistence")
+
+    else:
+        # ensure the keys exist so other modules can rely on them
+        domain_store.setdefault("fetch_cache", {})
+        domain_store.setdefault(SHARED_TIDE_CACHE_KEY, {})
+        domain_store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
+        hass.data.setdefault("ocean_fishing_assistant_fetch_cache", {})
 
     fetch_cache = domain_store.get("fetch_cache")
     _LOGGER.debug(
