@@ -5,13 +5,15 @@ This implementation expects required values (including `units` and
 `safety_limits`) to be present in the created config entry `data`.
 If they are missing or invalid, setup fails loudly (ValueError / return False).
 """
+import asyncio
 import logging
-import time
+from datetime import timedelta, timezone
 from typing import Any, Dict
 
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -49,6 +51,11 @@ _STORE_KEY = "ocean_fishing_assistant_persisted_cache_v1"
 _STORE_COORDINATOR_FETCH_KEY = "coordinator_fetch_cache"
 _STORE_WEATHER_FETCH_KEY = "weather_fetch_cache"
 _STORE_TIDE_CACHE_KEY = "tide_api_cache"
+_STORE_META_KEY = "_meta"
+
+# periodic save interval (helps avoid relying only on clean-stop)
+_PERSIST_SAVE_INTERVAL = timedelta(minutes=5)
+
 
 # Helpers to (de)serialize coordinator tuple keys used in memory.
 # Coordinator uses keys like: (lat_r, lon_r, "hourly", int(days))
@@ -92,6 +99,12 @@ async def async_setup_entry(hass, entry):
         except Exception:
             _LOGGER.exception("Failed to load persisted cache store; continuing with empty caches")
             persisted = {}
+
+        # check meta / version (best-effort; tolerate older formats)
+        meta = persisted.get(_STORE_META_KEY)
+        if not isinstance(meta, dict) or int(meta.get("version", 0)) != _STORE_VERSION:
+            # log for observability; continue attempting to load known keys for back-compat
+            _LOGGER.debug("Persisted cache _meta missing or version mismatch (found=%s expected=%s)", meta, _STORE_VERSION)
 
         # --- Coordinator shared fetch cache ---
         raw_coord_cache = persisted.get(_STORE_COORDINATOR_FETCH_KEY) or {}
@@ -137,24 +150,47 @@ async def async_setup_entry(hass, entry):
         domain_store.setdefault(SHARED_TIDE_INFLIGHT_KEY, {})
 
         # --- WeatherFetcher cache (stored under a different hass.data key historically) ---
-        # WeatherFetcher entries are like: { cache_key: {"data": ..., "time": "<ISO str>"} }
+        # WeatherFetcher entries are like: { cache_key: {"data": ..., "time": "<ISO str or epoch>"} }
         raw_weather_cache = persisted.get(_STORE_WEATHER_FETCH_KEY) or {}
         weather_cache: Dict[str, Any] = {}
         try:
             for k_str, v in raw_weather_cache.items():
                 try:
-                    # parse time back into datetime if present
                     entry_time = v.get("time")
-                    valid = False
-                    if entry_time:
-                        parsed = dt_util.parse_datetime(str(entry_time))
-                        if parsed:
-                            # WeatherFetcher expects a datetime object in memory
-                            weather_cache[k_str] = {"data": v.get("data"), "time": parsed}
-                            valid = True
-                    # if no time field / parse failed, skip if stale; else attempt to accept numeric timestamp
-                    if not valid:
-                        # skip entries we can't parse
+                    parsed_dt = None
+                    if entry_time is None:
+                        parsed_dt = None
+                    else:
+                        # If stored as numeric (epoch), accept that; else try ISO parse.
+                        try:
+                            # Accept numeric epoch strings or numbers (seconds)
+                            tnum = float(entry_time)
+                            # If value looks like milliseconds (very large), normalize to seconds
+                            if tnum > 1e12:
+                                tnum = tnum / 1000.0
+                            parsed_dt = dt_util.utc_from_timestamp(tnum)
+                        except Exception:
+                            # Not numeric, try ISO parse
+                            try:
+                                parsed = dt_util.parse_datetime(str(entry_time))
+                                if parsed and parsed.tzinfo is None:
+                                    parsed = parsed.replace(tzinfo=timezone.utc)
+                                parsed_dt = parsed
+                            except Exception:
+                                parsed_dt = None
+
+                    if parsed_dt:
+                        # validate TTL when applicable: WeatherFetcher uses its own TTL, but we can't easily
+                        # read that here for each instance; we keep entries that look recent-ish (conservative)
+                        # to avoid resurrecting very old entries. Use WEATHER_FETCHER_CACHE_TTL_DEFAULT as conservative bound.
+                        now_ts = int(dt_util.now().timestamp())
+                        entry_ts = int(parsed_dt.timestamp())
+                        if (now_ts - entry_ts) < int(WEATHER_FETCHER_CACHE_TTL_DEFAULT):
+                            weather_cache[k_str] = {"data": v.get("data"), "time": parsed_dt}
+                        else:
+                            # stale entry; skip
+                            pass
+                    else:
                         _LOGGER.debug("Skipping malformed/old weather cache entry on load: %s", k_str)
                 except Exception:
                     _LOGGER.debug("Skipping malformed weather cache entry on load: %s", k_str)
@@ -168,11 +204,14 @@ async def async_setup_entry(hass, entry):
         domain_store["_persist_store"] = store
         domain_store["_persist_initialized"] = True
 
-        # Register save-on-stop to persist caches. Use async_listen_once so we save on clean shutdown.
-        async def _save_on_stop(event):
+        # helper: actual save routine (used by periodic saver and stop listener)
+        async def _do_persist_save():
             try:
                 s = domain_store.get("_persist_store") or store
                 to_save: Dict[str, Any] = {}
+
+                # add meta
+                to_save[_STORE_META_KEY] = {"version": _STORE_VERSION, "saved_at": int(dt_util.now().timestamp())}
 
                 # Serialize coordinator fetch cache: convert tuple keys -> strings
                 coord_cache_local = domain_store.get("fetch_cache", {}) or {}
@@ -189,39 +228,59 @@ async def async_setup_entry(hass, entry):
                 tide_cache_local = domain_store.get(SHARED_TIDE_CACHE_KEY, {}) or {}
                 to_save[_STORE_TIDE_CACHE_KEY] = tide_cache_local
 
-                # Serialize weather fetch cache: convert datetime -> ISO string
+                # Serialize weather fetch cache: convert datetime -> epoch seconds (string/int)
                 weather_cache_local = hass.data.get("ocean_fishing_assistant_fetch_cache", {}) or {}
                 weather_serialized = {}
                 for k, v in weather_cache_local.items():
                     try:
                         # expect v like {"data": ..., "time": datetime}
                         tval = v.get("time")
-                        t_iso = None
+                        t_out = None
                         if tval is not None:
                             try:
-                                t_iso = tval.isoformat()
+                                # prefer timezone-aware timestamp
+                                t_out = int(dt_util.as_timestamp(tval))
                             except Exception:
-                                # fallback: numeric timestamp
+                                # fallback: try attribute timestamp() (timezone-aware) — this should be safe
                                 try:
-                                    t_iso = str(int(time.mktime(tval.timetuple())))
+                                    t_out = int(getattr(tval, "timestamp")())
                                 except Exception:
-                                    t_iso = None
-                        weather_serialized[k] = {"data": v.get("data"), "time": t_iso}
+                                    t_out = None
+                        weather_serialized[k] = {"data": v.get("data"), "time": t_out}
                     except Exception:
                         _LOGGER.debug("Skipping non-serializable weather cache entry on save: %s", k)
                 to_save[_STORE_WEATHER_FETCH_KEY] = weather_serialized
 
                 await s.async_save(to_save)
-                _LOGGER.debug("Persisted ocean_fishing_assistant caches on stop: coord=%d tide=%d weather=%d",
-                              len(coord_serialized), len(tide_cache_local), len(weather_serialized))
+                _LOGGER.debug(
+                    "Persisted ocean_fishing_assistant caches: coord=%d tide=%d weather=%d",
+                    len(coord_serialized),
+                    len(tide_cache_local),
+                    len(weather_serialized),
+                )
             except Exception:
-                _LOGGER.exception("Failed to persist ocean_fishing_assistant caches on stop")
+                _LOGGER.exception("Failed to persist ocean_fishing_assistant caches (periodic/stop)")
+
+        # Register save-on-stop to persist caches. Use async_listen_once so we save on clean shutdown.
+        async def _save_on_stop(event):
+            await _do_persist_save()
 
         try:
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _save_on_stop)
             _LOGGER.debug("Registered Home Assistant stop listener to persist caches")
         except Exception:
             _LOGGER.exception("Failed to register stop listener for cache persistence")
+
+        # Register a periodic saver to reduce the window of data loss on crashes.
+        try:
+            async def _periodic_save(now):
+                await _do_persist_save()
+
+            periodic_unsub = async_track_time_interval(hass, _periodic_save, _PERSIST_SAVE_INTERVAL)
+            domain_store["_persist_periodic_unsub"] = periodic_unsub
+            _LOGGER.debug("Registered periodic cache persister every %s", _PERSIST_SAVE_INTERVAL)
+        except Exception:
+            _LOGGER.exception("Failed to register periodic cache persister")
 
     else:
         # ensure the keys exist so other modules can rely on them
