@@ -892,6 +892,15 @@ def compute_score(
             unique_breaches.append(b)
     breaches = unique_breaches
 
+    # If safety limits mark this period as unsafe, cap the score to 30 (score_100) and reflect in score_10.
+    # "caution" should not modify the score.
+    if safety.get("unsafe"):
+        try:
+            overall_100 = min(int(overall_100), 30)
+        except Exception:
+            overall_100 = 30 if overall_100 else 30
+        overall_10 = float(overall_100) / 10.0
+
     result = {
         "score_10": overall_10,
         "score_100": overall_100,
