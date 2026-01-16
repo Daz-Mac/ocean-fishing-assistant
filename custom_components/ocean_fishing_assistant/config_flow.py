@@ -956,7 +956,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                         )
                         schema_fields[vol.Required("min_visibility", default=current_opts.get("min_visibility", 1))] = selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
+                            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
                         )
                         schema_fields[vol.Required("expose_raw", default=current_opts.get("expose_raw", False))] = selector.BooleanSelector()
 
@@ -1035,7 +1035,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
         )
         schema_fields[vol.Required("min_visibility", default=current_opts.get("min_visibility", 1))] = selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement="km", mode="slider")
+            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
         )
         schema_fields[vol.Required("expose_raw", default=current_opts.get("expose_raw", False))] = selector.BooleanSelector()
 
