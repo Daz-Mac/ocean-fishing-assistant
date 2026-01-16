@@ -780,6 +780,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Build an options dict so that entry.options will contain the UI-editable settings
                 options: dict[str, Any] = {}
 
+                # persist the chosen units so the Options UI shows the correct unit labels
+                options["units"] = units
+
                 # time periods should be editable in options UI — write to options too
                 options[CONF_TIME_PERIODS] = self.ocean_config.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY)
 
