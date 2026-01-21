@@ -930,6 +930,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             norm_defaults = _validate_and_normalize_factor_weights(None)
                         stored_defaults = {k: int(round(norm_defaults.get(k, 0.0) * 100)) for k in FACTOR_WEIGHTS.keys()}
 
+                        # compute unit labels from current options so re-displayed form shows correct labels
+                        units_local = current_opts.get("units", "metric")
+                        wind_unit_label_local = "km/h" if units_local == "metric" else "mph"
+                        wave_unit_label_local = "m" if units_local == "metric" else "ft"
+                        vis_unit_label_local = "km" if units_local == "metric" else "miles"
+
                         schema_fields: dict = {}
                         schema_fields[vol.Required(CONF_TIME_PERIODS, default=current_opts.get(CONF_TIME_PERIODS, TIME_PERIODS_FULL_DAY))] = selector.SelectSelector(
                             selector.SelectSelectorConfig(
@@ -941,13 +947,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             )
                         )
                         schema_fields[vol.Required("max_wind_speed", default=current_opts.get("max_wind_speed", 25))] = selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement="km/h", mode="slider")
+                            selector.NumberSelectorConfig(min=10, max=50, step=5, unit_of_measurement=wind_unit_label_local, mode="slider")
                         )
                         schema_fields[vol.Required("max_gust_speed", default=current_opts.get("max_gust_speed", 40))] = selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement="km/h", mode="slider")
+                            selector.NumberSelectorConfig(min=15, max=80, step=5, unit_of_measurement=wind_unit_label_local, mode="slider")
                         )
                         schema_fields[vol.Required("max_wave_height", default=current_opts.get("max_wave_height", 2.0))] = selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement="m", mode="slider")
+                            selector.NumberSelectorConfig(min=0.5, max=10.0, step=0.5, unit_of_measurement=wave_unit_label_local, mode="slider")
                         )
                         schema_fields[vol.Required("max_precip_chance", default=current_opts.get("max_precip_chance", 80))] = selector.NumberSelector(
                             selector.NumberSelectorConfig(min=0, max=100, step=5, unit_of_measurement="%", mode="slider")
@@ -956,7 +962,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             selector.NumberSelectorConfig(min=0, max=30, step=1, unit_of_measurement="s")
                         )
                         schema_fields[vol.Required("min_visibility", default=current_opts.get("min_visibility", 1))] = selector.NumberSelector(
-                            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label, mode="slider")
+                            selector.NumberSelectorConfig(min=0, max=50, step=1, unit_of_measurement=vis_unit_label_local, mode="slider")
                         )
                         schema_fields[vol.Required("expose_raw", default=current_opts.get("expose_raw", False))] = selector.BooleanSelector()
 

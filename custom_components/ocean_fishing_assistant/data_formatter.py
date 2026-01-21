@@ -127,12 +127,19 @@ class DataFormatter:
                             converted.append(None)
                             continue
                         fv = float(v)
-                        if "km" in uh:
+                        # Detect miles first, then kilometers, then meters.
+                        # This avoids matching 'm' inside 'miles'.
+                        if "mile" in uh or uh in ("mi", "mi/h") or ("mi" == uh):
+                            # input is in miles -> convert to kilometers
+                            converted.append(float(fv) * 1.609344)
+                        elif "km" in uh or "kilometer" in uh or "kilometre" in uh:
+                            # already kilometers
                             converted.append(float(fv))
-                        elif "m" in uh:
+                        elif uh in ("m", "meter", "metre", "meters", "metres"):
+                            # meters -> convert to kilometers
                             converted.append(float(fv) / 1000.0)
                         else:
-                            # assume kilometers for unknown hints
+                            # fallback: assume kilometers if unknown
                             converted.append(float(fv))
                     canonical[canon_key] = converted
                 else:
