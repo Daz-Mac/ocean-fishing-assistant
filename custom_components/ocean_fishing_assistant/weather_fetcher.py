@@ -28,6 +28,7 @@ OM_PARAMS_HOURLY = ",".join(
     [
         "temperature_2m",
         "wind_speed_10m",
+        "wind_direction_10m",  # wind direction in degrees (0-359)
         "windgusts_10m",
         "cloudcover",
         "precipitation_probability",

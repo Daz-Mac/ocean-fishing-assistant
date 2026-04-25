@@ -23,6 +23,7 @@ class DataFormatter:
         "time": "timestamps",
         "temperature_2m": "temperature_c",
         "wind_speed_10m": "wind_m_s",
+        "wind_direction_10m": "wind_direction",  # degrees 0-359
         "windgusts_10m": "wind_max_m_s",
         "pressure_msl": "pressure_hpa",
         "cloudcover": "cloud_cover",

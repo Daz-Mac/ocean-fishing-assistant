@@ -96,6 +96,32 @@ CONF_TIDE_PHASE_OFFSET_MINUTES = "tide_phase_offset_minutes"  # tide phase offse
 TIME_PERIODS_FULL_DAY = "full_day"
 TIME_PERIODS_DAWN_DUSK = "dawn_dusk"
 
+# Wind direction constants
+WIND_DIRECTION_TOLERANCE_DEGREES = 45  # ±45° from preferred = full score
+
+# Cardinal wind directions mapped to degrees (0-359)
+WIND_DIRECTIONS = {
+    "N": 0,
+    "NNE": 22.5,
+    "NE": 45,
+    "ENE": 67.5,
+    "E": 90,
+    "ESE": 112.5,
+    "SE": 135,
+    "SSE": 157.5,
+    "S": 180,
+    "SSW": 202.5,
+    "SW": 225,
+    "WSW": 247.5,
+    "W": 270,
+    "WNW": 292.5,
+    "NW": 315,
+    "NNW": 337.5,
+}
+
+# Config key for preferred wind directions (comma-separated string, e.g., "E,SE,NE")
+CONF_PREFERRED_WIND_DIRECTIONS = "preferred_wind_directions"
+
 # Habitat presets and defaults used to seed the thresholds UI
 HABITAT_ROCKY_POINT = "rocky_point"
 HABITAT_OPEN_BEACH = "open_beach"

@@ -30,7 +30,8 @@ from .moon_utils import coerce_phase, matches_moon_preference
 # Default global factor weights (used when no per-entry weights supplied)
 FACTOR_WEIGHTS = {
     "tide": 0.25,
-    "wind": 0.15,
+    "wind": 0.10,
+    "wind_direction": 0.05,
     "waves": 0.15,
     "time": 0.15,
     "pressure": 0.10,
@@ -444,6 +445,66 @@ def compute_score(
         wind_score = _linear_within_score_10(float(wind), pw_min, pw_max, wind_tol)
     wind_score = _clamp_0_10(wind_score)
     comp["wind"] = {"score_10": round(wind_score, 3), "score_100": int(round(wind_score * 10))}
+
+    # WIND_DIRECTION component
+    # Get preferred wind directions from profile (e.g., ["E", "SE", "NE"]) or user config
+    pref_wind_dirs_raw = profile.get("preferred_wind_directions")
+    # Handle comma-separated string or list
+    pref_wind_dirs = None
+    if pref_wind_dirs_raw:
+        if isinstance(pref_wind_dirs_raw, str):
+            pref_wind_dirs = [d.strip().upper() for d in pref_wind_dirs_raw.split(",") if d.strip()]
+        elif isinstance(pref_wind_dirs_raw, list):
+            pref_wind_dirs = [str(d).strip().upper() for d in pref_wind_dirs_raw if str(d).strip()]
+        # Filter out "ANY" or empty
+        pref_wind_dirs = [d for d in pref_wind_dirs if d and d != "ANY"]
+        if not pref_wind_dirs:
+            pref_wind_dirs = None
+
+    # Get actual wind direction at this index
+    wind_direction = _get_at("wind_direction", use_index)
+
+    # Score wind direction
+    if pref_wind_dirs is None or wind_direction is None:
+        wind_dir_score = 10.0
+    else:
+        # Import wind direction constants
+        try:
+            from .const import WIND_DIRECTIONS, WIND_DIRECTION_TOLERANCE_DEGREES
+        except Exception:
+            WIND_DIRECTIONS = {}
+            WIND_DIRECTION_TOLERANCE_DEGREES = 45
+
+        # Convert preferred directions to degrees
+        pref_degrees = []
+        for d in pref_wind_dirs:
+            if d in WIND_DIRECTIONS:
+                pref_degrees.append(WIND_DIRECTIONS[d])
+
+        if not pref_degrees:
+            wind_dir_score = 10.0
+        else:
+            # Find minimum angular distance to any preferred direction
+            min_distance = min(
+                min(abs(wind_direction - pd), 360 - abs(wind_direction - pd))
+                for pd in pref_degrees
+            )
+
+            # Score: 10 at 0°, 0 at 2*tolerance, linear in between
+            tolerance = float(WIND_DIRECTION_TOLERANCE_DEGREES)
+            if min_distance <= tolerance:
+                wind_dir_score = 10.0
+            elif min_distance >= 2 * tolerance:
+                wind_dir_score = 0.0
+            else:
+                wind_dir_score = 10.0 * (1.0 - (min_distance - tolerance) / tolerance)
+
+    wind_dir_score = _clamp_0_10(wind_dir_score)
+    comp["wind_direction"] = {"score_10": round(wind_dir_score, 3), "score_100": int(round(wind_dir_score * 10))}
+    if wind_direction is not None:
+        comp["wind_direction"]["wind_direction_deg"] = round(wind_direction, 1)
+    if pref_wind_dirs:
+        comp["wind_direction"]["preferred_directions"] = pref_wind_dirs
 
     # WAVES component
     max_wave_pref = profile.get("max_wave_height_m")

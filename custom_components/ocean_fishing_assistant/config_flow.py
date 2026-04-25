@@ -39,6 +39,9 @@ from .const import (
     TIDE_PHASE_OFFSET_MINUTES_DEFAULT,
     # World Tides API key constant
     CONF_WORLD_TIDES_API_KEY,
+    # wind direction constants
+    CONF_PREFERRED_WIND_DIRECTIONS,
+    WIND_DIRECTIONS,
 )
 
 from .species_loader import SpeciesLoader
@@ -901,6 +904,80 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
         return await self.async_step_ocean_options()
 
+    async def async_step_wind_direction(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Step 1: Ask if wind direction is important."""
+        if user_input is not None:
+            is_important = user_input.get("wind_direction_important", False)
+            if is_important:
+                return await self.async_step_wind_direction_select()
+            else:
+                # Not important - save empty and continue to thresholds
+                self._wind_dirs = ""
+                return await self.async_step_ocean_thresholds()
+
+        return self.async_show_form(
+            step_id="wind_direction",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("wind_direction_important", default=False): selector.BooleanSelector(),
+                }
+            ),
+            description_placeholders={
+                "info": "Would you like wind direction to be a factor in the fishing score? If enabled, you can select preferred wind directions (e.g., offshore winds)."
+            },
+        )
+
+    async def async_step_wind_direction_select(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Step 2: Select preferred wind directions (multi-select)."""
+        if user_input is not None:
+            directions = user_input.get("preferred_wind_directions", [])
+            if directions:
+                self._wind_dirs = ",".join(directions)
+            else:
+                self._wind_dirs = ""
+            return await self.async_step_ocean_thresholds()
+
+        direction_options = [
+            {"value": "N", "label": "North"},
+            {"value": "NNE", "label": "North-Northeast"},
+            {"value": "NE", "label": "Northeast"},
+            {"value": "ENE", "label": "East-Northeast"},
+            {"value": "E", "label": "East"},
+            {"value": "ESE", "label": "East-Southeast"},
+            {"value": "SE", "label": "Southeast"},
+            {"value": "SSE", "label": "South-Southeast"},
+            {"value": "S", "label": "South"},
+            {"value": "SSW", "label": "South-Southwest"},
+            {"value": "SW", "label": "Southwest"},
+            {"value": "WSW", "label": "West-Southwest"},
+            {"value": "W", "label": "West"},
+            {"value": "WNW", "label": "West-Northwest"},
+            {"value": "NW", "label": "Northwest"},
+            {"value": "NNW", "label": "North-Northwest"},
+        ]
+
+        # Get existing selection for default
+        existing_dirs = self._wind_dirs if hasattr(self, "_wind_dirs") else ""
+        existing_list = [d.strip() for d in existing_dirs.split(",") if d.strip()] if existing_dirs else []
+
+        return self.async_show_form(
+            step_id="wind_direction_select",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("preferred_wind_directions", default=existing_list): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=direction_options,
+                            mode="dropdown",
+                            multiple=True,
+                        )
+                    ),
+                }
+            ),
+            description_placeholders={
+                "info": "Select the wind directions that are most favorable for fishing at your location. You can select multiple directions."
+            },
+        )
+
     async def async_step_ocean_options(self, user_input: dict[str, Any] | None = None) -> FlowResult:
 
         # Options flow reads/writes only from entry.options (no fallbacks/migrations here).
@@ -992,6 +1069,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     for k in list(FACTOR_WEIGHTS.keys()):
                         user_input.pop(f"factor_{k}", None)
 
+                # Handle wind direction preference
+                wind_enabled = user_input.get("wind_direction_enabled", False)
+                if wind_enabled:
+                    # If enabled but no directions selected, keep existing or empty
+                    existing_dirs = current_opts.get(CONF_PREFERRED_WIND_DIRECTIONS, "")
+                    user_input[CONF_PREFERRED_WIND_DIRECTIONS] = existing_dirs
+                else:
+                    user_input[CONF_PREFERRED_WIND_DIRECTIONS] = ""
+                user_input.pop("wind_direction_enabled", None)
+
                 # Merge with existing options to avoid clobbering unrelated keys
                 new_options = dict(current_opts)
                 new_options.update(user_input)
@@ -1049,6 +1136,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[vol.Required(CONF_TIDE_PHASE_OFFSET_MINUTES, default=current_opts.get(CONF_TIDE_PHASE_OFFSET_MINUTES, TIDE_PHASE_OFFSET_MINUTES_DEFAULT))] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=-180, max=180, step=1, unit_of_measurement="min", mode="slider")
         )
+
+        # Wind direction preference
+        existing_wind_dirs = current_opts.get(CONF_PREFERRED_WIND_DIRECTIONS, "")
+        wind_dir_enabled = bool(existing_wind_dirs)
+        schema_fields[vol.Required("wind_direction_enabled", default=wind_dir_enabled)] = selector.BooleanSelector()
 
         for k in FACTOR_WEIGHTS.keys():
             schema_fields[vol.Required(f"factor_{k}", default=factor_defaults_percent.get(k, 0))] = selector.NumberSelector(
