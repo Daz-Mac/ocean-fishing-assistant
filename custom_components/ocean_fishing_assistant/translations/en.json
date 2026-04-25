@@ -32,6 +32,7 @@
           "_factors_total": "Total",
           "factor_tide": "Tide",
           "factor_wind": "Wind",
+          "factor_wind_direction": "Wind direction",
           "factor_waves": "Waves",
           "factor_time": "Time of day",
           "factor_pressure": "Pressure",
@@ -91,6 +92,20 @@
           "units": "Units"
         }
       },
+      "wind_direction_config": {
+        "title": "Wind direction",
+        "description": "Configure wind direction preferences.",
+        "data": {
+          "wind_direction_important": "Is wind direction important for fishing score?"
+        }
+      },
+      "wind_direction_select": {
+        "title": "Preferred wind directions",
+        "description": "Select favorable wind directions.",
+        "data": {
+          "preferred_wind_directions": "Preferred wind directions"
+        }
+      },
       "ocean_thresholds": {
         "title": "Safety & thresholds",
         "description": "Set safe fishing limits based on your habitat and comfort level.",
@@ -120,6 +135,7 @@
           "tide_phase_offset_minutes": "Tide phase offset (minutes)",
           "factor_tide": "Tide",
           "factor_wind": "Wind",
+          "factor_wind_direction": "Wind direction",
           "factor_waves": "Waves",
           "factor_time": "Time of day",
           "factor_pressure": "Pressure",

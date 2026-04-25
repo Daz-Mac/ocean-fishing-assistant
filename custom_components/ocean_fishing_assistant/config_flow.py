@@ -644,7 +644,7 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             self.ocean_config.update(user_input)
-            return await self.async_step_ocean_units()
+            return await self.async_step_wind_direction_config()
 
         return self.async_show_form(
             step_id="ocean_time_periods",
@@ -662,6 +662,76 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             description_placeholders={"info": "Choose which time periods to monitor. Dawn & dusk focuses on the most productive fishing times."},
+        )
+
+    async def async_step_wind_direction_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Configure preferred wind directions."""
+        if user_input is not None:
+            is_important = user_input.get("wind_direction_important", False)
+            if is_important:
+                return await self.async_step_wind_direction_select()
+            else:
+                # Not important - save empty and continue to units
+                self.ocean_config[CONF_PREFERRED_WIND_DIRECTIONS] = ""
+                return await self.async_step_ocean_units()
+
+        return self.async_show_form(
+            step_id="wind_direction_config",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("wind_direction_important", default=False): selector.BooleanSelector(),
+                }
+            ),
+            description_placeholders={
+                "info": "Would you like wind direction to be a factor in the fishing score? If enabled, you can select preferred wind directions (e.g., offshore winds)."
+            },
+        )
+
+    async def async_step_wind_direction_select(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Select preferred wind directions (multi-select)."""
+        if user_input is not None:
+            directions = user_input.get("preferred_wind_directions", [])
+            if directions:
+                self.ocean_config[CONF_PREFERRED_WIND_DIRECTIONS] = ",".join(directions)
+            else:
+                self.ocean_config[CONF_PREFERRED_WIND_DIRECTIONS] = ""
+            return await self.async_step_ocean_units()
+
+        direction_options = [
+            {"value": "N", "label": "North"},
+            {"value": "NNE", "label": "North-Northeast"},
+            {"value": "NE", "label": "Northeast"},
+            {"value": "ENE", "label": "East-Northeast"},
+            {"value": "E", "label": "East"},
+            {"value": "ESE", "label": "East-Southeast"},
+            {"value": "SE", "label": "Southeast"},
+            {"value": "SSE", "label": "South-Southeast"},
+            {"value": "S", "label": "South"},
+            {"value": "SSW", "label": "South-Southwest"},
+            {"value": "SW", "label": "Southwest"},
+            {"value": "WSW", "label": "West-Southwest"},
+            {"value": "W", "label": "West"},
+            {"value": "WNW", "label": "West-Northwest"},
+            {"value": "NW", "label": "Northwest"},
+            {"value": "NNW", "label": "North-Northwest"},
+        ]
+
+        return self.async_show_form(
+            step_id="wind_direction_select",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("preferred_wind_directions", default=[]): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=direction_options,
+                            mode="dropdown",
+                            multiple=True,
+                        )
+                    ),
+                }
+            ),
+            description_placeholders={
+                "info": "Select the wind directions that are most favorable for fishing at your location. You can select multiple directions."
+            },
         )
 
     async def async_step_ocean_units(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -809,6 +879,9 @@ class OceanFishingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 # store normalized factor weights in options as well (UI uses factor_* sliders)
                 options[CONF_FACTOR_WEIGHTS] = final_config[CONF_FACTOR_WEIGHTS]
+
+                # Store wind direction preference in options
+                options[CONF_PREFERRED_WIND_DIRECTIONS] = self.ocean_config.get(CONF_PREFERRED_WIND_DIRECTIONS, "")
 
                 # Duplicate title check
                 existing_entries = self.hass.config_entries.async_entries(DOMAIN)
