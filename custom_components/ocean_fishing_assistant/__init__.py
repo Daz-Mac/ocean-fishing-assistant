@@ -25,6 +25,7 @@ from .const import (
     CONF_TIDE_PHASE_OFFSET_MINUTES,
     TIDE_PHASE_OFFSET_MINUTES_DEFAULT,
     CONF_WORLD_TIDES_API_KEY,
+    CONF_PREFERRED_WIND_DIRECTIONS,
 )
 
 from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
@@ -219,6 +220,11 @@ async def async_setup_entry(hass, entry):
     await coord.async_request_refresh()
     _LOGGER.debug("Initial data refresh requested for entry %s", entry.entry_id)
 
+    # Apply user-configured wind direction preference to coordinator
+    preferred_wind_dirs = entry.options.get(CONF_PREFERRED_WIND_DIRECTIONS, "")
+    coord._preferred_wind_directions = preferred_wind_dirs
+    _LOGGER.debug("Applied preferred_wind_directions for entry %s: %s", entry.entry_id, preferred_wind_dirs)
+
     # store coordinator in hass.data for lookups by entry_id
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
     _LOGGER.debug("Stored coordinator in hass.data[%s][%s]", DOMAIN, entry.entry_id)
@@ -287,6 +293,11 @@ async def async_setup_entry(hass, entry):
             except Exception:
                 _LOGGER.exception("Failed to apply updated tide phase offset for entry %s", entry_inner.entry_id)
                 raise
+
+            # Apply wind direction preference from options
+            new_wind_dirs = opts.get(CONF_PREFERRED_WIND_DIRECTIONS, "")
+            coord_inner._preferred_wind_directions = new_wind_dirs
+            _LOGGER.debug("Applied preferred_wind_directions for entry %s: %s", entry_inner.entry_id, new_wind_dirs)
 
             # Apply expose_raw top-level option into stored data/options if present (no migration)
             # (Note: options are already saved by HA; we just apply runtime effect)

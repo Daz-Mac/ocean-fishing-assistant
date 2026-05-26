@@ -175,6 +175,35 @@ def test_precip_caution():
     assert r["unsafe"] is False and r["caution"] is True
 
 
+# Regression: ISSUE-003 — wind safety limit exceeded but component score shows 100
+# Found by /investigate on 2026-05-26
+# User set max wind = 15 km/h (4.17 m/s) during config flow, but wind was 22.4 km/h (6.22 m/s).
+# SafetyValidator must flag unsafe for wind > max_wind_m_s.
+def test_wind_safety_limit_exceeded():
+    """Wind exceeding user's configured safety limit (15 km/h = 4.17 m/s) must flag unsafe."""
+    v = SafetyValidator({"max_wind_m_s": 4.17})  # 15 km/h converted to m/s
+    r = v.check(wind=6.22)  # actual wind 22.4 km/h
+    assert r["unsafe"] is True
+    assert any("wind" in reason for reason in r["reasons"])
+
+
+def test_wind_within_safety_limit():
+    """Wind within user's safety limit must not flag unsafe."""
+    v = SafetyValidator({"max_wind_m_s": 10.0})
+    r = v.check(wind=6.22)
+    assert r["unsafe"] is False
+    assert r["caution"] is False
+
+
+# Regression: ISSUE-003 — wind near safety limit flags caution
+def test_wind_near_safety_limit():
+    """Wind near safety limit (90% of max) flags caution."""
+    v = SafetyValidator({"max_wind_m_s": 7.0})
+    r = v.check(wind=6.5)
+    assert r["unsafe"] is False
+    assert r["caution"] is True
+
+
 # ---- Run all ----
 
 def _run():

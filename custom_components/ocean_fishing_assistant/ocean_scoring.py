@@ -761,6 +761,44 @@ def compute_score(
     reason_codes = safety.get("reasons", []) or []
     safety["reason_strings"] = [_format_safety_reason(rc, safety_limits, units) for rc in reason_codes]
 
+    # Adjust component scores based on safety limit breaches.
+    # When a safety limit is breached (e.g., wind > max_wind_m_s), the corresponding
+    # component score should reflect the safety concern, not just the species preference.
+    # Map safety reason prefixes to component keys and their cap values.
+    _SAFETY_COMPONENT_MAP = {
+        "wind": ("wind", 0.0, 3.0),
+        "wave": ("waves", 0.0, 3.0),
+        "gust": ("wind", 0.0, 3.0),
+        "swell": ("waves", 0.0, 3.0),
+    }
+    for rc in reason_codes:
+        for prefix, (comp_key, unsafe_cap, caution_cap) in _SAFETY_COMPONENT_MAP.items():
+            if rc.startswith(f"{prefix}>") or rc.startswith(f"{prefix}<"):
+                if comp_key in comp and comp[comp_key].get("score_10") is not None:
+                    comp[comp_key]["score_10"] = round(unsafe_cap, 3)
+                    comp[comp_key]["score_100"] = int(round(unsafe_cap * 10))
+                    comp[comp_key]["safety_capped"] = True
+                break
+            elif rc == f"{prefix}_near_limit":
+                if comp_key in comp and comp[comp_key].get("score_10") is not None:
+                    current = comp[comp_key]["score_10"]
+                    if current > caution_cap:
+                        comp[comp_key]["score_10"] = round(caution_cap, 3)
+                        comp[comp_key]["score_100"] = int(round(caution_cap * 10))
+                        comp[comp_key]["safety_capped"] = True
+                break
+
+    # Recompute overall score after safety-based component adjustments
+    overall_10 = 0.0
+    for k in weights_norm:
+        comp_score = comp.get(k, {}).get("score_10")
+        if comp_score is None:
+            overall_10 += weights_norm.get(k, 0.0) * 10.0
+        else:
+            overall_10 += weights_norm.get(k, 0.0) * comp_score
+    overall_10 = float(round(overall_10, 3))
+    overall_100 = int(round(overall_10 * 10.0))
+
     breaches: List[Dict[str, Any]] = []
     def _add_breach(variable: str, value: Any, unit: Optional[str] = None, expected_min: Any = None, expected_max: Any = None, expected_pref_min: Any = None, expected_pref_max: Any = None, severity: str = "caution", reason: Optional[str] = None, advice: Optional[str] = None):
         item: Dict[str, Any] = {"variable": variable, "value": value, "severity": severity, "reason": reason or f"{variable}_breach", "category": "species"}

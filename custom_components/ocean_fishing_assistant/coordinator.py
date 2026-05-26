@@ -308,9 +308,14 @@ class OFACoordinator(DataUpdateCoordinator):
 
     def _run_formatter(self, raw, period_indices):
         """Run strict DataFormatter validation and scoring."""
+        # Merge user-configured wind direction preference into the species profile
+        # so the scoring engine uses it instead of only the species-level default.
+        profile = dict(self.species) if self.species else None
+        if profile is not None and hasattr(self, "_preferred_wind_directions") and self._preferred_wind_directions:
+            profile["preferred_wind_directions"] = self._preferred_wind_directions
         return self.formatter.validate(
             raw,
-            species_profile=self.species,
+            species_profile=profile,
             units=self.units,
             safety_limits=self.safety_limits,
             precomputed_period_indices=period_indices,
