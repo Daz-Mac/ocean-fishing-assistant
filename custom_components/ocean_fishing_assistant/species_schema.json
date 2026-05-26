@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ocean Fishing Assistant Species Profiles",
+  "type": "object",
+  "required": ["version", "species", "regions"],
+  "properties": {
+    "version": {"type": "string", "pattern": "^\\d+$"},
+    "general_profiles": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "required": ["id", "common_name"],
+          "properties": {
+            "id": {"type": "string"},
+            "common_name": {"type": "string"},
+            "emoji": {"type": "string"},
+            "regions": {"type": "array", "items": {"type": "string"}},
+            "preferred_months": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 12}},
+            "preferred_temp_c": {"type": "array", "minItems": 0, "maxItems": 2, "items": {"type": "number"}},
+            "preferred_wind_m_s": {"type": "array", "minItems": 0, "maxItems": 2, "items": {"type": "number"}},
+            "preferred_swell_period_s": {"type": "array", "minItems": 0, "maxItems": 2, "items": {"type": "number"}},
+            "max_wave_height_m": {"type": ["number", "array"]},
+            "preferred_tide_phase": {"type": "array", "items": {"type": "string", "enum": ["rising", "falling", "high", "low", "any", "none"]}},
+            "preferred_times": {"type": "array"},
+            "moon_preference": {"type": "array", "items": {"type": "string", "enum": ["full", "new", "first_quarter", "last_quarter"]}}
+          }
+        }
+      }
+    },
+    "regions": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "required": ["id", "name"],
+          "properties": {
+            "id": {"type": "string"},
+            "name": {"type": "string"}
+          }
+        }
+      }
+    },
+    "species": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "required": ["common_name", "scientific_name"],
+          "properties": {
+            "common_name": {"type": "string"},
+            "scientific_name": {"type": "string"},
+            "info": {"type": "string", "format": "uri"},
+            "emoji": {"type": "string"},
+            "regions": {"type": "array", "items": {"type": "string"}},
+            "preferred_months": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 12}},
+            "preferred_temp_c": {"type": "array", "minItems": 0, "maxItems": 2, "items": {"type": "number"}},
+            "preferred_wind_m_s": {"type": "array", "minItems": 0, "maxItems": 2, "items": {"type": "number"}},
+            "preferred_swell_period_s": {"type": "array", "minItems": 0, "maxItems": 2, "items": {"type": "number"}},
+            "max_wave_height_m": {"type": "number"},
+            "preferred_tide_phase": {"type": "array", "items": {"type": "string", "enum": ["rising", "falling", "high", "low", "any", "none"]}},
+            "preferred_times": {"type": "array"},
+            "moon_preference": {"type": "array", "items": {"type": "string", "enum": ["full", "new", "first_quarter", "last_quarter"]}}
+          }
+        }
+      }
+    }
+  }
+}
