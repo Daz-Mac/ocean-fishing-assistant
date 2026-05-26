@@ -51,14 +51,14 @@ async def async_setup_entry(hass, entry):
         try:
             card_path = os.path.join(os.path.dirname(__file__), "ocean-fishing-card.js")
             if os.path.exists(card_path):
-                # Register static path so HA serves the JS file
-                hass.http.register_static_path(
-                    "/ocean_fishing_card_card",
+                # Register static path (async in HA 2024.x+) so HA serves the JS file
+                await hass.http.register_static_path(
+                    "/ocean_fishing_card",
                     card_path,
                     cache_headers=False,
                 )
                 # Add to frontend resources automatically
-                await add_extra_js_url(hass, "/ocean_fishing_card_card/ocean-fishing-card.js")
+                await add_extra_js_url(hass, "/ocean_fishing_card")
                 domain_store["_card_registered"] = True
                 _LOGGER.debug("Registered Ocean Fishing card as frontend resource")
             else:
