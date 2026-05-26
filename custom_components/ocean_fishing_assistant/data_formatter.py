@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 from homeassistant.util import dt as dt_util
 
@@ -16,6 +16,125 @@ from . import ocean_scoring
 from .const import CONF_FACTOR_WEIGHTS
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _merge_breach_example(ex: Dict[str, Any], units_local: str) -> Dict[str, Any]:
+    u = ex.pop("unit", None)
+    v = ex.get("value")
+    if u is None or v is None:
+        return ex
+    if isinstance(v, str) and isinstance(u, str) and u in v:
+        ex["value"] = v
+        return ex
+    try:
+        num = float(v)
+    except Exception:
+        ex["value"] = f"{v} {u}"
+        return ex
+
+    if u == "m/s":
+        if units_local == "metric":
+            conv = unit_helpers.m_s_to_kmh(num)
+            label = "km/h"
+        elif units_local == "imperial":
+            conv = unit_helpers.m_s_to_mph(num)
+            label = "mph"
+        else:
+            conv = num
+            label = "m/s"
+        ex["value"] = f"{round(conv, 2)} {label}"
+        return ex
+
+    nd = 3
+    if isinstance(u, str) and ("hour" in u):
+        nd = 0
+    elif isinstance(u, str) and ("°C" in u or "hPa" in u):
+        nd = 1
+    ex["value"] = f"{round(num, nd)} {u}"
+    return ex
+
+
+def _build_period_summary(
+    hourly_like: List[Dict[str, Any]],
+    indices: List[int],
+    canonical: Dict[str, Any],
+    units: str,
+    max_breach_examples: int,
+) -> Dict[str, Any]:
+    """Build a period forecast summary from per-timestamp forecast entries.
+
+    Returns dict with score_10, score_100, components, profile_used, safety,
+    breaches, and tide_phase keys.
+    """
+    per_ts_entries = []
+    for idx in indices:
+        if idx < len(hourly_like):
+            fe = hourly_like[idx].get("_forecast_entry")
+            if fe:
+                per_ts_entries.append(fe)
+
+    score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
+    score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
+
+    components = None
+    if per_ts_entries:
+        keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
+        out_comp = {}
+        for k in keys:
+            vals = []
+            for e in per_ts_entries:
+                c = e.get("components") or {}
+                if k in c and c[k].get("score_10") is not None:
+                    vals.append(float(c[k]["score_10"]))
+            if vals:
+                avg = float(sum(vals) / len(vals))
+                out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
+        components = out_comp or None
+
+    profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
+
+    safety = {
+        "unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
+        "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
+        "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])}),
+    }
+
+    breach_counts: Dict[str, Dict[str, Any]] = {}
+    breach_examples: List[Dict[str, Any]] = []
+    for e in per_ts_entries:
+        for b in (e.get("breaches") or []):
+            var = b.get("variable")
+            if not var:
+                continue
+            entry_bc = breach_counts.setdefault(var, {"count": 0, "severity": "caution"})
+            entry_bc["count"] += 1
+            if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
+                entry_bc["severity"] = "unsafe"
+            if len(breach_examples) < max_breach_examples:
+                ex = dict(b)
+                ex["timestamp"] = e.get("timestamp")
+                ex = _merge_breach_example(ex, units)
+                breach_examples.append(ex)
+
+    breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
+
+    tide_phase = None
+    if isinstance(canonical.get("tide_phase"), (list, tuple)):
+        if indices and isinstance(indices[0], int):
+            first_idx = indices[0]
+            tp_arr = canonical.get("tide_phase")
+            if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
+                tide_phase = tp_arr[first_idx]
+
+    return {
+        "score_10": round(score_10, 3) if score_10 is not None else None,
+        "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
+        "components": components,
+        "profile_used": profile_used,
+        "safety": safety,
+        "tide_phase": tide_phase,
+        "breaches": breaches_summary,
+    }
 
 
 class DataFormatter:
@@ -231,41 +350,6 @@ class DataFormatter:
                 details = entry.get("forecast_raw") or {}
                 raise ValueError(f"Incomplete scoring at index={i} timestamp={ts}: missing required inputs or scoring failed; details={details}")
 
-        def _merge_breach_example(ex: Dict[str, Any], units_local: str) -> Dict[str, Any]:
-            u = ex.pop("unit", None)
-            v = ex.get("value")
-            if u is None or v is None:
-                return ex
-            if isinstance(v, str) and isinstance(u, str) and u in v:
-                ex["value"] = v
-                return ex
-            try:
-                num = float(v)
-            except Exception:
-                ex["value"] = f"{v} {u}"
-                return ex
-
-            if u == "m/s":
-                if units_local == "metric":
-                    conv = unit_helpers.m_s_to_kmh(num)
-                    label = "km/h"
-                elif units_local == "imperial":
-                    conv = unit_helpers.m_s_to_mph(num)
-                    label = "mph"
-                else:
-                    conv = num
-                    label = "m/s"
-                ex["value"] = f"{round(conv, 2)} {label}"
-                return ex
-
-            nd = 3
-            if isinstance(u, str) and ("hour" in u):
-                nd = 0
-            elif isinstance(u, str) and ("°C" in u or "hPa" in u):
-                nd = 1
-            ex["value"] = f"{round(num, nd)} {u}"
-            return ex
-
         hourly_like: List[Dict[str, Any]] = []
         for i, ts in enumerate(timestamps):
             row: Dict[str, Any] = {"time": ts}
@@ -279,169 +363,19 @@ class DataFormatter:
             hourly_like.append(row)
 
         period_forecasts: Dict[str, Dict[str, Any]] = {}
-        if precomputed_period_indices is not None:
-            for date_key in sorted(precomputed_period_indices.keys())[:7]:
-                pmap = precomputed_period_indices.get(date_key) or {}
-                period_forecasts[date_key] = {}
-                for pname, pdata in pmap.items():
-                    indices = pdata.get("indices") or []
-                    per_ts_entries = []
-                    for idx in indices:
-                        if idx < len(hourly_like):
-                            fe = hourly_like[idx].get("_forecast_entry")
-                            if fe:
-                                per_ts_entries.append(fe)
-                    score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
-                    score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
-                    components = None
-                    if per_ts_entries:
-                        keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
-                        out_comp = {}
-                        for k in keys:
-                            vals = []
-                            for e in per_ts_entries:
-                                c = e.get("components") or {}
-                                if k in c and c[k].get("score_10") is not None:
-                                    vals.append(float(c[k]["score_10"]))
-                            if vals:
-                                avg = float(sum(vals) / len(vals))
-                                out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
-                        components = out_comp or None
-                    profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
-                    safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
-                              "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
-                              "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
+        if precomputed_period_indices is None:
+            raise ValueError("precomputed_period_indices is required (strict)")
 
-                    breach_counts: Dict[str, Dict[str, Any]] = {}
-                    breach_examples: List[Dict[str, Any]] = []
-                    for e in per_ts_entries:
-                        for b in (e.get("breaches") or []):
-                            var = b.get("variable")
-                            if not var:
-                                continue
-                            entry_bc = breach_counts.setdefault(var, {"count": 0, "severity": "caution"})
-                            entry_bc["count"] += 1
-                            if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
-                                entry_bc["severity"] = "unsafe"
-                            if len(breach_examples) < max_breach_examples:
-                                ex = dict(b)
-                                ex["timestamp"] = e.get("timestamp")
-                                ex = _merge_breach_example(ex, units)
-                                breach_examples.append(ex)
-
-                    breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
-
-                    # determine tide_phase for the period using canonical top-level tide_phase array (first index representative)
-                    tide_phase = None
-                    if isinstance(canonical.get("tide_phase"), (list, tuple)):
-                        if indices and isinstance(indices[0], int):
-                            first_idx = indices[0]
-                            tp_arr = canonical.get("tide_phase")
-                            if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
-                                tide_phase = tp_arr[first_idx]
-
-                    summary = {
-                        "score_10": round(score_10, 3) if score_10 is not None else None,
-                        "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
-                        "components": components,
-                        "profile_used": profile_used,
-                        "safety": safety,
-                        "tide_phase": tide_phase,
-                        "start": pdata.get("start"),
-                        "end": pdata.get("end"),
-                        "indices": list(indices),
-                        "breaches": breaches_summary,
-                    }
-                    period_forecasts[date_key][pname] = summary
-        else:
-            default_periods = [
-                {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
-                {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
-                {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
-                {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
-            ]
-
-            period_agg = self._aggregate_hourly_into_periods(hourly_like, days=7, aggregation_periods=default_periods, full_payload=raw_payload, units=units)
-
-            for date_key, pmap in period_agg.items():
-                period_forecasts[date_key] = {}
-                for pname, pdata in pmap.items():
-                    indices = pdata.get("indices") or []
-                    per_ts_entries = []
-                    for idx in indices:
-                        if idx < len(hourly_like):
-                            fe = hourly_like[idx].get("_forecast_entry")
-                            if fe:
-                                per_ts_entries.append(fe)
-                    score_vals = [float(e.get("score_10")) for e in per_ts_entries if e.get("score_10") is not None]
-                    score_10 = float(sum(score_vals) / len(score_vals)) if score_vals else None
-                    components = None
-                    if per_ts_entries:
-                        keys = set().union(*(e.get("components", {}).keys() if e.get("components") else [] for e in per_ts_entries))
-                        out_comp = {}
-                        for k in keys:
-                            vals = []
-                            for e in per_ts_entries:
-                                c = e.get("components") or {}
-                                if k in c and c[k].get("score_10") is not None:
-                                    vals.append(float(c[k]["score_10"]))
-                            if vals:
-                                avg = float(sum(vals) / len(vals))
-                                out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
-                        components = out_comp or None
-                    profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
-                    safety = {"unsafe": any((e.get("safety") or {}).get("unsafe") for e in per_ts_entries),
-                              "caution": any((e.get("safety") or {}).get("caution") for e in per_ts_entries),
-                              "reasons": sorted({r for e in per_ts_entries for r in (e.get("safety") or {}).get("reasons", [])})}
-
-                    breach_counts: Dict[str, Dict[str, Any]] = {}
-                    breach_examples: List[Dict[str, Any]] = []
-                    for e in per_ts_entries:
-                        for b in (e.get("breaches") or []):
-                            var = b.get("variable")
-                            if not var:
-                                continue
-                            entry_bc = breach_counts.setdefault(var, {"count": 0, "severity": "caution"})
-                            entry_bc["count"] += 1
-                            if entry_bc["severity"] != "unsafe" and b.get("severity") == "unsafe":
-                                entry_bc["severity"] = "unsafe"
-                            if len(breach_examples) < max_breach_examples:
-                                ex = dict(b)
-                                ex["timestamp"] = e.get("timestamp")
-                                ex = _merge_breach_example(ex, units)
-                                breach_examples.append(ex)
-
-                    breaches_summary = {"by_variable": breach_counts, "examples": breach_examples} if breach_counts else {}
-
-                    # determine tide_phase for the period using canonical top-level tide_phase array (first index representative)
-                    tide_phase = None
-                    if isinstance(canonical.get("tide_phase"), (list, tuple)):
-                        if indices and isinstance(indices[0], int):
-                            first_idx = indices[0]
-                            tp_arr = canonical.get("tide_phase")
-                            if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
-                                tide_phase = tp_arr[first_idx]
-
-                    summary = dict(pdata)
-                    summary.update({
-                        "score_10": round(score_10, 3) if score_10 is not None else None,
-                        "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
-                        "components": components,
-                        "profile_used": profile_used,
-                        "safety": safety,
-                        "tide_phase": tide_phase,
-                        "breaches": breaches_summary,
-                    })
-                    period_forecasts[date_key][pname] = summary
-
-        # enforce breach examples limit per expose_raw setting (post-process safety)
-        for date_key, pmap in period_forecasts.items():
+        for date_key in sorted(precomputed_period_indices.keys())[:7]:
+            pmap = precomputed_period_indices.get(date_key) or {}
+            period_forecasts[date_key] = {}
             for pname, pdata in pmap.items():
-                breaches = pdata.get("breaches") or {}
-                ex = breaches.get("examples") if isinstance(breaches, dict) else None
-                if ex and isinstance(ex, list):
-                    breaches["examples"] = ex[:max_breach_examples]
-                    pdata["breaches"] = breaches
+                indices = pdata.get("indices") or []
+                summary = _build_period_summary(hourly_like, indices, canonical, units, max_breach_examples)
+                summary["start"] = pdata.get("start")
+                summary["end"] = pdata.get("end")
+                summary["indices"] = list(indices)
+                period_forecasts[date_key][pname] = summary
 
         final_out = {
             "timestamps": timestamps,
@@ -451,125 +385,6 @@ class DataFormatter:
             "period_forecasts": period_forecasts,
         }
         return final_out
-
-    def _aggregate_hourly_into_periods(self, hourly_list: List[Dict[str, Any]], days: int, aggregation_periods: Optional[Sequence[Dict[str, Any]]], full_payload: Optional[Dict[str, Any]] = None, units: str = "metric") -> Dict[str, Dict[str, Any]]:
-        if not aggregation_periods:
-            aggregation_periods = [
-                {"name": "period_00_06", "start_hour": 0, "end_hour": 6},
-                {"name": "period_06_12", "start_hour": 6, "end_hour": 12},
-                {"name": "period_12_18", "start_hour": 12, "end_hour": 18},
-                {"name": "period_18_24", "start_hour": 18, "end_hour": 24},
-            ]
-
-        per_date_periods: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
-        for idx, entry in enumerate(hourly_list):
-            if not isinstance(entry, dict):
-                continue
-            t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
-            if t_raw is None:
-                continue
-            t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-            if t is None:
-                tnum = float(t_raw)
-                if tnum > 1e12:
-                    tnum = tnum / 1000.0
-                t = datetime.fromtimestamp(tnum, tz=timezone.utc)
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=timezone.utc)
-            date_key = t.date().isoformat()
-            hour = t.hour
-
-            for p in aggregation_periods:
-                start = int(p["start_hour"])
-                end = int(p["end_hour"])
-                if start <= hour < end:
-                    pname = p["name"]
-                    per_date_periods.setdefault(date_key, {}).setdefault(pname, {
-                        "temperature_sum": 0.0,
-                        "wind_speed_sum": 0.0,
-                        "pressure_sum": 0.0,
-                        "cloud_sum": 0,
-                        "precip_max": 0,
-                        "gust_max": None,
-                        "count": 0,
-                        "indices": [],
-                    })
-                    agg = per_date_periods[date_key][pname]
-
-                    temp = float(entry.get("temperature_c")) if entry.get("temperature_c") is not None else None
-                    wind_m_s = float(entry.get("wind_m_s")) if entry.get("wind_m_s") is not None else None
-                    gust_m_s = float(entry.get("wind_max_m_s")) if entry.get("wind_max_m_s") is not None else None
-                    cloud = int(entry.get("cloud_cover")) if entry.get("cloud_cover") is not None else None
-                    pop = int(entry.get("precipitation_probability")) if entry.get("precipitation_probability") is not None else None
-                    pressure = float(entry.get("pressure_hpa")) if entry.get("pressure_hpa") is not None else None
-
-                    if temp is not None:
-                        agg["temperature_sum"] += temp
-                    if wind_m_s is not None:
-                        agg["wind_speed_sum"] += wind_m_s
-                    if pressure is not None:
-                        agg["pressure_sum"] += pressure
-                    if cloud is not None:
-                        agg["cloud_sum"] += cloud
-                    if pop is not None:
-                        agg["precip_max"] = max(agg["precip_max"], pop)
-                    if gust_m_s is not None:
-                        if agg["gust_max"] is None:
-                            agg["gust_max"] = gust_m_s
-                        else:
-                            agg["gust_max"] = max(agg["gust_max"], gust_m_s)
-                    agg["count"] += 1
-                    agg["indices"].append(idx)
-                    break
-
-        final: Dict[str, Dict[str, Any]] = {}
-
-        out_wind_unit = "km/h" if units == "metric" else "mph" if units == "imperial" else units
-
-        for date_key in sorted(per_date_periods.keys())[:days]:
-            final[date_key] = {}
-            for pname, agg in per_date_periods[date_key].items():
-                cnt = agg.get("count", 0) or 0
-                if cnt == 0:
-                    continue
-
-                mean_temp = float(agg["temperature_sum"]) / cnt if agg.get("temperature_sum") is not None else None
-                mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt if agg.get("wind_speed_sum") is not None else None
-                gust_m_s = float(agg["gust_max"]) if agg.get("gust_max") is not None else None
-                pressure = float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None
-                cloud = int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None
-                precip = int(round(float(agg["precip_max"]))) if agg.get("precip_max") is not None else None
-
-                wind_out = None
-                gust_out = None
-                if mean_wind_m_s is not None:
-                    if out_wind_unit in ("km/h", "kph", "kmh"):
-                        wind_out = unit_helpers.m_s_to_kmh(mean_wind_m_s)
-                    elif out_wind_unit in ("mph",):
-                        wind_out = unit_helpers.m_s_to_mph(mean_wind_m_s)
-                    else:
-                        wind_out = mean_wind_m_s
-                if gust_m_s is not None:
-                    if out_wind_unit in ("km/h", "kph", "kmh"):
-                        gust_out = unit_helpers.m_s_to_kmh(gust_m_s)
-                    elif out_wind_unit in ("mph",):
-                        gust_out = unit_helpers.m_s_to_mph(gust_m_s)
-                    else:
-                        gust_out = gust_m_s
-
-                final[date_key][pname] = {
-                    "temperature": mean_temp,
-                    "wind_speed": wind_out,
-                    "wind_gust": gust_out,
-                    "wind_unit": out_wind_unit,
-                    "cloud_cover": cloud,
-                    "precipitation_probability": precip,
-                    "pressure": pressure,
-                    "indices": list(agg.get("indices", [])),
-                }
-
-        return final
 
     def _convert_wind_array_value(self, v: Any, unit_hint: str) -> float:
         if v is None:

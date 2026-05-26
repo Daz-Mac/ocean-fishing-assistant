@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from . import unit_helpers
 from .moon_utils import coerce_phase, matches_moon_preference
+from .safety import SafetyValidator
 
 # Default global factor weights (used when no per-entry weights supplied)
 FACTOR_WEIGHTS = {
@@ -746,89 +747,16 @@ def compute_score(
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
-    safety = {"unsafe": False, "caution": False, "reasons": []}
-    if safety_limits:
-        max_wind = _to_float_safe(safety_limits.get("max_wind_m_s"))
-        if max_wind is not None and wind is not None:
-            if wind > max_wind:
-                safety["unsafe"] = True
-                try:
-                    if units == "metric":
-                        thr_val = round(unit_helpers.m_s_to_kmh(max_wind), 1)
-                        thr_unit = "km/h"
-                    elif units == "imperial":
-                        thr_val = round(unit_helpers.m_s_to_mph(max_wind), 1)
-                        thr_unit = "mph"
-                    else:
-                        thr_val = round(max_wind, 2)
-                        thr_unit = "m/s"
-                    safety["reasons"].append(f"wind>{thr_val} {thr_unit}")
-                except Exception:
-                    safety["reasons"].append(f"wind>{max_wind}")
-            elif wind > (0.9 * max_wind):
-                safety["caution"] = True
-                safety["reasons"].append("wind_near_limit")
+    gust = _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None
+    vis = _get_at("visibility_km", use_index) if "visibility_km" in data else None
+    precip = _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None
 
-        max_wave = _to_float_safe(safety_limits.get("max_wave_height_m"))
-        if max_wave is not None and wave is not None:
-            if wave > max_wave:
-                safety["unsafe"] = True
-                safety["reasons"].append(f"wave>{max_wave}")
-            elif wave > (0.9 * max_wave):
-                safety["caution"] = True
-                safety["reasons"].append("wave_near_limit")
-
-        max_gust = _to_float_safe(safety_limits.get("max_gust_m_s"))
-        gust = _get_at("wind_max_m_s", use_index) if "wind_max_m_s" in data else None
-        if max_gust is not None and gust is not None:
-            if gust > max_gust:
-                safety["unsafe"] = True
-                try:
-                    if units == "metric":
-                        thr_val = round(unit_helpers.m_s_to_kmh(max_gust), 1)
-                        thr_unit = "km/h"
-                    elif units == "imperial":
-                        thr_val = round(unit_helpers.m_s_to_mph(max_gust), 1)
-                        thr_unit = "mph"
-                    else:
-                        thr_val = round(max_gust, 2)
-                        thr_unit = "m/s"
-                    safety["reasons"].append(f"gust>{thr_val} {thr_unit}")
-                except Exception:
-                    safety["reasons"].append(f"gust>{max_gust}")
-            elif gust > (0.9 * max_gust):
-                safety["caution"] = True
-                safety["reasons"].append("gust_near_limit")
-
-        min_vis = _to_float_safe(safety_limits.get("min_visibility_km"))
-        vis = _get_at("visibility_km", use_index) if "visibility_km" in data else None
-        if min_vis is not None and vis is not None:
-            if vis < min_vis:
-                safety["unsafe"] = True
-                safety["reasons"].append(f"vis<{min_vis}")
-            elif vis < (1.1 * min_vis):
-                safety["caution"] = True
-                safety["reasons"].append("vis_near_limit")
-
-        min_swell = _to_float_safe(safety_limits.get("min_swell_period_s"))
-        swell = swell_period
-        if min_swell is not None and swell is not None:
-            if swell < min_swell:
-                safety["unsafe"] = True
-                safety["reasons"].append(f"swell<{min_swell}")
-            elif swell < (1.1 * min_swell):
-                safety["caution"] = True
-                safety["reasons"].append("swell_near_limit")
-
-        max_precip = _to_float_safe(safety_limits.get("max_precip_chance_pct"))
-        precip = _get_at("precipitation_probability", use_index) if "precipitation_probability" in data else None
-        if max_precip is not None and precip is not None:
-            if precip > max_precip:
-                safety["unsafe"] = True
-                safety["reasons"].append(f"precip>{max_precip}")
-            elif precip > (0.9 * max_precip):
-                safety["caution"] = True
-                safety["reasons"].append("precip_near_limit")
+    validator = SafetyValidator(safety_limits)
+    safety = validator.check(
+        wind=wind, wave=wave, gust=gust,
+        visibility=vis, swell_period=swell_period,
+        precipitation=precip,
+    )
 
     reason_codes = safety.get("reasons", []) or []
     safety["reason_strings"] = [_format_safety_reason(rc, safety_limits, units) for rc in reason_codes]

@@ -196,149 +196,122 @@ class OFACoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch weather, attach mandatory marine and tide data, run formatter. All errors propagate."""
         async with async_timeout.timeout(60):
-            cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
-            # Use an explicit 'days' variable — ensures cache key matches fetch parameters.
-            days = 5
-            # Use centralized rounding helper so coordinate rounding precision is consistent across modules
-            lat_r, lon_r = unit_helpers.round_coords(self.lat, self.lon)
-            cache_key = (lat_r, lon_r, "hourly", int(days))
-            cached = cache_dict.get(cache_key)
-            raw = None
-            if cached and (time.time() - float(cached.get("fetched_at", 0))) < self._fetch_cache_ttl:
-                raw = cached.get("data")
-            else:
-                # fetch raw Open-Meteo payload strictly (may raise)
-                raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=days)
-                cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
-
-            # Fetch marine variables (STRICT: marine is required for ocean assistant)
-            if not hasattr(self.fetcher, "fetch_marine_direct"):
-                raise RuntimeError("Fetcher does not implement fetch_marine_direct (marine required)")
-
-            marine = await self.fetcher.fetch_marine_direct(days=days)  # will raise on failure
-            if not isinstance(marine, dict) or "hourly" not in marine or not isinstance(marine["hourly"], dict):
-                raise RuntimeError("Marine payload invalid (strict)")
-
-            # Only attach marine arrays that align exactly with raw['hourly']['time']
-            if not isinstance(raw, dict) or "hourly" not in raw or not isinstance(raw["hourly"], dict):
-                raise RuntimeError("Raw forecast payload missing required 'hourly' arrays (strict)")
-            ref_time = raw["hourly"]["time"]
-            if not isinstance(ref_time, (list, tuple)):
-                raise ValueError("Raw hourly 'time' is not a list (strict)")
-            ref_len = len(ref_time)
-            for k, arr in marine["hourly"].items():
-                if k == "time":
-                    continue
-                if not isinstance(arr, (list, tuple)):
-                    raise ValueError(f"Marine hourly key '{k}' is not an array (strict)")
-                if len(arr) != ref_len:
-                    raise ValueError(f"Marine hourly array '{k}' length {len(arr)} does not match forecast time length {ref_len} (strict)")
-                raw["hourly"][k] = list(arr)
-
-            # Attach tide strictly (tide proxy must return dict with arrays aligned to timestamps)
-            timestamps = raw["hourly"]["time"]
-            # pass location_tz into tide proxy calls
-            if not self.location_tz:
-                raise RuntimeError("Coordinator missing resolved location_tz (strict) - ensure async_init/resolve_location_tz was called during setup")
-            tide = await self._tide_proxy.get_tide_for_timestamps(timestamps, location_tz=self.location_tz)
-
-            # --- Normalization for strict canonical shape ---
-            nh = tide.get("next_high")
-            nl = tide.get("next_low")
-
-            def _normalize_entry(entry):
-                # If already dict, strip any height keys and pass through
-                if isinstance(entry, dict):
-                    entry_copy = dict(entry)
-                    # Remove any height keys if present (tide heights intentionally removed)
-                    entry_copy.pop("height_m", None)
-                    entry_copy.pop("height", None)
-                    entry_copy.pop("height_meters", None)
-                    return entry_copy
-                # If a simple timestamp string, convert -> strict dict with only timestamp
-                if isinstance(entry, str):
-                    return {"timestamp": entry}
-                # Allow explicit None
-                if entry is None:
-                    return None
-                # Unexpected types are strict errors
-                raise ValueError(f"Unexpected tide 'next_high'/'next_low' entry type: {type(entry)} (strict)")
-
-            nh_obj = _normalize_entry(nh)
-            nl_obj = _normalize_entry(nl)
-
-            # Overwrite canonical keys with normalized objects (may be None)
-            tide["next_high"] = nh_obj
-            tide["next_low"] = nl_obj
-
-            # Trust TideProxy: it is responsible for producing normalized moon_phase arrays and ensuring
-            # all tide arrays are aligned to the provided timestamps. Attach the tide dict as-is and allow
-            # any upstream exceptions to propagate (fail-fast).
-            raw["tide"] = tide
-
-            # Precompute period indices using TideProxy + Skyfield (strict)
-            # Use dawn/dusk window ±1 hour by default for dawn_dusk mode.
-            _LOGGER.debug(
-                "compute_period_indices_for_timestamps called: mode=%s sample_count=%d sample_first=%s sample_last=%s location_tz=%s",
-                self.time_periods_mode,
-                len(timestamps) if timestamps is not None else 0,
-                timestamps[0] if timestamps else None,
-                timestamps[-1] if timestamps else None,
-                self.location_tz,
-            )
-
-            try:
-                period_indices = await self._tide_proxy.compute_period_indices_for_timestamps(
-                    timestamps,
-                    mode=self.time_periods_mode,
-                    dawn_window_hours=1.0,
-                    location_tz=self.location_tz,
-                )
-            except Exception:
-                _LOGGER.exception("Failed to compute time-period indices from Skyfield (strict)")
-                # propagate strict failure
-                raise
-
-            # Attach current snapshot (strict)
-            if not hasattr(self.fetcher, "get_weather_data"):
-                raise RuntimeError("Fetcher does not implement get_weather_data (strict)")
-            try:
-                current = await self.fetcher.get_weather_data()  # will raise on failure
-            except Exception as exc:
-                # Log with context for easier debugging, then re-raise as a strict error.
-                _LOGGER.exception(
-                    "Failed to construct current snapshot from Open-Meteo hourly data for %s,%s: %s",
-                    self.lat,
-                    self.lon,
-                    exc,
-                )
-                raise RuntimeError("Failed to construct current weather snapshot from hourly arrays (strict)") from exc
-
-            # STRICT sanity check: ensure current contains required keys (all required under strict policy)
-            required_current = ["temperature", "wind_speed", "wind_gust", "cloud_cover", "precipitation_probability", "pressure", "wind_unit"]
-            missing_current = [k for k in required_current if not (isinstance(current, dict) and current.get(k) is not None)]
-            if missing_current:
-                _LOGGER.error(
-                    "Constructed current snapshot missing required fields for %s,%s: missing=%s current=%s",
-                    self.lat,
-                    self.lon,
-                    missing_current,
-                    current,
-                )
-                raise RuntimeError(f"Constructed current snapshot missing required fields (strict): {missing_current}")
-
-            raw["current"] = current
-
-            # Insert location_tz into raw so DataFormatter/canonical get access to it
+            raw = await self._fetch_weather()
+            await self._merge_marine(raw)
+            timestamps = await self._fetch_tide(raw)
+            period_indices = await self._compute_periods(timestamps)
+            await self._fetch_current(raw)
             raw["location_tz"] = self.location_tz
+            return self._run_formatter(raw, period_indices)
 
-            # Run strict formatter (errors propagate). Pass precomputed period indices so DataFormatter uses them.
-            data = self.formatter.validate(
-                raw,
-                species_profile=self.species,
-                units=self.units,
-                safety_limits=self.safety_limits,
-                precomputed_period_indices=period_indices,
+    async def _fetch_weather(self):
+        """Fetch Open-Meteo forecast with shared cache."""
+        cache_dict = self.hass.data.setdefault(DOMAIN, {}).setdefault("fetch_cache", {})
+        days = 5
+        lat_r, lon_r = unit_helpers.round_coords(self.lat, self.lon)
+        cache_key = (lat_r, lon_r, "hourly", int(days))
+        cached = cache_dict.get(cache_key)
+        if cached and (time.time() - float(cached.get("fetched_at", 0))) < self._fetch_cache_ttl:
+            return cached.get("data")
+        raw = await self.fetcher.fetch(self.lat, self.lon, mode="hourly", days=days)
+        cache_dict[cache_key] = {"fetched_at": time.time(), "data": raw}
+        return raw
+
+    async def _merge_marine(self, raw):
+        """Fetch marine data from Open-Meteo Marine and merge into raw payload."""
+        if not hasattr(self.fetcher, "fetch_marine_direct"):
+            raise RuntimeError("Fetcher does not implement fetch_marine_direct (marine required)")
+        if not isinstance(raw, dict) or "hourly" not in raw or not isinstance(raw["hourly"], dict):
+            raise RuntimeError("Raw forecast payload missing required 'hourly' arrays (strict)")
+
+        days = 5
+        marine = await self.fetcher.fetch_marine_direct(days=days)
+        if not isinstance(marine, dict) or "hourly" not in marine or not isinstance(marine["hourly"], dict):
+            raise RuntimeError("Marine payload invalid (strict)")
+
+        ref_time = raw["hourly"]["time"]
+        if not isinstance(ref_time, (list, tuple)):
+            raise ValueError("Raw hourly 'time' is not a list (strict)")
+        ref_len = len(ref_time)
+        for k, arr in marine["hourly"].items():
+            if k == "time":
+                continue
+            if not isinstance(arr, (list, tuple)):
+                raise ValueError(f"Marine hourly key '{k}' is not an array (strict)")
+            if len(arr) != ref_len:
+                raise ValueError(f"Marine hourly array '{k}' length {len(arr)} does not match forecast time length {ref_len} (strict)")
+            raw["hourly"][k] = list(arr)
+
+    async def _fetch_tide(self, raw):
+        """Fetch tide data via TideProxy and normalize next_high/next_low entries."""
+        timestamps = raw["hourly"]["time"]
+        if not self.location_tz:
+            raise RuntimeError("Coordinator missing resolved location_tz (strict)")
+        tide = await self._tide_proxy.get_tide_for_timestamps(timestamps, location_tz=self.location_tz)
+
+        def _normalize_entry(entry):
+            if isinstance(entry, dict):
+                entry_copy = dict(entry)
+                entry_copy.pop("height_m", None)
+                entry_copy.pop("height", None)
+                entry_copy.pop("height_meters", None)
+                return entry_copy
+            if isinstance(entry, str):
+                return {"timestamp": entry}
+            if entry is None:
+                return None
+            raise ValueError(f"Unexpected tide entry type: {type(entry)} (strict)")
+
+        tide["next_high"] = _normalize_entry(tide.get("next_high"))
+        tide["next_low"] = _normalize_entry(tide.get("next_low"))
+        raw["tide"] = tide
+        return timestamps
+
+    async def _compute_periods(self, timestamps):
+        """Compute dawn/dusk or 4-period day indices via TideProxy and Skyfield."""
+        _LOGGER.debug(
+            "compute_period_indices: mode=%s count=%d first=%s last=%s tz=%s",
+            self.time_periods_mode,
+            len(timestamps) if timestamps is not None else 0,
+            timestamps[0] if timestamps else None,
+            timestamps[-1] if timestamps else None,
+            self.location_tz,
+        )
+        try:
+            return await self._tide_proxy.compute_period_indices_for_timestamps(
+                timestamps,
+                mode=self.time_periods_mode,
+                dawn_window_hours=1.0,
+                location_tz=self.location_tz,
             )
+        except Exception:
+            _LOGGER.exception("Failed to compute time-period indices from Skyfield (strict)")
+            raise
 
-            return data
+    async def _fetch_current(self, raw):
+        """Construct and validate the current-conditions snapshot."""
+        if not hasattr(self.fetcher, "get_weather_data"):
+            raise RuntimeError("Fetcher does not implement get_weather_data (strict)")
+        try:
+            current = await self.fetcher.get_weather_data()
+        except Exception as exc:
+            _LOGGER.exception("Failed to construct current snapshot for %s,%s: %s", self.lat, self.lon, exc)
+            raise RuntimeError("Failed to construct current weather snapshot from hourly arrays (strict)") from exc
+
+        required_current = ["temperature", "wind_speed", "wind_gust", "cloud_cover", "precipitation_probability", "pressure", "wind_unit"]
+        missing_current = [k for k in required_current if not (isinstance(current, dict) and current.get(k) is not None)]
+        if missing_current:
+            _LOGGER.error("Current snapshot missing required fields for %s,%s: missing=%s", self.lat, self.lon, missing_current)
+            raise RuntimeError(f"Current snapshot missing required fields (strict): {missing_current}")
+
+        raw["current"] = current
+
+    def _run_formatter(self, raw, period_indices):
+        """Run strict DataFormatter validation and scoring."""
+        return self.formatter.validate(
+            raw,
+            species_profile=self.species,
+            units=self.units,
+            safety_limits=self.safety_limits,
+            precomputed_period_indices=period_indices,
+        )
