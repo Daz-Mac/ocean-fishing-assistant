@@ -5,10 +5,12 @@ This implementation expects required values (including `units` and
 `safety_limits`) to be present in the created config entry `data`.
 If they are missing or invalid, setup fails loudly (ValueError / return False).
 """
+import os
 import logging
 
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.helpers import aiohttp_client
+from homeassistant.components.frontend import add_extra_js_url
 
 from .const import (
     DOMAIN,
@@ -43,6 +45,26 @@ async def async_setup_entry(hass, entry):
 
     # Ensure the base domain dict exists
     domain_store = hass.data.setdefault(DOMAIN, {})
+
+    # Register the Lovelace card as a frontend resource (one-time)
+    if not domain_store.get("_card_registered"):
+        try:
+            card_path = os.path.join(os.path.dirname(__file__), "ocean-fishing-card.js")
+            if os.path.exists(card_path):
+                # Register static path so HA serves the JS file
+                hass.http.register_static_path(
+                    "/ocean_fishing_card_card",
+                    card_path,
+                    cache_headers=False,
+                )
+                # Add to frontend resources automatically
+                await add_extra_js_url(hass, "/ocean_fishing_card_card/ocean-fishing-card.js")
+                domain_store["_card_registered"] = True
+                _LOGGER.debug("Registered Ocean Fishing card as frontend resource")
+            else:
+                _LOGGER.warning("ocean-fishing-card.js not found at %s", card_path)
+        except Exception as exc:
+            _LOGGER.warning("Failed to register frontend card resource: %s", exc)
 
     # Initialize cache persistence (idempotent — only loads from Store on first call).
     await cache_persistence.async_load_and_setup_persistence(hass, domain_store)
