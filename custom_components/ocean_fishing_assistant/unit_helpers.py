@@ -59,22 +59,6 @@ def miles_to_km(v: Any) -> Optional[float]:
     return f * 1.609344
 
 
-def f_to_c(v: Any) -> Optional[float]:
-    """Convert Fahrenheit to Celsius."""
-    f = _to_float(v)
-    if f is None:
-        return None
-    return (f - 32.0) * (5.0 / 9.0)
-
-
-def inhg_to_hpa(v: Any) -> Optional[float]:
-    """Convert inches of mercury to hectopascals (hPa)."""
-    f = _to_float(v)
-    if f is None:
-        return None
-    return f * 33.8638866667
-
-
 # ---- Display helpers (canonical -> display) ----
 
 def m_s_to_kmh(v: Any) -> Optional[float]:

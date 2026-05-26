@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
@@ -129,8 +129,25 @@ class WeatherFetcher:
         if mode != "hourly":
             raise ValueError(f"Unsupported fetch mode '{mode}' (strict)")
 
-        # Return the raw Open-Meteo payload (coordinator expects 'hourly' arrays)
-        return await self.fetch_open_meteo_forecast_direct(days)
+        # Fetch raw Open-Meteo forecast (coordinator expects 'hourly' arrays)
+        session: aiohttp.ClientSession = async_get_clientsession(self.hass)
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "timezone": "UTC",
+            "hourly": OM_PARAMS_HOURLY,
+            "forecast_days": int(days) + 1,
+        }
+        try:
+            async with session.get(OM_BASE, params=params, timeout=60) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("Open-Meteo returned unexpected payload shape (strict)")
+            return data
+        except Exception as exc:
+            _LOGGER.exception("Open-Meteo fetch failed for %s,%s", latitude, longitude)
+            raise RuntimeError("Open-Meteo fetch failed") from exc
 
     # -----------------------
     # Unit helpers
@@ -420,81 +437,6 @@ class WeatherFetcher:
         return out
 
     # -----------------------
-    # Forecast fetch (strict)
-    # -----------------------
-    async def get_forecast(self, days: int = 7, aggregation_periods: Optional[Sequence[Dict[str, int]]] = None) -> Dict[str, Dict[str, Any]]:
-        """
-        Strict forecast retrieval. Raises on failure to fetch or invalid payload shape.
-
-        If aggregation_periods is provided, this fetcher does not implement complex period aggregation
-        itself (coordinator/formatter handles periods) — raise if requested.
-        """
-        now = dt_util.now()
-        forecast_cache_key = f"{self._cache_key}_forecast_{days}_{str(aggregation_periods)}"
-        cache_entry = self.hass.data.setdefault("ocean_fishing_assistant_fetch_cache", {}).get(forecast_cache_key)
-        if cache_entry:
-            cached_time = cache_entry.get("time")
-            if isinstance(cached_time, datetime) and (now - cached_time) < self._cache_duration:
-                _LOGGER.debug("Using cached forecast for %s", forecast_cache_key)
-                return cache_entry["data"]
-
-        if aggregation_periods:
-            # We choose not to implement the aggregator here; the DataFormatter._aggregate_hourly_into_periods is used.
-            raise NotImplementedError("Aggregation periods requested at fetch time are not supported by WeatherFetcher (strict)")
-
-        payload = await self.fetch_open_meteo_forecast_direct(days)
-        if not isinstance(payload, dict):
-            raise RuntimeError("Open-Meteo forecast fetch returned non-dict payload (strict)")
-
-        # Default: require hourly arrays present and produce daily summaries strictly
-        if "hourly" in payload and isinstance(payload["hourly"], dict):
-            hourly = payload["hourly"]
-            times = hourly.get("time") or []
-            if not times:
-                raise RuntimeError("'hourly.time' missing or empty in forecast payload (strict)")
-            items: List[Dict[str, Any]] = []
-            for idx, t in enumerate(times):
-                row = {"time": t}
-                for k, arr in hourly.items():
-                    if k == "time":
-                        continue
-                    if isinstance(arr, list) and idx < len(arr):
-                        row[k] = arr[idx]
-                    else:
-                        row[k] = None
-                items.append(row)
-            normalized = self._normalize_hourly_list_to_daily(items, days)
-        else:
-            raise RuntimeError("Forecast payload missing required 'hourly' arrays (strict)")
-
-        if not normalized:
-            raise RuntimeError("Open-Meteo forecast normalization produced no output (strict)")
-
-        self.hass.data.setdefault("ocean_fishing_assistant_fetch_cache", {})[forecast_cache_key] = {"data": normalized, "time": now}
-        return normalized
-
-    async def fetch_open_meteo_forecast_direct(self, days: int) -> Dict[str, Any]:
-        """Call OM_BASE for forecast; raise on HTTP/network errors."""
-        session: aiohttp.ClientSession = async_get_clientsession(self.hass)
-        params = {
-            "latitude": self.latitude,
-            "longitude": self.longitude,
-            "timezone": "UTC",
-            "hourly": OM_PARAMS_HOURLY,
-            "forecast_days": int(days) + 1,
-        }
-        try:
-            async with session.get(OM_BASE, params=params, timeout=60) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-            if not isinstance(data, dict):
-                raise RuntimeError("Open-Meteo returned unexpected forecast payload shape (strict)")
-            return data
-        except Exception as exc:
-            _LOGGER.exception("Open-Meteo forecast REST fetch failed for %s,%s", self.latitude, self.longitude)
-            raise RuntimeError("Open-Meteo forecast REST fetch failed") from exc
-
-    # -----------------------
     # Marine fetch (strict)
     # -----------------------
     async def fetch_marine_direct(self, days: int = 5) -> Dict[str, Any]:
@@ -525,158 +467,3 @@ class WeatherFetcher:
             _LOGGER.exception("Open-Meteo marine REST fetch failed for %s,%s", self.latitude, self.longitude)
             raise RuntimeError("Open-Meteo marine REST fetch failed") from exc
 
-    # -----------------------
-    # Normalization helpers
-    # -----------------------
-    def _normalize_forecast_list(self, lst: List[Any], days: int) -> Dict[str, Dict[str, Any]]:
-        """Normalize list of dicts into date-keyed daily summaries strictly where possible."""
-        final: Dict[str, Dict[str, Any]] = {}
-        for item in lst:
-            if not isinstance(item, dict):
-                continue
-            # find a date key
-            date_key = None
-            for k in ("date", "time", "datetime", "day"):
-                if k in item and item.get(k):
-                    v = item.get(k)
-                    try:
-                        if isinstance(v, (int, float)):
-                            dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
-                            date_key = dt.date().isoformat()
-                        else:
-                            s = str(v).split("T")[0]
-                            # validate YYYY-MM-DD
-                            datetime.strptime(s, "%Y-%m-%d")
-                            date_key = s
-                    except Exception:
-                        date_key = None
-                if date_key:
-                    break
-            if not date_key:
-                continue
-            # require temperature and wind present for each item (strict)
-            try:
-                temp = _to_float_strict(item.get("temperature") or item.get("temp") or item.get("temperature_2m"), "temperature")
-                wind_m_s = _to_float_strict(item.get("wind_speed") or item.get("wind") or item.get("wind_speed_10m"), "wind_speed")
-            except ValueError:
-                # item incomplete -> skip (we don't silently fill defaults)
-                continue
-
-            gust_m_s = None
-            if item.get("wind_gust") or item.get("gust"):
-                try:
-                    gust_m_s = float(item.get("wind_gust") or item.get("gust"))
-                except Exception:
-                    gust_m_s = None
-
-            entry = {
-                "temperature": temp,
-                "wind_speed": self._m_s_to_output(wind_m_s),
-            }
-            if gust_m_s is not None:
-                entry["wind_gust"] = self._m_s_to_output(gust_m_s)
-            if item.get("cloud_cover") is not None:
-                entry["cloud_cover"] = _to_int_strict(item.get("cloud_cover") or item.get("clouds") or item.get("cloudcover"), "cloud_cover")
-            if item.get("precipitation_probability") is not None:
-                entry["precipitation_probability"] = _to_int_strict(item.get("precipitation_probability") or item.get("pop") or item.get("precipitation"), "precipitation_probability")
-            if item.get("pressure") is not None:
-                entry["pressure"] = _to_float_strict(item.get("pressure") or item.get("pressure_msl"), "pressure")
-            final[date_key] = entry
-            if len(final) >= days:
-                break
-        return final
-
-    def _normalize_hourly_list_to_daily(self, hourly_list: List[Any], days: int) -> Dict[str, Dict[str, Any]]:
-        """Convert list of hourly entries into daily summaries strictly requiring numeric fields."""
-        per_date: Dict[str, Dict[str, Any]] = {}
-        from homeassistant.util import dt as dt_util
-
-        for entry in hourly_list:
-            if not isinstance(entry, dict):
-                continue
-            t_raw = entry.get("time") or entry.get("datetime") or entry.get("timestamp")
-            if t_raw is None:
-                continue
-            try:
-                t = dt_util.parse_datetime(str(t_raw)) if t_raw is not None else None
-            except Exception:
-                t = None
-            if t is None:
-                try:
-                    tnum = float(t_raw)
-                    if tnum > 1e12:
-                        tnum = tnum / 1000.0
-                    t = datetime.fromtimestamp(tnum, tz=timezone.utc)
-                except Exception:
-                    continue
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=timezone.utc)
-            if t is None:
-                continue
-            date_key = t.date().isoformat()
-
-            # require temperature and wind for strict aggregation
-            try:
-                temp = _to_float_strict(entry.get("temperature") or entry.get("temp") or entry.get("temperature_2m"), "temperature")
-                wind_m_s = _to_float_strict(entry.get("wind_speed") or entry.get("wind") or entry.get("wind_speed_10m"), "wind_speed")
-            except ValueError:
-                # skip entries that don't include required numeric fields
-                continue
-
-            gust_m_s = None
-            if entry.get("wind_gust") is not None or entry.get("gust") is not None:
-                try:
-                    gust_m_s = float(entry.get("wind_gust") or entry.get("gust"))
-                except Exception:
-                    gust_m_s = None
-
-            cloud = None
-            if entry.get("cloud_cover") is not None or entry.get("clouds") is not None or entry.get("cloudcover") is not None:
-                cloud = _to_int_strict(entry.get("cloud_cover") or entry.get("clouds") or entry.get("cloudcover"), "cloud_cover")
-
-            pop = None
-            if entry.get("precipitation_probability") is not None or entry.get("pop") is not None or entry.get("precipitation") is not None:
-                pop = _to_int_strict(entry.get("precipitation_probability") or entry.get("pop") or entry.get("precipitation"), "precipitation_probability")
-
-            pressure = None
-            if entry.get("pressure") is not None or entry.get("pressure_msl") is not None:
-                pressure = _to_float_strict(entry.get("pressure") or entry.get("pressure_msl"), "pressure")
-
-            agg = per_date.get(date_key)
-            if not agg:
-                per_date[date_key] = {
-                    "temperature_sum": temp,
-                    "wind_speed_sum": wind_m_s,
-                    "pressure_sum": pressure or 0.0,
-                    "cloud_sum": cloud or 0,
-                    "precip_max": pop or 0,
-                    "gust_max": gust_m_s or 0.0,
-                    "count": 1,
-                }
-            else:
-                agg["temperature_sum"] += temp
-                agg["wind_speed_sum"] += wind_m_s
-                agg["pressure_sum"] += (pressure or 0.0)
-                agg["cloud_sum"] += (cloud or 0)
-                agg["precip_max"] = max(agg["precip_max"], pop or 0)
-                agg["gust_max"] = max(agg["gust_max"], gust_m_s or 0.0)
-                agg["count"] += 1
-
-        if not per_date:
-            return {}
-
-        final: Dict[str, Dict[str, Any]] = {}
-        for date_key in sorted(per_date.keys())[:days]:
-            agg = per_date[date_key]
-            cnt = agg.get("count", 1) or 1
-            mean_wind_m_s = float(agg["wind_speed_sum"]) / cnt
-            gust_m_s = float(agg["gust_max"])
-            final[date_key] = {
-                "temperature": float(agg["temperature_sum"]) / cnt,
-                "wind_speed": self._m_s_to_output(mean_wind_m_s),
-                "wind_gust": self._m_s_to_output(gust_m_s),
-                "cloud_cover": int(round(float(agg["cloud_sum"]) / cnt)) if agg.get("cloud_sum") is not None else None,
-                "precipitation_probability": int(round(float(agg["precip_max"]))),
-                "pressure": float(agg["pressure_sum"]) / cnt if agg.get("pressure_sum") is not None else None,
-            }
-        return final

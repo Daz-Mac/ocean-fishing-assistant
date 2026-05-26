@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .unit_helpers import convert_safety_display_to_metric, validate_and_normalize_safety_limits
-
 # Table-driven check definitions:
 # (value_key, limit_key, upper_bound, near_ratio)
 #   upper_bound=True:  value > limit → unsafe,  value > limit*near_ratio → caution
@@ -80,18 +78,3 @@ class SafetyValidator:
                     result["reasons"].append(f"{value_key}_near_limit")
 
         return result
-
-
-def normalize_safety_limits(
-    safety_input: Dict[str, Any],
-    entry_units: str = "metric",
-    strict: bool = True,
-) -> Dict[str, Any]:
-    """Convert UI display-unit safety values to canonical metric and validate.
-
-    Convenience wrapper combining convert_safety_display_to_metric and
-    validate_and_normalize_safety_limits from unit_helpers.
-    """
-    canonical = convert_safety_display_to_metric(safety_input, entry_units=entry_units)
-    normalized, _warnings = validate_and_normalize_safety_limits(canonical, strict=strict)
-    return normalized

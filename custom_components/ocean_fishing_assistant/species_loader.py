@@ -98,22 +98,7 @@ class SpeciesLoader:
         res["id"] = general_id
         return res
 
-    def get_general_profiles_by_region(self, region: str) -> List[Dict[str, Any]]:
-        """Return general profiles available in a given region (copies)."""
-        self._ensure_loaded()
-        results: List[Dict[str, Any]] = []
-        gp_map = self._profiles.get("general_profiles", {}) if isinstance(self._profiles, dict) else {}
-        for gid, gdata in gp_map.items():
-            if not isinstance(gdata, dict):
-                continue
-            available_regions = gdata.get("regions", [])
-            if region in available_regions:
-                gcopy = dict(gdata)
-                gcopy["id"] = gid
-                results.append(gcopy)
-        return results
-
-    # ==== existing species helpers (unchanged behavior) ====
+    # ==== species helpers ====
     def get_species(self, species_id: str) -> Optional[Dict[str, Any]]:
         """Return a copy of the species profile with the given ID, or None."""
         self._ensure_loaded()
@@ -138,21 +123,6 @@ class SpeciesLoader:
                 results.append(profile)
         return results
 
-    def get_species_by_type(self, species_type: str) -> List[Dict[str, Any]]:
-        """Return species by type.
-
-        NOTE: 'habitat' field is no longer used in profiles; this returns all species.
-        """
-        self._ensure_loaded()
-        results: List[Dict[str, Any]] = []
-        for sid, sdata in self._profiles["species"].items():
-            if not isinstance(sdata, dict):
-                continue
-            profile = dict(sdata)
-            profile["id"] = sid
-            results.append(profile)
-        return results
-
     def get_all_species(self) -> List[Dict[str, Any]]:
         """Return all species profiles as a list of dicts (copies)."""
         self._ensure_loaded()
@@ -174,17 +144,6 @@ class SpeciesLoader:
             region_copy.setdefault("id", rid)
             regions.append(region_copy)
         return regions
-
-    def get_regions_by_type(self, region_type: str) -> List[Dict[str, Any]]:
-        """Return all regions (habitat key no longer used)."""
-        return self.get_regions()
-
-    def get_regions_for_species(self, species_id: str) -> List[str]:
-        """Return list of region IDs for the given species."""
-        species = self.get_species(species_id)
-        if not species:
-            return []
-        return list(species.get("regions", []))
 
     def get_region_info(self, region_id: str) -> Optional[Dict[str, Any]]:
         """Return region metadata for a specific region, or None."""
