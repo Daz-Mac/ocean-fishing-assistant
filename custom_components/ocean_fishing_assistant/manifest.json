@@ -1,8 +1,11 @@
 {
   "domain": "ocean_fishing_assistant",
   "name": "Ocean Fishing Assistant",
-  "version": "0.1.1",
+  "codeowners": ["@Daz-Mac"],
+  "config_flow": true,
+  "dependencies": [],
   "documentation": "https://github.com/Daz-Mac/ocean-fishing-assistant/",
+  "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/Daz-Mac/ocean-fishing-assistant/issues",
   "requirements": [
     "skyfield>=1.53,<2",
@@ -10,8 +13,5 @@
     "numpy>=2.3.2,<3",
     "timezonefinder>=8.1.0"
   ],
-  "config_flow": true,
-  "dependencies": [],
-  "codeowners": ["@Daz-Mac"],
-  "iot_class": "cloud_polling"
+  "version": "0.1.1"
 }
