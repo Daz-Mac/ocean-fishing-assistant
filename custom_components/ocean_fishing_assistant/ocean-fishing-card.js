@@ -44,7 +44,7 @@ function barColor(s) {
   return '#43a047';
 }
 
-function buildCard(a) {
+function buildCard(a, title) {
   const score = parseInt(a.state, 10);
   const attrs = a.attributes || {};
   const cf = attrs.current_forecast || {};
@@ -80,7 +80,7 @@ function buildCard(a) {
     <ha-card>
       <div class="card">
         <div class="header">
-          <span class="header-title">🎣 Ocean Fishing</span>
+          <span class="header-title">🎣 ${title || 'Ocean Fishing'}</span>
           ${moon ? `<span class="header-moon">🌙 ${moon}</span>` : ''}
         </div>
 
@@ -102,7 +102,7 @@ function buildCard(a) {
         }).join('')}
         ` : `<div class="empty">No forecast data</div>`}
 
-        <div class="footer">${profile.common_name || ''}${profile.scientific_name ? ` (${profile.scientific_name})` : ''}</div>
+        <div class="footer">${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} · ` : ''}Data: Open-Meteo, World Tides</div>
       </div>
     </ha-card>
   `;
@@ -146,7 +146,7 @@ class OceanFishingCard extends HTMLElement {
     console.log('[OceanFishingCard] today periods:', Object.keys(stateObj.attributes.remainder_of_today_periods || {}).length);
     console.log('[OceanFishingCard] next5 days:', Object.keys(stateObj.attributes.next_5_day_periods || {}).length);
 
-    const html = `<style>${styles}</style>` + buildCard(stateObj);
+    const html = `<style>${styles}</style>` + buildCard(stateObj, this._config.title);
     this._shadow.innerHTML = html;
   }
 
