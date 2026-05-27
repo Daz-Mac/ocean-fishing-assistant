@@ -170,21 +170,5 @@
       "region_missing": "Region selection is missing (internal flow error).",
       "no_species_for_region": "No species available for the selected region."
     }
-  },
-  "strings": {
-    "setup_mode_normal": "Normal Mode",
-    "setup_mode_advanced": "Advanced Mode (show interval & extra options)",
-    "units_metric": "Metric (m, km/h, °C)",
-    "units_imperial": "Imperial (ft, mph, °F)",
-    "time_full_day_short": "🌅 Full Day (4 periods)",
-    "time_dawn_dusk_short": "🌄 Dawn & Dusk Only",
-    "time_full_day_long": "🌅 Full Day (4 periods: Morning, Afternoon, Evening, Night)",
-    "time_dawn_dusk_long": "🌄 Dawn & Dusk Only (Prime fishing times: ±1hr sunrise/sunset)",
-    "profile_general_label": "General region profile (mixed)",
-    "profile_species_label": "Target a specific species (region-filtered)",
-    "habitat_open_beach": "🏖️ Open Sandy Beach",
-    "habitat_rocky_point": "🪨 Rocky Point/Jetty",
-    "habitat_harbour": "⚓ Harbour/Pier",
-    "habitat_reef": "🪸 Offshore Reef"
   }
 }
