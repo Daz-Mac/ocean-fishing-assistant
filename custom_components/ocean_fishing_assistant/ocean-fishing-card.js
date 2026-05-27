@@ -2,9 +2,32 @@
 // Single-file LitElement, no build step. Requires HA 2024.x+
 // Register as custom:ocean-fishing-card in Lovelace dashboard
 
-const LitElement = Object.getPrototypeOf(customElements.get('ha-panel-lovelace'));
-const html = LitElement.prototype.html;
-const css = LitElement.prototype.css;
+// Resolve LitElement, html, and css from HA's module system.
+// In HA 2026.x, these are available via window.LitElement after the frontend loads.
+// Fallback: use the prototype chain of known HA custom elements.
+let LitElement = window.LitElement;
+let html = window.html;
+let css = window.css;
+
+if (!LitElement || typeof html !== 'function' || typeof css !== 'function') {
+  // Fallback: try prototype chain of known HA custom elements
+  try {
+    const base = customElements.get('home-assistant-main')
+      || customElements.get('ha-panel-lovelace')
+      || customElements.get('hui-view');
+    if (base) {
+      const proto = Object.getPrototypeOf(Object.getPrototypeOf(base));
+      LitElement = proto.constructor;
+      if (typeof html !== 'function') html = proto.html;
+      if (typeof css !== 'function') css = proto.css;
+    }
+  } catch (_) { /* fallback failed */ }
+}
+
+if (typeof html !== 'function' || typeof css !== 'function') {
+  console.warn('Ocean Fishing Card: Could not resolve html/css template functions — card not registered.');
+} else {
+  // -- start of card implementation (guarded by successful LitElement resolution) --
 
 class OceanFishingCard extends LitElement {
   static get properties() {
@@ -596,3 +619,5 @@ window.customCards.push({
   description: 'Fishing conditions dashboard — score, tide, forecast',
   preview: false,
 });
+
+} // end of LitElement guard
