@@ -232,21 +232,13 @@ class OceanFishingCard extends HTMLElement {
 /* ---- Card editor ---- */
 class OceanFishingCardEditor extends HTMLElement {
   set hass(hass) { this._hass = hass; this._render(); }
-  set config(config) { this._config = config || {}; this._render(); }
-
-  constructor() {
-    super();
-    this._hass = null;
-    this._config = {};
-    this._shadow = this.attachShadow({ mode: 'open' });
-  }
+  set config(config) { this._config = config || {}; }
 
   setConfig(config) { this._config = config || {}; }
 
   _render() {
-    const root = this._shadow;
     if (!this._hass) {
-      root.innerHTML = '<div>Loading...</div>';
+      this.innerHTML = '<div>Loading...</div>';
       return;
     }
 
@@ -260,7 +252,7 @@ class OceanFishingCardEditor extends HTMLElement {
     const currentEntity = this._config.entity || '';
     const currentTitle = this._config.title || '';
 
-    root.innerHTML = `
+    this.innerHTML = `
       <style>
         .editor { padding: 12px 0; }
         label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--secondary-text-color); }
@@ -287,15 +279,17 @@ class OceanFishingCardEditor extends HTMLElement {
       </div>
     `;
 
-    root.querySelector('#entity').addEventListener('change', e => this._changed('entity', e.target.value));
-    root.querySelector('#title').addEventListener('input', e => this._changed('title', e.target.value));
+    this.querySelector('#entity').addEventListener('change', e => this._fireChange('entity', e.target.value));
+    this.querySelector('#title').addEventListener('input', e => this._fireChange('title', e.target.value));
   }
 
-  _changed(key, value) {
+  _fireChange(key, value) {
     const newConfig = { ...this._config };
     if (value) newConfig[key] = value;
     else delete newConfig[key];
     this._config = newConfig;
+
+    // Standard HA event pattern: dispatch on this, bubbles + composed to cross shadow boundaries
     this.dispatchEvent(new CustomEvent('config-changed', {
       detail: { config: newConfig },
       bubbles: true,
