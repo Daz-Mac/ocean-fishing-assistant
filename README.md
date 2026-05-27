@@ -2,7 +2,7 @@
 
 A Home Assistant integration that scores ocean fishing conditions by combining live weather, marine, tide, moon, and species data into a single 0-100 score.
 
-![Integration](https://img.shields.io/badge/HA-custom_component-blue) ![HACS](https://img.shields.io/badge/HACS-custom-orange)
+![Integration](https://img.shields.io/badge/HA-custom_component-blue) [![HACS validation](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/validate.yml/badge.svg)](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/validate.yml) [![Home Assistant validation](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/hassfest.yml/badge.svg)](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/hassfest.yml)
 
 ## Features
 
@@ -38,7 +38,9 @@ Each factor scores 0-10. The overall score is a weighted average mapped to 0-100
 
 ### Via HACS (custom repository)
 
-1. Go to **HACS > Integrations**
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=Integration&repository=https%3A%2F%2Fgithub.com%2FDaz-Mac%2Focean-fishing-assistant)
+
+1. Click the badge above or go to **HACS > Integrations**
 2. Click the three dots in the top-right corner and select **Custom repositories**
 3. Add the repository URL: `https://github.com/Daz-Mac/ocean-fishing-assistant`
 4. Category: **Integration**
@@ -394,6 +396,24 @@ Contributions are welcome! Areas to contribute:
 - **Dashboard cards** — Custom Lovelace cards for visual tide graphs and score displays
 - **Bug fixes and improvements** — Open an issue or pull request on GitHub
 
+## Release Process
+
+This project uses automated releases via GitHub Actions. To publish a new version:
+
+1. Ensure all changes are merged to the default branch
+2. Push a tag matching `v*.*.*` (e.g., `v0.2.0`):
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+3. The release workflow automatically creates a GitHub Release with auto-generated release notes
+4. HACS will detect the new release and prompt users to update
+
+Version numbering follows [semantic versioning](https://semver.org/):
+- **Patch** (v0.1.x) — Bug fixes and minor changes
+- **Minor** (v0.x.0) — New features, backward-compatible
+- **Major** (x.0.0) — Breaking changes
+
 ## License
 
-This project is distributed under the terms of the Apache License 2.0.
+This project is distributed under the terms of the Apache License 2.0. See the [LICENSE](LICENSE) file for details.

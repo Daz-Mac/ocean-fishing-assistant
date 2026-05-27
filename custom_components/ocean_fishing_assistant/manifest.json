@@ -1,7 +1,7 @@
 {
   "domain": "ocean_fishing_assistant",
   "name": "Ocean Fishing Assistant",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "documentation": "https://github.com/Daz-Mac/ocean-fishing-assistant/",
   "issue_tracker": "https://github.com/Daz-Mac/ocean-fishing-assistant/issues",
   "requirements": [
