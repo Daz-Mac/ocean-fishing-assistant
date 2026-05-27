@@ -67,9 +67,8 @@ function buildCard(a) {
   const next5 = attrs.next_5_day_periods || {};
   const pMap = { period_00_06:'00-06', period_06_12:'06-12', period_12_18:'12-18', period_18_24:'18-24' };
   const rows = [];
-  for (const [, pm] of Object.entries(today))
-    for (const [pn, pd] of Object.entries(pm))
-      rows.push({ d:'Today', p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase });
+  for (const [periodName, periodData] of Object.entries(today))
+    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase });
   for (const d of Object.keys(next5).sort().slice(0, 3)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
     for (const [pn, pd] of Object.entries(next5[d]))
