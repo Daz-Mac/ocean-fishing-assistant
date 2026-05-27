@@ -216,10 +216,90 @@ class OceanFishingCard extends HTMLElement {
   }
 
   getCardSize() { return 3; }
+
+  static getConfigElement() {
+    return document.createElement('ocean-fishing-card-editor');
+  }
+}
+
+/* ---- Card editor ---- */
+class OceanFishingCardEditor extends HTMLElement {
+  set hass(hass) { this._hass = hass; this._render(); }
+  set config(config) { this._config = config || {}; this._render(); }
+
+  constructor() {
+    super();
+    this._hass = null;
+    this._config = {};
+    this._shadow = this.attachShadow({ mode: 'open' });
+  }
+
+  setConfig(config) { this._config = config || {}; }
+
+  _render() {
+    const root = this._shadow;
+    if (!this._hass) {
+      root.innerHTML = '<div>Loading...</div>';
+      return;
+    }
+
+    // Find matching sensors
+    const entities = Object.keys(this._hass.states).filter(eid =>
+      eid.startsWith('sensor.') && (
+        eid.includes('rosia_bay') || eid.includes('fishing') || eid.includes('mackeral') || eid.includes('bonito') || eid.includes('ocean')
+      )
+    );
+
+    const currentEntity = this._config.entity || '';
+    const currentTitle = this._config.title || '';
+
+    root.innerHTML = `
+      <style>
+        .editor { padding: 12px 0; }
+        label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--secondary-text-color); }
+        select, input {
+          width: 100%; padding: 8px; border: 1px solid var(--divider-color, #ccc);
+          border-radius: 4px; background: var(--card-background-color, #fff);
+          color: var(--primary-text-color); font-size: 14px; box-sizing: border-box;
+          margin-bottom: 12px;
+        }
+        .note { font-size: 11px; color: var(--secondary-text-color); margin-top: -8px; margin-bottom: 12px; }
+      </style>
+      <div class="editor">
+        <label for="entity">Entity</label>
+        <select id="entity">
+          ${entities.length > 0
+            ? entities.map(eid => `<option value="${eid}" ${eid === currentEntity ? 'selected' : ''}>${eid}</option>`).join('')
+            : '<option value="">No fishing sensors found</option>'
+          }
+        </select>
+        <div class="note">Select the Ocean Fishing Assistant sensor for this card</div>
+
+        <label for="title">Title (optional)</label>
+        <input id="title" type="text" value="${currentTitle}" placeholder="Ocean Fishing">
+      </div>
+    `;
+
+    root.querySelector('#entity').addEventListener('change', e => this._changed('entity', e.target.value));
+    root.querySelector('#title').addEventListener('input', e => this._changed('title', e.target.value));
+  }
+
+  _changed(key, value) {
+    const newConfig = { ...this._config };
+    if (value) newConfig[key] = value;
+    else delete newConfig[key];
+    this._config = newConfig;
+    this.dispatchEvent(new CustomEvent('config-changed', {
+      detail: { config: newConfig },
+      bubbles: true,
+      composed: true,
+    }));
+  }
 }
 
 /* ---- Register ---- */
 customElements.define('ocean-fishing-card', OceanFishingCard);
+customElements.define('ocean-fishing-card-editor', OceanFishingCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
