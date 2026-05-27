@@ -45,7 +45,10 @@ function barColor(s) {
 }
 const factorLabels = { tide:'Tide', wind:'Wind', wind_direction:'Wind Dir', waves:'Waves', time:'Time', pressure:'Pressure', season:'Season', moon:'Moon', temperature:'Temp' };
 
-function buildCard(a, title) {
+function buildCard(a, config) {
+  const title = config.title || 'Ocean Fishing';
+  const showForecast = config.show_forecast !== false;
+  const forecastDays = Math.min(Math.max(parseInt(config.forecast_days, 10) || 2, 1), 5);
   const score = parseInt(a.state, 10);
   const attrs = a.attributes || {};
   const cf = attrs.current_forecast || {};
@@ -79,12 +82,13 @@ function buildCard(a, title) {
   const rows = [];
   for (const [periodName, periodData] of Object.entries(today))
     rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components });
-  for (const d of Object.keys(next5).sort().slice(0, 3)) {
+  for (const d of Object.keys(next5).sort().slice(0, forecastDays)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
     for (const [pn, pd] of Object.entries(next5[d]))
       rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components });
   }
-  const display = rows.slice(0, 8);
+  const todayCount = Object.entries(today).length;
+  const display = rows.slice(0, todayCount + forecastDays * 4);
   // Store data for click handler (as JSON on container)
   const rowsData = JSON.stringify(display.map(r => ({ d: r.d, p: r.p, s: r.s, t: r.t, c: r.c })));
 
@@ -100,9 +104,9 @@ function buildCard(a, title) {
           <div class="score-fill" style="width:${pct}%"></div>
           <span class="score-num">${score}</span>
         </div>
-        <div class="score-label" style="color:${barColor(score)}">Now: ${label} · ${score}/100</div>
+        <div class="score-label" style="color:${barColor(score)}">Now: ${label} &middot; ${score}/100</div>
 
-        <div class="section-title" style="margin-bottom:4px">Now — Score Breakdown</div>
+        <div class="section-title" style="margin-bottom:4px">Now &mdash; Score Breakdown</div>
         <div class="conditions" style="margin-bottom:4px">
           ${compsList.map(c => {
             const sc = comps[c.k]?.score_100;
@@ -124,7 +128,7 @@ function buildCard(a, title) {
           ${safetyItems.map(s => `<div style="font-size:11px;text-align:center"><span style="color:var(--secondary-text-color)">${s.l}</span><br><span style="font-weight:500">${s.v}</span></div>`).join('')}
         </div>` : ''}
 
-        ${display.length ? `
+        ${showForecast ? (display.length ? `
         <div class="section-title">Forecast <span style="font-weight:400;font-size:11px;color:var(--secondary-text-color)">(tap row for details)</span></div>
         <div id="forecast-container" data-rows='${rowsData}'>
         ${display.map((r, i) => {
@@ -139,9 +143,9 @@ function buildCard(a, title) {
           <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px"></div>`;
         }).join('')}
         </div>
-        ` : `<div class="empty">No forecast data</div>`}
+        ` : `<div class="empty">No forecast data</div>`) : ''}
 
-        <div class="footer">${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} · ` : ''}Data: Open-Meteo, World Tides</div>
+        <div class="footer">${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} &middot; ` : ''}Data: Open-Meteo, World Tides</div>
       </div>
     </ha-card>
   `;
@@ -185,7 +189,7 @@ class OceanFishingCard extends HTMLElement {
     console.log('[OceanFishingCard] today periods:', Object.keys(stateObj.attributes.remainder_of_today_periods || {}).length);
     console.log('[OceanFishingCard] next5 days:', Object.keys(stateObj.attributes.next_5_day_periods || {}).length);
 
-    const html = `<style>${styles}</style>` + buildCard(stateObj, this._config.title);
+    const html = `<style>${styles}</style>` + buildCard(stateObj, this._config);
     this._shadow.innerHTML = html;
 
     // Set up click handlers for forecast rows
@@ -235,10 +239,12 @@ class OceanFishingCard extends HTMLElement {
       schema: [
         { name: 'entity', selector: { entity: { domain: 'sensor' } } },
         { name: 'title', selector: { text: {} } },
+        { name: 'show_forecast', selector: { boolean: {} } },
+        { name: 'forecast_days', selector: { number: { min: 1, max: 5, mode: 'slider' } } },
       ],
     };
   }
-  static getStubConfig() { return {}; }
+  static getStubConfig() { return { show_forecast: true, forecast_days: 2 }; }
 }
 
 customElements.define('ocean-fishing-card', OceanFishingCard);
