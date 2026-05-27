@@ -54,13 +54,23 @@ function buildCard(a, title) {
   const profile = attrs.profile_used || {};
   const label = score >= 70 ? 'Excellent' : score >= 50 ? 'Fair' : 'Poor';
   const pct = 100 - Math.min(Math.max(score || 0, 0), 100);
-  // Conditions
-  const conds = [
-    { i:'hass:waves', l:'Tide', v: cf.tide_phase || '--' },
-    { i:'hass:weather-windy', l:'Wind', v: attrs.current_wind_speed || '--' },
-    { i:'hass:wave', l:'Waves', v: attrs.current_wave_height || '--' },
-    { i:'hass:thermometer', l:'Temp', v: attrs.current_temperature || '--' },
+  // All 9 factor scores from current_forecast components
+  const compsList = [
+    { k:'tide', i:'hass:waves', l:'Tide', v: comps.tide?.tide_phase },
+    { k:'wind', i:'hass:weather-windy', l:'Wind', v: comps.wind?.wind_speed },
+    { k:'wind_direction', i:'hass:compass', l:'Wind Dir', v: comps.wind_direction?.wind_direction_deg != null ? comps.wind_direction.wind_direction_deg + '°' : null },
+    { k:'waves', i:'hass:wave', l:'Waves', v: comps.waves?.wave_height },
+    { k:'pressure', i:'hass:gauge', l:'Pressure', v: comps.pressure?.pressure_delta },
+    { k:'temperature', i:'hass:thermometer', l:'Temp', v: comps.temperature?.temperature },
+    { k:'season', i:'hass:calendar', l:'Season', v: null },
+    { k:'moon', i:'hass:brightness-7', l:'Moon', v: comps.moon?.moon_phase_name },
+    { k:'time', i:'hass:clock', l:'Time', v: null },
   ];
+  const safetyVals = cf.safety_values || {};
+  const safetyItems = [];
+  if (safetyVals.wind_gust) safetyItems.push({ l:'Gust', v: safetyVals.wind_gust });
+  if (safetyVals.swell_period_s != null) safetyItems.push({ l:'Swell', v: safetyVals.swell_period_s + 's' });
+  if (safetyVals.precipitation_probability != null) safetyItems.push({ l:'Precip', v: safetyVals.precipitation_probability + '%' });
 
   // Forecast periods
   const today = attrs.remainder_of_today_periods || {};
@@ -92,9 +102,27 @@ function buildCard(a, title) {
         </div>
         <div class="score-label" style="color:${barColor(score)}">Now: ${label} · ${score}/100</div>
 
-        <div class="conditions">
-          ${conds.map(c => `<div class="c-item"><ha-icon icon="${c.i}"></ha-icon><div><div class="c-label">${c.l}</div><div class="c-value">${c.v}</div></div></div>`).join('')}
+        <div class="section-title" style="margin-bottom:4px">Now — Score Breakdown</div>
+        <div class="conditions" style="margin-bottom:4px">
+          ${compsList.map(c => {
+            const sc = comps[c.k]?.score_100;
+            const scColor = barColor(sc);
+            const scDisplay = sc != null ? `${sc}` : '--';
+            return `<div class="c-item">
+              <ha-icon icon="${c.i}"></ha-icon>
+              <div style="flex:1;min-width:0">
+                <div class="c-label">${c.l}</div>
+                <div class="c-value" style="display:flex;justify-content:space-between;align-items:center">
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70px">${c.v || ''}</span>
+                  <span style="font-weight:700;margin-left:4px;flex-shrink:0;color:${scColor}">${scDisplay}</span>
+                </div>
+              </div>
+            </div>`;
+          }).join('')}
         </div>
+        ${safetyItems.length ? `<div class="conditions" style="grid-template-columns:repeat(${Math.min(safetyItems.length,3)},1fr);margin-bottom:12px;padding:6px 10px">
+          ${safetyItems.map(s => `<div style="font-size:11px;text-align:center"><span style="color:var(--secondary-text-color)">${s.l}</span><br><span style="font-weight:500">${s.v}</span></div>`).join('')}
+        </div>` : ''}
 
         ${display.length ? `
         <div class="section-title">Forecast <span style="font-weight:400;font-size:11px;color:var(--secondary-text-color)">(tap row for details)</span></div>
