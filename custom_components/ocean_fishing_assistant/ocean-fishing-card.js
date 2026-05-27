@@ -223,6 +223,20 @@ class OceanFishingCard extends HTMLElement {
   }
 
   getCardSize() { return 3; }
+
+  // HA 2026.x built-in form editor — no custom editor element needed
+  static async getConfigForm() {
+    return {
+      schema: [
+        { name: 'entity', selector: { entity: { domain: 'sensor' } } },
+        { name: 'title', selector: { text: {} } },
+      ],
+    };
+  }
+
+  static getStubConfig() {
+    return {};
+  }
 }
 
 /* ---- Register ---- */
