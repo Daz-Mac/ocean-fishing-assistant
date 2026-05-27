@@ -6,6 +6,7 @@ This implementation expects required values (including `units` and
 If they are missing or invalid, setup fails loudly (ValueError / return False).
 """
 import os
+import shutil
 import logging
 
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
@@ -47,31 +48,36 @@ async def async_setup_entry(hass, entry):
     domain_store = hass.data.setdefault(DOMAIN, {})
 
     # Register the Lovelace card as a frontend resource (one-time per HA start).
-    # Serves the JS file directly from the integration directory — no file copy needed.
+    # Two-step approach: (1) copy to www/community/ so HA serves it at /local/.../,
+    #                    (2) register as frontend extra JS so Lovelace auto-loads it.
     if not domain_store.get("_card_registered"):
         domain_store["_card_registered"] = True
-        try:
-            card_path = os.path.join(os.path.dirname(__file__), "ocean-fishing-card.js")
-            if not os.path.exists(card_path):
-                _LOGGER.warning("ocean-fishing-card.js not found at %s, card will not be registered", card_path)
-            else:
-                # Register a static URL path so HA serves the JS file
-                await hass.http.register_static_path(
-                    "/ocean_fishing_card",
-                    card_path,
-                    cache_headers=False,
-                )
-                _LOGGER.info("Registered /ocean_fishing_card as static path for the card JS")
+        can_register = False
+        card_src = os.path.join(os.path.dirname(__file__), "ocean-fishing-card.js")
+        card_dst_dir = hass.config.path("www/community/ocean-fishing-card")
+        card_dst = os.path.join(card_dst_dir, "ocean-fishing-card.js")
+        card_url = "/local/community/ocean-fishing-card/ocean-fishing-card.js"
 
-                # Register as frontend extra JS module so Lovelace loads it automatically
-                # NOTE: add_extra_js_url is NOT async — do NOT await it.
-                try:
-                    add_extra_js_url(hass, "/ocean_fishing_card")
-                    _LOGGER.info("Registered ocean-fishing-card.js as frontend extra JS URL")
-                except Exception as exc:
-                    _LOGGER.warning("add_extra_js_url failed: %s — card available at /ocean_fishing_card", exc)
+        try:
+            if not os.path.exists(card_src):
+                _LOGGER.warning("ocean-fishing-card.js not found at %s", card_src)
+            else:
+                # Copy to www/community/ inside executor to avoid blocking the event loop
+                await hass.async_add_executor_job(os.makedirs, card_dst_dir, 0o755, True)
+                await hass.async_add_executor_job(shutil.copy2, card_src, card_dst)
+                _LOGGER.info("Copied ocean-fishing-card.js to %s", card_dst)
+                can_register = True
         except Exception as exc:
-            _LOGGER.warning("Failed to register card: %s", exc)
+            _LOGGER.warning("Failed to copy ocean-fishing-card.js to www/community/: %s", exc)
+
+        if can_register:
+            try:
+                # Register as frontend extra JS so Lovelace loads it automatically.
+                # NOTE: add_extra_js_url is NOT async — do NOT await it.
+                add_extra_js_url(hass, card_url)
+                _LOGGER.info("Registered ocean-fishing-card.js as frontend extra JS URL: %s", card_url)
+            except Exception as exc:
+                _LOGGER.warning("add_extra_js_url failed: %s", exc)
 
     # Initialize cache persistence (idempotent — only loads from Store on first call).
     await cache_persistence.async_load_and_setup_persistence(hass, domain_store)
