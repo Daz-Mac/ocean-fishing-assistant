@@ -320,11 +320,12 @@ Add an entry to the `regions` object:
 
 Then reference it in species profile `regions` arrays.
 
-## Example Lovelace Dashboard
+## Documentation
 
-The integration works with HA's native entities and any card that can display sensor attributes. Here's a simple dashboard layout using the built-in entities card and [apexcharts-card](https://github.com/RomRider/apexcharts-card) for tide graphs:
-
-See [examples/lovelace-dashboard.yaml](examples/lovelace-dashboard.yaml) for a complete dashboard template.
+- [**Getting started**](docs/getting-started.md) — Install and configure your first fishing location
+- [**Understanding scores**](docs/understanding-scores.md) — How the 0-100 score is calculated
+- [**Configuring safety limits**](docs/configuring-safety.md) — Tune safety thresholds for your fishing style
+- [**Sensor attribute reference**](docs/sensor-attributes.md) — Complete list of sensor attributes for dashboards and automations
 
 ## Troubleshooting
 
