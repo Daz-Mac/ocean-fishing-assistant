@@ -43,6 +43,7 @@ function barColor(s) {
   if (s < 70) return '#fdd835';
   return '#43a047';
 }
+const factorLabels = { tide:'Tide', wind:'Wind', wind_direction:'Wind Dir', waves:'Waves', time:'Time', pressure:'Pressure', season:'Season', moon:'Moon', temperature:'Temp' };
 
 function buildCard(a, title) {
   const score = parseInt(a.state, 10);
@@ -53,7 +54,6 @@ function buildCard(a, title) {
   const profile = attrs.profile_used || {};
   const label = score >= 70 ? 'Excellent' : score >= 50 ? 'Fair' : 'Poor';
   const pct = 100 - Math.min(Math.max(score || 0, 0), 100);
-
   // Conditions
   const conds = [
     { i:'hass:waves', l:'Tide', v: cf.tide_phase || '--' },
@@ -68,13 +68,15 @@ function buildCard(a, title) {
   const pMap = { period_00_06:'00-06', period_06_12:'06-12', period_12_18:'12-18', period_18_24:'18-24' };
   const rows = [];
   for (const [periodName, periodData] of Object.entries(today))
-    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase });
+    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components });
   for (const d of Object.keys(next5).sort().slice(0, 3)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
     for (const [pn, pd] of Object.entries(next5[d]))
-      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase });
+      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components });
   }
   const display = rows.slice(0, 8);
+  // Store data for click handler (as JSON on container)
+  const rowsData = JSON.stringify(display.map(r => ({ d: r.d, p: r.p, s: r.s, t: r.t, c: r.c })));
 
   return `
     <ha-card>
@@ -88,18 +90,27 @@ function buildCard(a, title) {
           <div class="score-fill" style="width:${pct}%"></div>
           <span class="score-num">${score}</span>
         </div>
-        <div class="score-label" style="color:${barColor(score)}">${label} · ${score}/100</div>
+        <div class="score-label" style="color:${barColor(score)}">Now: ${label} · ${score}/100</div>
 
         <div class="conditions">
           ${conds.map(c => `<div class="c-item"><ha-icon icon="${c.i}"></ha-icon><div><div class="c-label">${c.l}</div><div class="c-value">${c.v}</div></div></div>`).join('')}
         </div>
 
         ${display.length ? `
-        <div class="section-title">Forecast</div>
-        ${display.map(r => {
+        <div class="section-title">Forecast <span style="font-weight:400;font-size:11px;color:var(--secondary-text-color)">(tap row for details)</span></div>
+        <div id="forecast-container" data-rows='${rowsData}'>
+        ${display.map((r, i) => {
           const tide = r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : '';
-          return `<div class="row"><span class="rdate">${r.d}</span><span class="rper">${r.p}</span><div class="rbar-wrap"><div class="rbar" style="width:${Math.min(r.s||0,100)}%;background:${barColor(r.s)}"></div></div><span class="rscore" style="color:${barColor(r.s)}">${r.s != null ? r.s : '--'}</span>${tide ? `<span class="rtide">${tide}</span>` : ''}</div>`;
+          return `<div class="row" data-idx="${i}">
+            <span class="rdate">${r.d}</span>
+            <span class="rper">${r.p}</span>
+            <div class="rbar-wrap"><div class="rbar" style="width:${Math.min(r.s||0,100)}%;background:${barColor(r.s)}"></div></div>
+            <span class="rscore" style="color:${barColor(r.s)}">${r.s != null ? r.s : '--'}</span>
+            ${tide ? `<span class="rtide">${tide}</span>` : ''}
+          </div>
+          <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px"></div>`;
         }).join('')}
+        </div>
         ` : `<div class="empty">No forecast data</div>`}
 
         <div class="footer">${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} · ` : ''}Data: Open-Meteo, World Tides</div>
@@ -148,6 +159,45 @@ class OceanFishingCard extends HTMLElement {
 
     const html = `<style>${styles}</style>` + buildCard(stateObj, this._config.title);
     this._shadow.innerHTML = html;
+
+    // Set up click handlers for forecast rows
+    const container = this._shadow.getElementById('forecast-container');
+    if (container) {
+      let rowsData = [];
+      try { rowsData = JSON.parse(container.dataset.rows || '[]'); } catch (_) {}
+      container.addEventListener('click', (e) => {
+        const row = e.target.closest('.row');
+        if (!row) return;
+        const idx = parseInt(row.dataset.idx, 10);
+        if (isNaN(idx) || !rowsData[idx]) return;
+        const detail = this._shadow.getElementById(`detail-${idx}`);
+        if (!detail) return;
+        if (detail.style.display !== 'none') {
+          detail.style.display = 'none';
+          return;
+        }
+        // Build detail content from components
+        const r = rowsData[idx];
+        let content = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px">`;
+        if (r.c) {
+          for (const [fk, fv] of Object.entries(r.c)) {
+            const name = factorLabels[fk] || fk;
+            const sc = fv.score_100 != null ? fv.score_100 : '--';
+            const color = barColor(sc);
+            content += `<div style="display:flex;justify-content:space-between">
+              <span>${name}</span>
+              <span style="color:${color};font-weight:500">${sc}</span>
+            </div>`;
+          }
+        } else {
+          content += `<div style="grid-column:1/-1;color:var(--secondary-text-color)">No detail data</div>`;
+        }
+        content += `</div>`;
+        if (r.t) content += `<div style="margin-top:4px;color:var(--secondary-text-color);font-size:10px">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</div>`;
+        detail.innerHTML = content;
+        detail.style.display = 'block';
+      });
+    }
   }
 
   getCardSize() { return 3; }
