@@ -186,14 +186,21 @@ class OceanFishingCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config || !config.entity) throw new Error('Entity must be specified');
-    this._config = config;
+    this._config = config || {};
+    if (!config || !config.entity) {
+      // Config will be set later via the editor — render friendly message
+      this._render();
+      return;
+    }
   }
 
   _render() {
     const root = this._shadow;
     if (!this._config || !this._config.entity) {
-      root.innerHTML = '<ha-card><div class="config-msg">Configure entity in card settings</div></ha-card>';
+      const hint = this._config && Object.keys(this._config).length > 0
+        ? 'Config missing entity — edit the card and select a sensor'
+        : 'Configure this card in the Lovelace editor';
+      root.innerHTML = `<ha-card><div class="config-msg">${hint}</div></ha-card>`;
       return;
     }
     if (!this._hass) {
