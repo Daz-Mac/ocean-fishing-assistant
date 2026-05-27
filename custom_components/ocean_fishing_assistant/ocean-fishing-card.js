@@ -80,8 +80,7 @@ function buildCard(stateObj, attrs) {
         ${_header(a, comps, cf)}
         ${_scoreBar(score, cf)}
         ${_conditions(a, comps, cf)}
-        ${_chart(a)}
-        ${_forecast(a)}
+        ${_periodTable(a, 'Forecast')}
         ${_footer(profile)}
       </div>
     </ha-card>
@@ -136,68 +135,40 @@ function _conditions(a, comps, cf) {
   return `<div class="conditions">${items.map(i => `<div class="c-item"><ha-icon icon="${i.icon}"></ha-icon><div><div class="c-label">${i.label}</div><div class="c-value">${i.value}</div></div></div>`).join('')}</div>`;
 }
 
-function _chart(a) {
-  // Build chart rows from period forecast data (no raw data required)
-  const today = a.remainder_of_today_periods || {};
-  const next5 = a.next_5_day_periods || {};
-  const rows = [];
-  const pMap = { period_00_06:'00-06h', period_06_12:'06-12h', period_12_18:'12-18h', period_18_24:'18-24h', dawn:'Dawn', dusk:'Dusk' };
-  const barColor = s => s >= 70 ? '#43a047' : s >= 50 ? '#fdd835' : '#e53935';
-
-  for (const [d, pmap] of Object.entries(today))
-    for (const [pn, pd] of Object.entries(pmap))
-      rows.push({ date:'Today', period: pMap[pn]||pn, score: pd.score_100, tide: pd.tide_phase || (pd.components && pd.components.tide ? pd.components.tide.tide_phase : '') });
-
-  for (const [d, pmap] of Object.entries(next5).slice(0, 2)) {
-    const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-    for (const [pn, pd] of Object.entries(pmap))
-      rows.push({ date: label, period: pMap[pn]||pn, score: pd.score_100, tide: pd.tide_phase || '' });
-  }
-
-  if (!rows.length) {
-    return `<div class="chart-section">
-      <div class="section-title">Tide & Score — Next 48h</div>
-      <div class="chart-fallback">No forecast data available</div>
-    </div>`;
-  }
-
-  return `<div class="chart-section">
-    <div class="section-title">Tide & Score — Next 48h</div>
-    <div class="chart-fallback">
-      ${rows.map(r => {
-        const tideIcon = r.tide === 'rising' ? '↑' : r.tide === 'falling' ? '↓' : r.tide === 'high' ? '⬆' : r.tide === 'low' ? '⬇' : '—';
-        return `<div class="chart-row">
-          <span class="chart-row-time">${r.date} ${r.period}</span>
-          <span style="flex:1;height:10px;background:var(--secondary-background-color,#f0f0f0);border-radius:5px;overflow:hidden;display:inline-block;margin:0 8px;">
-            <span style="display:block;height:100%;width:${r.score||0}%;background:${barColor(r.score)};border-radius:5px;transition:width 0.3s"></span>
-          </span>
-          <span class="chart-row-score" style="color:${barColor(r.score)};min-width:28px;text-align:right">${r.score != null ? r.score : '--'}</span>
-          <span style="font-size:12px;margin-left:4px;color:var(--secondary-text-color)">${tideIcon}</span>
-        </div>`;
-      }).join('')}
-    </div>
-  </div>`;
-}
-
-function _forecast(a) {
+function _periodTable(a, title) {
+  // Build a period forecast table from sensor attributes
   const today = a.remainder_of_today_periods || {};
   const next5 = a.next_5_day_periods || {};
   const periods = [];
   const pMap = { period_00_06:'00-06h', period_06_12:'06-12h', period_12_18:'12-18h', period_18_24:'18-24h', dawn:'Dawn', dusk:'Dusk' };
+  const barColor = s => s >= 70 ? '#43a047' : s >= 50 ? '#fdd835' : '#e53935';
+
   for (const [d, pmap] of Object.entries(today))
     for (const [pn, pd] of Object.entries(pmap))
-      periods.push({ date:'Today', period: pMap[pn]||pn, score: pd.score_100 });
-  for (const [d, pmap] of Object.entries(next5)) {
+      periods.push({ date:'Today', period: pMap[pn]||pn, score: pd.score_100, tide: pd.tide_phase || (pd.components?.tide?.tide_phase) || '' });
+
+  const dayKeys = Object.keys(next5).sort();
+  for (const d of dayKeys.slice(0, 3)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-    for (const [pn, pd] of Object.entries(pmap))
-      periods.push({ date: label, period: pMap[pn]||pn, score: pd.score_100 });
+    for (const [pn, pd] of Object.entries(next5[d]))
+      periods.push({ date: label, period: pMap[pn]||pn, score: pd.score_100, tide: pd.tide_phase || '' });
   }
-  const slice = periods.slice(0, 8);
-  if (!slice.length) return `<div class="forecast-section"><div class="section-title">Period Forecasts</div><div class="empty-data">No forecast data</div></div>`;
-  const barColor = s => s >= 70 ? '#43a047' : s >= 50 ? '#fdd835' : '#e53935';
+
+  if (!periods.length) return '';
+  // Limit display to a reasonable number of rows
+  const display = periods.slice(0, 8);
   return `<div class="forecast-section">
-    <div class="section-title">Period Forecasts</div>
-    ${slice.map(p => `<div class="f-row"><span class="f-date">${p.date}</span><span class="f-period">${p.period}</span><div class="f-bar-wrap"><div class="f-bar" style="width:${p.score||0}%;background:${barColor(p.score)}"></div></div><span class="f-score" style="color:${barColor(p.score)}">${p.score != null ? p.score : '--'}</span></div>`).join('')}
+    <div class="section-title">${title}</div>
+    ${display.map(p => {
+      const tideIcon = p.tide === 'rising' ? '↑' : p.tide === 'falling' ? '↓' : p.tide === 'high' ? '⬆' : p.tide === 'low' ? '⬇' : '';
+      return `<div class="f-row">
+        <span class="f-date">${p.date}</span>
+        <span class="f-period">${p.period}</span>
+        <div class="f-bar-wrap"><div class="f-bar" style="width:${Math.min(p.score||0,100)}%;background:${barColor(p.score)}"></div></div>
+        <span class="f-score" style="color:${barColor(p.score)}">${p.score != null ? p.score : '--'}</span>
+        ${tideIcon ? `<span style="font-size:11px;color:var(--secondary-text-color);width:14px;text-align:center">${tideIcon}</span>` : ''}
+      </div>`;
+    }).join('')}
   </div>`;
 }
 
