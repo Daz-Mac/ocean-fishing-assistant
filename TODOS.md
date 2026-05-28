@@ -11,7 +11,9 @@
 - [ ] Keep CI fast — scoring tests are pure logic, no network needed
 
 ## T6 — Notification blueprint
-- [ ] Create `blueprints/automation/ocean_fishing_assistant/` with a Home Assistant automation blueprint
-- [ ] Trigger: fishing score above/below threshold (e.g., score > 70)
-- [ ] Actions: notify mobile device, with score breakdown in message
-- [ ] Include species name, score, top factors, and safety warnings in notification
+- [x] Create `blueprints/automation/ocean_fishing_assistant/` with 3 blueprints:
+  - `score_alert.yaml` — rising-edge threshold alert with quiet hours
+  - `daily_briefing.yaml` — morning period forecast briefing
+  - `prime_conditions.yaml` — high score + no breaches alert
+- [x] YAML validation in CI (validate.yml)
+- [x] Include species name, score, factor breakdown, quiet hours, availability guards

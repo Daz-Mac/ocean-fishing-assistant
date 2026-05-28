@@ -19,3 +19,22 @@ jobs:
         uses: hacs/action@22.5.0
         with:
           category: "integration"
+      - name: Blueprint YAML validation
+        run: |
+          python3 -c "
+          import os, yaml, sys
+          def ic(loader, node):
+              return loader.construct_scalar(node)
+          yaml.SafeLoader.add_constructor('!input', ic)
+          bp_dir = 'blueprints/automation/ocean_fishing_assistant'
+          ok = True
+          for f in sorted(os.listdir(bp_dir)):
+              if not f.endswith('.yaml'):
+                  continue
+              path = os.path.join(bp_dir, f)
+              with open(path) as fh:
+                  data = yaml.safe_load(fh)
+              name = data.get('blueprint', {}).get('name', f)
+              print(f'  OK: {name}')
+          print('All blueprints valid')
+          "
