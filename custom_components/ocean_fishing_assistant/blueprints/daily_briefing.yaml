@@ -81,5 +81,40 @@ action:
         Tomorrow best: {{ t_score }}/100
           {%- endif -%}
         {%- endif -%}
+  - service: persistent_notification.create
+    data:
+      title: "Today's Fishing Forecast"
+      notification_id: daily_fishing_briefing
+      message: |-
+        {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
+        {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
+        {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
+        {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
+
+        Today's Fishing Forecast
+
+        {% for key, data in periods | dictsort -%}
+          {%- set label = key | replace('period_', '') | replace('_', 'h-') -%}h
+          {%- set s = data.score_100 | default(0) -%}
+          {%- if s >= 70 %}{{ label }}: {{ s }} — Excellent!
+          {%- elif s >= 50 %}{{ label }}: {{ s }} — Good
+          {%- else %}{{ label }}: {{ s }} — Fair
+          {%- endif -%}
+        {% endfor %}
+
+        Moon: {{ moon }}
+        Species: {{ profile.common_name | default('General profile') }}
+        {%- if include_tomorrow | default(false) and tomorrow.keys() | length > 0 %}
+          {%- set today = now().date() -%}
+          {%- set tomorrow_key = (today + timedelta(days=1)).isoformat() -%}
+          {%- set t_periods = tomorrow.get(tomorrow_key, {}) -%}
+          {%- if t_periods.keys() | length > 0 -%}
+            {%- set t_all = t_periods.values() | list -%}
+            {%- set t_sorted = t_all | sort(attribute='score_100', reverse=true) -%}
+            {%- set t_best = t_sorted[0] -%}
+            {%- set t_score = t_best.get('score_100', '?') -%}
+        Tomorrow best: {{ t_score }}/100
+          {%- endif -%}
+        {%- endif -%}
 
 mode: single
