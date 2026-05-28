@@ -23,11 +23,12 @@ blueprint:
           max: 100.0
           step: 5.0
           mode: slider
-    notify_target:
-      name: Notification target
-      description: "Notify service, e.g. notify.mobile_app_iphone"
+    notify_device:
+      name: Notification device
+      description: Mobile device to send the notification to
       selector:
-        text:
+        device:
+          integration: mobile_app
     require_species_match:
       name: Require species profile
       description: Only notify if a specific species profile is selected
@@ -92,14 +93,17 @@ condition:
       {% endif %}
 
 action:
-  - service: !input notify_target
-    data:
-      title: !input title
-      message: |-
-        {%- set forecast = state_attr(sensor, 'current_forecast') | default({}) -%}
+  - variables:
+      sensor_id: !input sensor
+  - device_id: !input notify_device
+    domain: mobile_app
+    type: notify
+    title: !input title
+    message: |-
+        {%- set forecast = state_attr(sensor_id, 'current_forecast') | default({}) -%}
         {%- set components = forecast.get('components', {}) -%}
-        {%- set profile = state_attr(sensor, 'profile_used') | default(none) -%}
-        {%- set score = states(sensor) | default('?') -%}
+        {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
+        {%- set score = states(sensor_id) | default('?') -%}
 
         Score: {{ score }}/100 — all clear, no warnings
 

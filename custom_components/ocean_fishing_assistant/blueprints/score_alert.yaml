@@ -22,11 +22,12 @@ blueprint:
           max: 100.0
           step: 5.0
           mode: slider
-    notify_target:
-      name: Notification target
-      description: "Notify service, e.g. notify.mobile_app_iphone"
+    notify_device:
+      name: Notification device
+      description: Mobile device to send the notification to
       selector:
-        text:
+        device:
+          integration: mobile_app
     title:
       name: Notification title
       description: Title of the notification
@@ -77,17 +78,20 @@ condition:
       {% endif %}
 
 action:
-  - service: !input notify_target
-    data:
-      title: !input title
-      message: >
-        {% set score = states(sensor) | default('?') %}
-        {% set profile = state_attr(sensor, 'profile_used') | default(none) %}
+  - variables:
+      sensor_id: !input sensor
+  - device_id: !input notify_device
+    domain: mobile_app
+    type: notify
+    title: !input title
+    message: >
+        {% set score = states(sensor_id) | default('?') %}
+        {% set profile = state_attr(sensor_id, 'profile_used') | default(none) %}
         Fishing score: {{ score }}/100
         Species: {{ profile.common_name | default('General profile') }}
         {% if include_conditions | default(false) %}
-        Waves: {{ state_attr(sensor, 'current_wave_height') | default('N/A') }}
-        Wind: {{ state_attr(sensor, 'current_wind_speed') | default('N/A') }}
+        Waves: {{ state_attr(sensor_id, 'current_wave_height') | default('N/A') }}
+        Wind: {{ state_attr(sensor_id, 'current_wind_speed') | default('N/A') }}
         {% endif %}
 
 mode: single
