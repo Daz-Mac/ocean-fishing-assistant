@@ -27,7 +27,6 @@ jobs:
               return loader.construct_scalar(node)
           yaml.SafeLoader.add_constructor('!input', ic)
           bp_dir = 'custom_components/ocean_fishing_assistant/blueprints'
-          ok = True
           for f in sorted(os.listdir(bp_dir)):
               if not f.endswith('.yaml'):
                   continue
