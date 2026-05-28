@@ -1,10 +1,5 @@
 # Changelog
 
-## [0.2.3] - 2026-05-28
-
-### Fixed
-- Daily briefing blueprint now also creates a persistent notification in HA so the full forecast content remains viewable after tapping the push notification
-
 ## [0.2.2] - 2026-05-28
 
 ### Fixed
