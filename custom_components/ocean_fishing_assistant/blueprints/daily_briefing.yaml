@@ -56,10 +56,8 @@ action:
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
         {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
 
-        Today's Fishing Forecast
-
         {% for key, data in periods | dictsort -%}
-          {%- set label = key | replace('period_', '') | replace('_', 'h-') -%}h
+          {%- set label = (key | replace('period_', '') | replace('_', '-')) + 'h' -%}
           {%- set s = data.score_100 | default(0) -%}
           {%- if s >= 70 %}{{ label }}: {{ s }} — Excellent!
           {%- elif s >= 50 %}{{ label }}: {{ s }} — Good
@@ -91,10 +89,8 @@ action:
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
         {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
 
-        Today's Fishing Forecast
-
         {% for key, data in periods | dictsort -%}
-          {%- set label = key | replace('period_', '') | replace('_', 'h-') -%}h
+          {%- set label = (key | replace('period_', '') | replace('_', '-')) + 'h' -%}
           {%- set s = data.score_100 | default(0) -%}
           {%- if s >= 70 %}{{ label }}: {{ s }} — Excellent!
           {%- elif s >= 50 %}{{ label }}: {{ s }} — Good
