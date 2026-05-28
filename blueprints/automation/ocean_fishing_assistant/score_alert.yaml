@@ -1,0 +1,93 @@
+blueprint:
+  name: Fishing Score Alert
+  description: >
+    Send a notification when the fishing score rises above a threshold.
+    Only fires on the rising edge (score crosses from below to above threshold),
+    so you won't get repeated alerts while conditions stay good.
+  domain: automation
+  input:
+    sensor:
+      name: Fishing score sensor
+      description: The Ocean Fishing Assistant sensor entity to monitor
+      selector:
+        entity:
+          domain: sensor
+    threshold:
+      name: Score threshold
+      description: Minimum score to trigger an alert (0-100)
+      default: 70
+      selector:
+        number:
+          min: 0.0
+          max: 100.0
+          step: 5.0
+          mode: slider
+    notify_target:
+      name: Notification target
+      description: "Notify service, e.g. notify.mobile_app_iphone"
+      selector:
+        text:
+    title:
+      name: Notification title
+      description: Title of the notification
+      default: "Good fishing conditions!"
+      selector:
+        text:
+    include_conditions:
+      name: Include current conditions
+      description: Add wave height and wind to the notification message
+      default: true
+      selector:
+        boolean:
+    quiet_hours_start:
+      name: Quiet hours start (optional)
+      description: "Only notify after this time, e.g. 07:00. Leave empty to disable."
+      default: ""
+      selector:
+        time:
+    quiet_hours_end:
+      name: Quiet hours end (optional)
+      description: "Only notify before this time, e.g. 21:00. Leave empty to disable."
+      default: ""
+      selector:
+        time:
+
+trigger:
+  - platform: numeric_state
+    entity_id: !input sensor
+    above: !input threshold
+
+condition:
+  # Rising-edge only: only fire if the previous state was below threshold
+  - condition: template
+    value_template: "{{ trigger.from_state.state | float(-1) < threshold }}"
+  # Availability guard: skip if sensor is unavailable
+  - condition: template
+    value_template: "{{ not is_state(sensor, 'unavailable') }}"
+  # Quiet hours: only notify within the configured time window
+  - condition: template
+    value_template: >
+      {% set start = quiet_hours_start | default('') %}
+      {% set end = quiet_hours_end | default('') %}
+      {% if start == '' or end == '' %}
+        true
+      {% else %}
+        {% set h = now().hour %}
+        {{ h >= start.split(':')[0] | int and h <= end.split(':')[0] | int }}
+      {% endif %}
+
+action:
+  - service: !input notify_target
+    data:
+      title: !input title
+      message: >
+        {% set score = states(sensor) | default('?') %}
+        {% set profile = state_attr(sensor, 'profile_used') | default(none) %}
+        Fishing score: {{ score }}/100
+        Species: {{ profile.common_name | default('General profile') }}
+        {% if include_conditions | default(false) %}
+        Waves: {{ state_attr(sensor, 'current_wave_height') | default('N/A') }}
+        Wind: {{ state_attr(sensor, 'current_wind_speed') | default('N/A') }}
+        {% endif %}
+
+mode: single

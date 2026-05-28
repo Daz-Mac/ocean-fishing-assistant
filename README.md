@@ -4,6 +4,9 @@ A Home Assistant integration that scores ocean fishing conditions by combining l
 
 ![Integration](https://img.shields.io/badge/HA-custom_component-blue) [![HACS validation](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/validate.yml/badge.svg)](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/validate.yml) [![Home Assistant validation](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/hassfest.yml/badge.svg)](https://github.com/Daz-Mac/ocean-fishing-assistant/actions/workflows/hassfest.yml)
 
+> **Requires a paid API key** — Tide predictions use [World Tides](https://www.worldtides.info/), a paid API.
+> Weather and marine data from Open-Meteo are free. See [Requirements](#requirements) for the cost breakdown.
+
 ## Features
 
 - **Fishing score** — 0-100 rating of current conditions based on 9 weighted factors
@@ -320,11 +323,12 @@ Add an entry to the `regions` object:
 
 Then reference it in species profile `regions` arrays.
 
-## Example Lovelace Dashboard
+## Documentation
 
-The integration works with HA's native entities and any card that can display sensor attributes. Here's a simple dashboard layout using the built-in entities card and [apexcharts-card](https://github.com/RomRider/apexcharts-card) for tide graphs:
-
-See [examples/lovelace-dashboard.yaml](examples/lovelace-dashboard.yaml) for a complete dashboard template.
+- [**Getting started**](docs/getting-started.md) — Install and configure your first fishing location
+- [**Understanding scores**](docs/understanding-scores.md) — How the 0-100 score is calculated
+- [**Configuring safety limits**](docs/configuring-safety.md) — Tune safety thresholds for your fishing style
+- [**Sensor attribute reference**](docs/sensor-attributes.md) — Complete list of sensor attributes for dashboards and automations
 
 ## Troubleshooting
 
@@ -371,8 +375,21 @@ See [examples/lovelace-dashboard.yaml](examples/lovelace-dashboard.yaml) for a c
 ## Requirements
 
 - **Home Assistant** 2025.12.5 or later
-- **World Tides API key** (free at https://www.worldtides.info)
+- **World Tides API key** — required for tide predictions. See cost breakdown below.
 - Python dependencies (installed automatically): skyfield, jplephem, numpy, timezonefinder
+
+### World Tides API cost
+
+The integration makes **~1 request/day/location** to the World Tides extremes endpoint (1 credit each), totalling **~30 credits/month per location** with default settings. Caches are in-memory and reset on Home Assistant restarts, so the estimate includes a generous margin for reboots.
+
+| Package | Cost | Credits | Est. duration (1 location) |
+|---------|------|---------|---------------------------|
+| Free (new users) | $0 | 100 | ~3 months |
+| **Pre-paid credits** | **$9.99** | **20,000** | **~55 years** |
+| Monthly subscription | $4.99/mo | 20,000/mo | 666× over-allotment |
+| Monthly subscription | $9.99/mo | 50,000/mo | 1,666× over-allotment |
+
+**Recommendation:** Buy the [$9.99 pre-paid credit package](https://www.worldtides.info/developer). At ~30 credits/month, it's a one-time purchase that lasts for decades. The monthly subscriptions provide far more credits than this integration needs.
 
 ## Technical Architecture
 

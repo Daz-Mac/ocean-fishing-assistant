@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0] - 2026-05-28
+
+### Added
+- Notification blueprints — 3 Home Assistant automation blueprints for score alerts, daily fishing briefing, and prime conditions detection
+- YAML validation of blueprints added to CI pipeline
+- User documentation: getting-started guide, score explanation, safety configuration, and sensor attribute reference
+- World Tides API cost breakdown and pricing recommendation in README headings
+- TODO list tracking for integration development
+
 ## [0.1.1] - 2026-05-27
 
 ### Added
