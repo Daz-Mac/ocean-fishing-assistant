@@ -79,6 +79,28 @@ async def async_setup_entry(hass, entry):
             except Exception as exc:
                 _LOGGER.warning("add_extra_js_url failed: %s", exc)
 
+    # Copy blueprints to HA config blueprint directory (one-time per HA start).
+    if not domain_store.get("_blueprints_registered"):
+        domain_store["_blueprints_registered"] = True
+        bp_src_dir = os.path.join(os.path.dirname(__file__), "blueprints")
+        bp_dst_dir = hass.config.path("blueprints/automation", DOMAIN)
+        try:
+            if not os.path.isdir(bp_src_dir):
+                _LOGGER.warning("Blueprints dir not found at %s", bp_src_dir)
+            else:
+                await hass.async_add_executor_job(os.makedirs, bp_dst_dir, 0o755, True)
+                for fname in os.listdir(bp_src_dir):
+                    if not fname.endswith(".yaml"):
+                        continue
+                    src = os.path.join(bp_src_dir, fname)
+                    dst = os.path.join(bp_dst_dir, fname)
+                    await hass.async_add_executor_job(shutil.copy2, src, dst)
+                    _LOGGER.debug("Copied blueprint %s", fname)
+                count = len([f for f in os.listdir(bp_src_dir) if f.endswith(".yaml")])
+                _LOGGER.info("Copied %d blueprints to %s", count, bp_dst_dir)
+        except Exception as exc:
+            _LOGGER.warning("Failed to copy blueprints: %s", exc)
+
     # Initialize cache persistence (idempotent — only loads from Store on first call).
     await cache_persistence.async_load_and_setup_persistence(hass, domain_store)
 

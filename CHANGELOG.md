@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-05-28
+
+### Fixed
+- Blueprints now deploy correctly on new HACS installations — moved inside `custom_components/` with auto-copy to HA blueprint directory on integration startup
+
 ## [0.2.0] - 2026-05-28
 
 ### Added
