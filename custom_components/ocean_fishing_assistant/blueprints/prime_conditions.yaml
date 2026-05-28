@@ -92,14 +92,16 @@ condition:
       {% endif %}
 
 action:
+  - variables:
+      sensor_id: !input sensor
   - service: !input notify_target
     data:
       title: !input title
       message: |-
-        {%- set forecast = state_attr(sensor, 'current_forecast') | default({}) -%}
+        {%- set forecast = state_attr(sensor_id, 'current_forecast') | default({}) -%}
         {%- set components = forecast.get('components', {}) -%}
-        {%- set profile = state_attr(sensor, 'profile_used') | default(none) -%}
-        {%- set score = states(sensor) | default('?') -%}
+        {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
+        {%- set score = states(sensor_id) | default('?') -%}
 
         Score: {{ score }}/100 — all clear, no warnings
 

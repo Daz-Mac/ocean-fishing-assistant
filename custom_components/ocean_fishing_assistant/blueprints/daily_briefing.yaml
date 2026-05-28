@@ -43,14 +43,16 @@ condition:
       {{ periods.keys() | length > 0 }}
 
 action:
+  - variables:
+      sensor_id: !input sensor
   - service: !input notify_target
     data:
       title: "Today's Fishing Forecast"
       message: |-
-        {%- set periods = state_attr(sensor, 'remainder_of_today_periods') | default({}) -%}
-        {%- set profile = state_attr(sensor, 'profile_used') | default(none) -%}
-        {%- set moon = state_attr(sensor, 'moon_phase_name') | default('Unknown') -%}
-        {%- set tomorrow = state_attr(sensor, 'next_5_day_periods') | default({}) -%}
+        {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
+        {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
+        {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
+        {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
 
         Today's Fishing Forecast
 

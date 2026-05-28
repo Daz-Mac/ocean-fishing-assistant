@@ -77,17 +77,19 @@ condition:
       {% endif %}
 
 action:
+  - variables:
+      sensor_id: !input sensor
   - service: !input notify_target
     data:
       title: !input title
       message: >
-        {% set score = states(sensor) | default('?') %}
-        {% set profile = state_attr(sensor, 'profile_used') | default(none) %}
+        {% set score = states(sensor_id) | default('?') %}
+        {% set profile = state_attr(sensor_id, 'profile_used') | default(none) %}
         Fishing score: {{ score }}/100
         Species: {{ profile.common_name | default('General profile') }}
         {% if include_conditions | default(false) %}
-        Waves: {{ state_attr(sensor, 'current_wave_height') | default('N/A') }}
-        Wind: {{ state_attr(sensor, 'current_wind_speed') | default('N/A') }}
+        Waves: {{ state_attr(sensor_id, 'current_wave_height') | default('N/A') }}
+        Wind: {{ state_attr(sensor_id, 'current_wind_speed') | default('N/A') }}
         {% endif %}
 
 mode: single
