@@ -18,11 +18,12 @@ blueprint:
       default: "06:00"
       selector:
         time:
-    notify_target:
-      name: Notification target
-      description: "Notify service, e.g. notify.mobile_app_iphone"
+    notify_device:
+      name: Notification device
+      description: Mobile device to send the notification to
       selector:
-        text:
+        device:
+          integration: mobile_app
     include_tomorrow:
       name: Include tomorrow
       description: Include tomorrow's best forecast in the briefing
@@ -45,10 +46,11 @@ condition:
 action:
   - variables:
       sensor_id: !input sensor
-  - service: !input notify_target
-    data:
-      title: "Today's Fishing Forecast"
-      message: |-
+  - device_id: !input notify_device
+    domain: mobile_app
+    type: notify
+    title: "Today's Fishing Forecast"
+    message: |-
         {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
         {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
