@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2] - 2026-05-28
+
+### Fixed
+- Blueprint message templates now use `variables:` block to fix "sensor is undefined" Jinja2 error on notify actions
+- Notification target switched from text input to device selector dropdown showing registered mobile devices
+
 ## [0.2.1] - 2026-05-28
 
 ### Fixed
