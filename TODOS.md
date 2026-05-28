@@ -11,7 +11,7 @@
 - [ ] Keep CI fast — scoring tests are pure logic, no network needed
 
 ## T6 — Notification blueprint
-- [x] Create `blueprints/automation/ocean_fishing_assistant/` with 3 blueprints:
+- [x] Create blueprints inside `custom_components/ocean_fishing_assistant/blueprints/` with auto-copy to HA blueprint directory on setup:
   - `score_alert.yaml` — rising-edge threshold alert with quiet hours
   - `daily_briefing.yaml` — morning period forecast briefing
   - `prime_conditions.yaml` — high score + no breaches alert
