@@ -93,5 +93,18 @@ action:
         Waves: {{ state_attr(sensor_id, 'current_wave_height') | default('N/A') }}
         Wind: {{ state_attr(sensor_id, 'current_wind_speed') | default('N/A') }}
         {% endif %}
+  - service: persistent_notification.create
+    data:
+      title: !input title
+      notification_id: fishing_score_alert
+      message: >
+        {% set score = states(sensor_id) | default('?') %}
+        {% set profile = state_attr(sensor_id, 'profile_used') | default(none) %}
+        Fishing score: {{ score }}/100
+        Species: {{ profile.common_name | default('General profile') }}
+        {% if include_conditions | default(false) %}
+        Waves: {{ state_attr(sensor_id, 'current_wave_height') | default('N/A') }}
+        Wind: {{ state_attr(sensor_id, 'current_wind_speed') | default('N/A') }}
+        {% endif %}
 
 mode: single

@@ -116,5 +116,26 @@ action:
         {% endfor %}
 
         Species: {{ profile.common_name | default('General profile') }}
+  - service: persistent_notification.create
+    data:
+      title: !input title
+      notification_id: prime_fishing_conditions
+      message: |-
+        {%- set forecast = state_attr(sensor_id, 'current_forecast') | default({}) -%}
+        {%- set components = forecast.get('components', {}) -%}
+        {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
+        {%- set score = states(sensor_id) | default('?') -%}
+
+        Score: {{ score }}/100 — all clear, no warnings
+
+        {% for factor, data in components | dictsort -%}
+          {%- set fs = data.get('score_100', '?') -%}
+          {%- if fs >= 70 %}✅ {{ factor }}: {{ fs }}
+          {%- elif fs >= 50 %}⚠️ {{ factor }}: {{ fs }}
+          {%- else %}❌ {{ factor }}: {{ fs }}
+          {%- endif -%}
+        {% endfor %}
+
+        Species: {{ profile.common_name | default('General profile') }}
 
 mode: single

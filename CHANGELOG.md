@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.4] - 2026-05-28
+
+### Fixed
+- All three notification blueprints now also create a persistent HA notification so the full message content is viewable after tapping the push notification (daily_briefing, score_alert, prime_conditions)
+
 ## [0.2.2] - 2026-05-28
 
 ### Fixed
