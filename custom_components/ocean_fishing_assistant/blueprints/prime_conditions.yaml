@@ -112,7 +112,7 @@ action:
           {%- if fs >= 70 %}✅ {{ factor }}: {{ fs }}
           {%- elif fs >= 50 %}⚠️ {{ factor }}: {{ fs }}
           {%- else %}❌ {{ factor }}: {{ fs }}
-          {%- endif -%}
+          {%- endif %}
         {% endfor %}
 
         Species: {{ profile.common_name | default('General profile') }}
@@ -133,7 +133,7 @@ action:
           {%- if fs >= 70 %}✅ {{ factor }}: {{ fs }}
           {%- elif fs >= 50 %}⚠️ {{ factor }}: {{ fs }}
           {%- else %}❌ {{ factor }}: {{ fs }}
-          {%- endif -%}
+          {%- endif %}
         {% endfor %}
 
         Species: {{ profile.common_name | default('General profile') }}

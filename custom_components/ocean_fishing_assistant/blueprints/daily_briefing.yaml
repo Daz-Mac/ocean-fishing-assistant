@@ -62,7 +62,7 @@ action:
           {%- if s >= 70 %}{{ label }}: {{ s }} — Excellent!
           {%- elif s >= 50 %}{{ label }}: {{ s }} — Good
           {%- else %}{{ label }}: {{ s }} — Fair
-          {%- endif -%}
+          {%- endif %}
         {% endfor %}
 
         Moon: {{ moon }}
@@ -95,7 +95,7 @@ action:
           {%- if s >= 70 %}{{ label }}: {{ s }} — Excellent!
           {%- elif s >= 50 %}{{ label }}: {{ s }} — Good
           {%- else %}{{ label }}: {{ s }} — Fair
-          {%- endif -%}
+          {%- endif %}
         {% endfor %}
 
         Moon: {{ moon }}
