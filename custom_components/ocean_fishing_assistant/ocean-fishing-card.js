@@ -1,7 +1,5 @@
 // Ocean Fishing Assistant — Lovelace Custom Card
-// Minimal implementation for debugging
-
-console.log('[OceanFishingCard] Module loaded');
+// Only enable verbose console logging when raw_output_enabled is set
 
 /* ---- Styles ---- */
 const styles = `
@@ -185,9 +183,11 @@ class OceanFishingCard extends HTMLElement {
       return;
     }
 
-    console.log('[OceanFishingCard] Rendering with state:', stateObj.state, 'attrs:', Object.keys(stateObj.attributes));
-    console.log('[OceanFishingCard] today periods:', Object.keys(stateObj.attributes.remainder_of_today_periods || {}).length);
-    console.log('[OceanFishingCard] next5 days:', Object.keys(stateObj.attributes.next_5_day_periods || {}).length);
+    if (stateObj.attributes.raw_output_enabled) {
+      console.log('[OceanFishingCard] Rendering with state:', stateObj.state, 'attrs:', Object.keys(stateObj.attributes));
+      console.log('[OceanFishingCard] today periods:', Object.keys(stateObj.attributes.remainder_of_today_periods || {}).length);
+      console.log('[OceanFishingCard] next5 days:', Object.keys(stateObj.attributes.next_5_day_periods || {}).length);
+    }
 
     const html = `<style>${styles}</style>` + buildCard(stateObj, this._config);
     this._shadow.innerHTML = html;
@@ -251,4 +251,4 @@ customElements.define('ocean-fishing-card', OceanFishingCard);
 window.customCards = window.customCards || [];
 window.customCards.push({ type: 'ocean-fishing-card', name: 'Ocean Fishing Assistant', description: 'Fishing conditions', preview: false });
 
-console.log('[OceanFishingCard] Registered');
+// Registered — no startup log needed unless raw_output_enabled is active
