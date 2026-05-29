@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.5] - 2026-05-29
+
+### Fixed
+- Notification period labels no longer show malformed text (e.g. "h18h-24" → "18-24h") in daily briefing
+- Duplicated "Today's Fishing Forecast" title removed from daily briefing notification body
+- Period lines now render on separate lines instead of concatenating in daily briefing and prime conditions notifications
+- `{%- endif -%}` changed to `{%- endif %}` inside for-loop templates to preserve newlines between iterations
+
+### Changed
+- Updated GitHub Actions workflows to Node.js 24 compatible versions (actions/checkout@v6, softprops/action-gh-release@v3)
+
 ## [0.2.4] - 2026-05-28
 
 ### Fixed
