@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.6] - 2026-05-29
+
+### Added
+- Scoring engine test coverage — 116 tests covering all 8 factors, safety capping, breach detection, and weight normalization
+- Data formatter test coverage — 22 tests covering payload validation, unit conversion, and period building
+- CI pipeline now runs all tests on every push and PR
+- Browser console debug logging is now tied to the "Enable raw data" config option — off by default, on when debugging
+
+### Fixed
+- Swell safety capping was silently broken — `_SAFETY_COMPONENT_MAP` prefix "swell" didn't match the reason code "swell_period<8.0"
+- Unnecessary browser console messages removed from the Lovelace custom card
+
 ## [0.2.5] - 2026-05-29
 
 ### Fixed
