@@ -37,3 +37,7 @@ jobs:
               print(f'  OK: {name}')
           print('All blueprints valid')
           "
+      - name: Run scoring and formatter tests
+        run: |
+          pip install pytest
+          python3 -m pytest tests/test_scoring.py tests/test_formatter.py tests/test_safety.py -v

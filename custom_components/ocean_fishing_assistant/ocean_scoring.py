@@ -769,7 +769,7 @@ def compute_score(
         "wind": ("wind", 0.0, 3.0),
         "wave": ("waves", 0.0, 3.0),
         "gust": ("wind", 0.0, 3.0),
-        "swell": ("waves", 0.0, 3.0),
+        "swell_period": ("waves", 0.0, 3.0),
     }
     for rc in reason_codes:
         for prefix, (comp_key, unsafe_cap, caution_cap) in _SAFETY_COMPONENT_MAP.items():

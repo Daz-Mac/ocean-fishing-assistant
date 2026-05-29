@@ -29,8 +29,8 @@ sys.modules["homeassistant.util"] = ha.util
 sys.modules["homeassistant.util.dt"] = ha.util.dt
 sys.modules["homeassistant.data_entry_flow"] = ha.data_entry_flow
 
-# Mock external dependencies
-for mod_name in ("aiohttp", "skyfield", "voluptuous", "zoneinfo"):
+# Mock external dependencies (zoneinfo is stdlib since Python 3.9 — always available)
+for mod_name in ("aiohttp", "skyfield", "voluptuous"):
     sys.modules[mod_name] = types.ModuleType(mod_name)
 
 # Add custom_components to path
