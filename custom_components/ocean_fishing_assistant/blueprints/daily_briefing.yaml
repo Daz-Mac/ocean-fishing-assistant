@@ -58,7 +58,7 @@ action:
         {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
         {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
-        {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
+        {%- set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) -%}
 
         {% for key, data in periods | dictsort -%}
           {%- set label = (key | replace('period_', '') | replace('_', '-')) + 'h' -%}
@@ -70,6 +70,9 @@ action:
         {% endfor %}
 
         Moon: {{ moon }}
+        {%- if high_tide is not none and high_tide.timestamp is defined %}
+        Next high tide: {{ high_tide.timestamp | as_timestamp | timestamp_custom('%H:%M') }}
+        {%- endif %}
         Species: {{ profile.common_name | default('General profile') }}
         {%- if include_tomorrow | default(false) and tomorrow.keys() | length > 0 %}
           {%- set today = now().date() -%}
@@ -91,7 +94,7 @@ action:
         {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
         {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
-        {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
+        {%- set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) -%}
 
         {% for key, data in periods | dictsort -%}
           {%- set label = (key | replace('period_', '') | replace('_', '-')) + 'h' -%}
@@ -103,6 +106,9 @@ action:
         {% endfor %}
 
         Moon: {{ moon }}
+        {%- if high_tide is not none and high_tide.timestamp is defined %}
+        Next high tide: {{ high_tide.timestamp | as_timestamp | timestamp_custom('%H:%M') }}
+        {%- endif %}
         Species: {{ profile.common_name | default('General profile') }}
         {%- if include_tomorrow | default(false) and tomorrow.keys() | length > 0 %}
           {%- set today = now().date() -%}

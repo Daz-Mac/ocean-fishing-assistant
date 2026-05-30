@@ -41,6 +41,13 @@ function barColor(s) {
   if (s < 70) return '#fdd835';
   return '#43a047';
 }
+
+function formatTime(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
 const factorLabels = { tide:'Tide', wind:'Wind', wind_direction:'Wind Dir', waves:'Waves', time:'Time', pressure:'Pressure', season:'Season', moon:'Moon', temperature:'Temp' };
 
 function buildCard(a, config) {
@@ -53,6 +60,7 @@ function buildCard(a, config) {
   const comps = cf.components || {};
   const moon = attrs.moon_phase_name || (comps.moon ? comps.moon.moon_phase_name : null);
   const profile = attrs.profile_used || {};
+  const nextHigh = attrs.next_high_tide || null;
   const label = score >= 70 ? 'Excellent' : score >= 50 ? 'Fair' : 'Poor';
   const pct = 100 - Math.min(Math.max(score || 0, 0), 100);
   // All 9 factor scores from current_forecast components
@@ -143,7 +151,7 @@ function buildCard(a, config) {
         </div>
         ` : `<div class="empty">No forecast data</div>`) : ''}
 
-        <div class="footer">${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} &middot; ` : ''}Data: Open-Meteo, World Tides</div>
+        <div class="footer">${formatTime(nextHigh?.timestamp) ? `🌊 Next high tide: ${formatTime(nextHigh.timestamp)} &middot; ` : ''}${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} &middot; ` : ''}Data: Open-Meteo, World Tides</div>
       </div>
     </ha-card>
   `;
