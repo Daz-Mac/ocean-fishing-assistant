@@ -37,6 +37,7 @@ trigger:
 
 variables:
   sensor: !input sensor
+  include_tomorrow: !input include_tomorrow
 
 condition:
   - condition: template
