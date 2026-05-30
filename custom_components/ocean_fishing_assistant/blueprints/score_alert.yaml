@@ -58,6 +58,9 @@ trigger:
     entity_id: !input sensor
     above: !input threshold
 
+variables:
+  sensor: !input sensor
+
 condition:
   # Rising-edge only: only fire if the previous state was below threshold
   - condition: template

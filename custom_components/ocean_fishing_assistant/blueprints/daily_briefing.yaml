@@ -35,6 +35,9 @@ trigger:
   - platform: time
     at: !input trigger_time
 
+variables:
+  sensor: !input sensor
+
 condition:
   - condition: template
     value_template: "{{ not is_state(sensor, 'unavailable') }}"

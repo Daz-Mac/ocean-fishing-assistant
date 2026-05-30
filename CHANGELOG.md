@@ -11,6 +11,7 @@
 ### Fixed
 - Swell safety capping was silently broken — `_SAFETY_COMPONENT_MAP` prefix "swell" didn't match the reason code "swell_period<8.0"
 - Unnecessary browser console messages removed from the Lovelace custom card
+- All three notification blueprints now define `sensor` in a top-level `variables` block so condition templates can resolve it — previously conditions failed with "sensor is undefined" on trigger
 
 ## [0.2.5] - 2026-05-29
 
