@@ -58,6 +58,9 @@ trigger:
     entity_id: !input sensor
     above: !input threshold
 
+variables:
+  sensor: !input sensor
+
 condition:
   # Rising-edge only: only fire if the previous state was below threshold
   - condition: template
@@ -87,8 +90,12 @@ action:
     message: >
         {% set score = states(sensor_id) | default('?') %}
         {% set profile = state_attr(sensor_id, 'profile_used') | default(none) %}
+        {% set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) %}
         Fishing score: {{ score }}/100
         Species: {{ profile.common_name | default('General profile') }}
+        {% if high_tide is not none and high_tide.timestamp is defined %}
+        Next high tide: {{ high_tide.timestamp | as_timestamp | timestamp_custom('%H:%M') }}
+        {% endif %}
         {% if include_conditions | default(false) %}
         Waves: {{ state_attr(sensor_id, 'current_wave_height') | default('N/A') }}
         Wind: {{ state_attr(sensor_id, 'current_wind_speed') | default('N/A') }}
@@ -100,8 +107,12 @@ action:
       message: >
         {% set score = states(sensor_id) | default('?') %}
         {% set profile = state_attr(sensor_id, 'profile_used') | default(none) %}
+        {% set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) %}
         Fishing score: {{ score }}/100
         Species: {{ profile.common_name | default('General profile') }}
+        {% if high_tide is not none and high_tide.timestamp is defined %}
+        Next high tide: {{ high_tide.timestamp | as_timestamp | timestamp_custom('%H:%M') }}
+        {% endif %}
         {% if include_conditions | default(false) %}
         Waves: {{ state_attr(sensor_id, 'current_wave_height') | default('N/A') }}
         Wind: {{ state_attr(sensor_id, 'current_wind_speed') | default('N/A') }}

@@ -59,6 +59,9 @@ trigger:
     entity_id: !input sensor
     above: !input threshold
 
+variables:
+  sensor: !input sensor
+
 condition:
   # Rising-edge: only fire if previous state was below threshold
   - condition: template
@@ -115,7 +118,11 @@ action:
           {%- endif %}
         {% endfor %}
 
+        {%- set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) -%}
         Species: {{ profile.common_name | default('General profile') }}
+        {%- if high_tide is not none and high_tide.timestamp is defined %}
+        Next high tide: {{ high_tide.timestamp | as_timestamp | timestamp_custom('%H:%M') }}
+        {%- endif %}
   - service: persistent_notification.create
     data:
       title: !input title
@@ -136,7 +143,11 @@ action:
           {%- endif %}
         {% endfor %}
 
+        {%- set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) -%}
         Species: {{ profile.common_name | default('General profile') }}
+        {%- if high_tide is not none and high_tide.timestamp is defined %}
+        Next high tide: {{ high_tide.timestamp | as_timestamp | timestamp_custom('%H:%M') }}
+        {%- endif %}
   - service: persistent_notification.create
     data:
       title: !input title

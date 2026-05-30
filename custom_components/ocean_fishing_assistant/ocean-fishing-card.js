@@ -1,7 +1,5 @@
 // Ocean Fishing Assistant — Lovelace Custom Card
-// Minimal implementation for debugging
-
-console.log('[OceanFishingCard] Module loaded');
+// Only enable verbose console logging when raw_output_enabled is set
 
 /* ---- Styles ---- */
 const styles = `
@@ -43,6 +41,13 @@ function barColor(s) {
   if (s < 70) return '#fdd835';
   return '#43a047';
 }
+
+function formatTime(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
 const factorLabels = { tide:'Tide', wind:'Wind', wind_direction:'Wind Dir', waves:'Waves', time:'Time', pressure:'Pressure', season:'Season', moon:'Moon', temperature:'Temp' };
 
 function buildCard(a, config) {
@@ -55,6 +60,7 @@ function buildCard(a, config) {
   const comps = cf.components || {};
   const moon = attrs.moon_phase_name || (comps.moon ? comps.moon.moon_phase_name : null);
   const profile = attrs.profile_used || {};
+  const nextHigh = attrs.next_high_tide || null;
   const label = score >= 70 ? 'Excellent' : score >= 50 ? 'Fair' : 'Poor';
   const pct = 100 - Math.min(Math.max(score || 0, 0), 100);
   // All 9 factor scores from current_forecast components
@@ -145,7 +151,7 @@ function buildCard(a, config) {
         </div>
         ` : `<div class="empty">No forecast data</div>`) : ''}
 
-        <div class="footer">${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} &middot; ` : ''}Data: Open-Meteo, World Tides</div>
+        <div class="footer">${formatTime(nextHigh?.timestamp) ? `🌊 Next high tide: ${formatTime(nextHigh.timestamp)} &middot; ` : ''}${profile.common_name ? `${profile.common_name}${profile.scientific_name ? ` (${profile.scientific_name})` : ''} &middot; ` : ''}Data: Open-Meteo, World Tides</div>
       </div>
     </ha-card>
   `;
@@ -185,9 +191,11 @@ class OceanFishingCard extends HTMLElement {
       return;
     }
 
-    console.log('[OceanFishingCard] Rendering with state:', stateObj.state, 'attrs:', Object.keys(stateObj.attributes));
-    console.log('[OceanFishingCard] today periods:', Object.keys(stateObj.attributes.remainder_of_today_periods || {}).length);
-    console.log('[OceanFishingCard] next5 days:', Object.keys(stateObj.attributes.next_5_day_periods || {}).length);
+    if (stateObj.attributes.raw_output_enabled) {
+      console.log('[OceanFishingCard] Rendering with state:', stateObj.state, 'attrs:', Object.keys(stateObj.attributes));
+      console.log('[OceanFishingCard] today periods:', Object.keys(stateObj.attributes.remainder_of_today_periods || {}).length);
+      console.log('[OceanFishingCard] next5 days:', Object.keys(stateObj.attributes.next_5_day_periods || {}).length);
+    }
 
     const html = `<style>${styles}</style>` + buildCard(stateObj, this._config);
     this._shadow.innerHTML = html;
@@ -251,4 +259,4 @@ customElements.define('ocean-fishing-card', OceanFishingCard);
 window.customCards = window.customCards || [];
 window.customCards.push({ type: 'ocean-fishing-card', name: 'Ocean Fishing Assistant', description: 'Fishing conditions', preview: false });
 
-console.log('[OceanFishingCard] Registered');
+// Registered — no startup log needed unless raw_output_enabled is active
