@@ -58,6 +58,7 @@ action:
         {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
         {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
+        {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
         {%- set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) -%}
 
         {% for key, data in periods | dictsort -%}
@@ -94,6 +95,7 @@ action:
         {%- set periods = state_attr(sensor_id, 'remainder_of_today_periods') | default({}) -%}
         {%- set profile = state_attr(sensor_id, 'profile_used') | default(none) -%}
         {%- set moon = state_attr(sensor_id, 'moon_phase_name') | default('Unknown') -%}
+        {%- set tomorrow = state_attr(sensor_id, 'next_5_day_periods') | default({}) -%}
         {%- set high_tide = state_attr(sensor_id, 'next_high_tide') | default(none) -%}
 
         {% for key, data in periods | dictsort -%}
