@@ -30,7 +30,6 @@ const styles = `
   .rbar-wrap { flex: 1; height: 10px; background: var(--secondary-background-color, #f0f0f0); border-radius: 5px; overflow: hidden; }
   .rbar { height: 100%; border-radius: 5px; }
   .rscore { font-weight: 600; width: 24px; text-align: right; }
-  .rtide { font-size: 11px; color: var(--secondary-text-color); width: 14px; text-align: center; }
   .empty { font-size: 12px; color: var(--secondary-text-color); padding: 8px; text-align: center; }
 
   .footer { border-top: 1px solid var(--divider-color, rgba(0,0,0,0.08)); padding-top: 6px; margin-top: 4px; font-size: 11px; color: var(--secondary-text-color); text-align: center; opacity: 0.7; }
@@ -138,13 +137,11 @@ function buildCard(a, config) {
         <div class="section-title">Forecast <span style="font-weight:400;font-size:11px;color:var(--secondary-text-color)">(tap row for details)</span></div>
         <div id="forecast-container" data-rows='${rowsData}'>
         ${display.map((r, i) => {
-          const tide = r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : '';
           return `<div class="row" data-idx="${i}">
             <span class="rdate">${r.d}</span>
             <span class="rper">${r.p}</span>
             <div class="rbar-wrap"><div class="rbar" style="width:${Math.min(r.s||0,100)}%;background:${barColor(r.s)}"></div></div>
             <span class="rscore" style="color:${barColor(r.s)}">${r.s != null ? r.s : '--'}</span>
-            ${tide ? `<span class="rtide">${tide}</span>` : ''}
           </div>
           <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px"></div>`;
         }).join('')}
@@ -174,6 +171,7 @@ class OceanFishingCard extends HTMLElement {
     this._config = {};
     this._shadow = this.attachShadow({ mode: 'open' });
     this._shadow.innerHTML = `<style>${styles}</style>`;
+    this._expandedRow = null;
   }
 
   _render() {
@@ -214,6 +212,7 @@ class OceanFishingCard extends HTMLElement {
         if (!detail) return;
         if (detail.style.display !== 'none') {
           detail.style.display = 'none';
+          this._expandedRow = null;
           return;
         }
         // Build detail content from components
@@ -236,7 +235,34 @@ class OceanFishingCard extends HTMLElement {
         if (r.t) content += `<div style="margin-top:4px;color:var(--secondary-text-color);font-size:10px">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</div>`;
         detail.innerHTML = content;
         detail.style.display = 'block';
+        this._expandedRow = idx;
       });
+
+      // Restore expanded row after re-render
+      if (this._expandedRow !== null) {
+        const detail = this._shadow.getElementById(`detail-${this._expandedRow}`);
+        if (detail && rowsData[this._expandedRow]) {
+          const r = rowsData[this._expandedRow];
+          let content = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px">`;
+          if (r.c) {
+            for (const [fk, fv] of Object.entries(r.c)) {
+              const name = factorLabels[fk] || fk;
+              const sc = fv.score_100 != null ? fv.score_100 : '--';
+              const color = barColor(sc);
+              content += `<div style="display:flex;justify-content:space-between">
+                <span>${name}</span>
+                <span style="color:${color};font-weight:500">${sc}</span>
+              </div>`;
+            }
+          }
+          content += `</div>`;
+          if (r.t) content += `<div style="margin-top:4px;color:var(--secondary-text-color);font-size:10px">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</div>`;
+          detail.innerHTML = content;
+          detail.style.display = 'block';
+        } else {
+          this._expandedRow = null;
+        }
+      }
     }
   }
 
