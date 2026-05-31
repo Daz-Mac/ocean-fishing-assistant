@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7] - 2026-05-31
+
+### Fixed
+- Tide arrows (↑/↓) removed from forecast rows — unclear to end users. Tide phase still visible when tapping a row for details
+- Forecast detail popup no longer closes by itself after ~1 second on sensor refresh — expanded state is now preserved across Home Assistant re-renders
+- Restored missing `tomorrow` variable in daily briefing blueprint that caused "tomorrow is undefined" error
+
 ## [0.2.6] - 2026-05-29
 
 ### Added
