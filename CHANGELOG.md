@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.8] - 2026-06-03
+
+### Fixed
+- Blueprint directory listing during integration setup no longer triggers "Detected blocking call to listdir" in Home Assistant logs — synchronous `os.listdir()` calls are now properly offloaded to the async executor
+
 ## [0.2.7] - 2026-05-31
 
 ### Fixed
