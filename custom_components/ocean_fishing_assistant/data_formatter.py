@@ -279,6 +279,11 @@ class DataFormatter:
                         canonical["tide_phase"] = list(v)
                     else:
                         raise ValueError("tide_phase must be an array aligned to timestamps (strict)")
+                elif k in ("nearest_high_hours", "nearest_low_hours"):
+                    if isinstance(v, (list, tuple)):
+                        canonical[k] = [float(x) if x is not None else None for x in v]
+                    else:
+                        raise ValueError(f"{k} must be an array aligned to timestamps (strict)")
                 else:
                     # keep other tide keys under canonical['tide']
                     tide_copy[k] = list(v) if isinstance(v, (list, tuple)) else v
