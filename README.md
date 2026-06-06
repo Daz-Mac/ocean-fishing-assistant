@@ -25,7 +25,7 @@ A Home Assistant integration that scores ocean fishing conditions by combining l
 
 | Factor | Default weight | Description |
 |--------|---------------|-------------|
-| Tide | 25% | How well the tide phase (rising/falling/high) matches species preferences |
+| Tide | 25% | How well tide conditions match species preferences — phase (rising/falling) and proximity to high/low tide extremes |
 | Waves | 15% | Wave height relative to species tolerance and safety limits |
 | Time of day | 15% | How well the time matches species preferred feeding times (dawn/dusk periods, specific hours) |
 | Wind | 10% | Wind speed relative to species preferences |

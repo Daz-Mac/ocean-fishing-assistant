@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.9] - 2026-06-06
+
+### Fixed
+- Species profiles with `preferred_tide_phase: ["high"]` (including the default
+  general profile) now correctly score proximity to high tide instead of always
+  returning 30/100. TideProxy now exposes each timestamp's distance to the
+  nearest high/low extreme, and the scoring engine uses this for proximity-based
+  scoring with a ±1.5-hour window.
+
+### Added
+- Tide proximity scoring: species with `"high"` or `"low"` tide preferences now get
+  scored based on how close they are to the actual high/low tide event (within a
+  ±1.5-hour window), rather than a flat 30/100
+- 11 new unit tests covering tide proximity scoring for high/low windows,
+  combined phase+proximity preferences, and backward-compatible fallback
+- Tide score bar and numeric value in the forecast row detail popup in the
+  Lovelace custom card
+
 ## [0.2.8] - 2026-06-03
 
 ### Fixed

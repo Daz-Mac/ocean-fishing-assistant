@@ -25,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 from zoneinfo import ZoneInfo
 
 from . import unit_helpers
+from .const import TIDE_HIGH_WINDOW_HOURS
 from .moon_utils import coerce_phase, matches_moon_preference
 from .safety import SafetyValidator
 
@@ -391,7 +392,7 @@ def compute_score(
 
     comp: Dict[str, Any] = {}
 
-    # TIDE component — phase-based only (and tolerant "any" token)
+    # TIDE component — phase + proximity scoring
     pref_tide_phase_raw = profile.get("preferred_tide_phase", []) or []
     # normalize and treat "any"/"none" as no preference
     pref_tide_phase = [str(p).strip().lower() for p in (pref_tide_phase_raw or []) if str(p).strip().lower() not in ("any", "none", "")]
@@ -410,14 +411,60 @@ def compute_score(
         else:
             tide_phase_val = tp
 
-    # Strict: if pref_tide_phase specified (non-empty after filtering), tide_phase MUST be present and be a string.
-    if pref_tide_phase:
+    # Categorize preferences into phase-based, proximity-based, and unknown
+    phase_only_prefs = [p for p in pref_tide_phase if p in ("rising", "falling", "flat")]
+    proximity_prefs = [p for p in pref_tide_phase if p in ("high", "low")]
+    other_prefs = [p for p in pref_tide_phase if p not in ("rising", "falling", "flat", "high", "low")]
+
+    # Strict: if phase-based prefs exist, tide_phase_val must be present
+    if phase_only_prefs:
         if tide_phase_val is None or not isinstance(tide_phase_val, str):
             raise MissingDataError("tide_phase (string) required by species profile but missing or not a string")
-        matched = any(str(pref).lower() == str(tide_phase_val).lower() for pref in pref_tide_phase)
-        tide_score = 10.0 if matched else 3.0
+
+    tide_scores: List[float] = []
+
+    # Phase-based scoring (rising/falling/flat)
+    if phase_only_prefs:
+        matched = any(str(pref).lower() == str(tide_phase_val).lower() for pref in phase_only_prefs)
+        tide_scores.append(10.0 if matched else 3.0)
+
+    # Proximity-based scoring for "high" and "low"
+    _proximity_window = float(TIDE_HIGH_WINDOW_HOURS)
+
+    def _proximity_score(dist_hours: float) -> float:
+        """Score proximity to an extreme: 10 at 0h, tapering to 3.0 at window."""
+        if dist_hours >= _proximity_window:
+            return 3.0
+        return 3.0 + 7.0 * (1.0 - dist_hours / _proximity_window)
+
+    if "high" in proximity_prefs:
+        nh_arr = data.get("nearest_high_hours")
+        nh_val = nh_arr[use_index] if isinstance(nh_arr, (list, tuple)) and use_index < len(nh_arr) else None
+        if nh_val is not None and nh_val >= 0:
+            tide_scores.append(_proximity_score(float(nh_val)))
+        elif tide_phase_val is not None and isinstance(tide_phase_val, str):
+            # No proximity data — fall back to string matching (backward compat)
+            tide_scores.append(10.0 if "high" == str(tide_phase_val).lower() else 3.0)
+
+    if "low" in proximity_prefs:
+        nl_arr = data.get("nearest_low_hours")
+        nl_val = nl_arr[use_index] if isinstance(nl_arr, (list, tuple)) and use_index < len(nl_arr) else None
+        if nl_val is not None and nl_val >= 0:
+            tide_scores.append(_proximity_score(float(nl_val)))
+        elif tide_phase_val is not None and isinstance(tide_phase_val, str):
+            tide_scores.append(10.0 if "low" == str(tide_phase_val).lower() else 3.0)
+
+    # Unknown preferences — try string matching against tide_phase_val
+    if other_prefs:
+        if tide_phase_val is None or not isinstance(tide_phase_val, str):
+            raise MissingDataError("tide_phase required for phase preference matching")
+        matched = any(str(pref).lower() == str(tide_phase_val).lower() for pref in other_prefs)
+        tide_scores.append(10.0 if matched else 3.0)
+
+    if tide_scores:
+        tide_score = float(sum(tide_scores)) / float(len(tide_scores))
     else:
-        # No preference -> maximum score (do not penalize missing tide phase)
+        # No preferences after filtering (e.g., only "any"/"none")
         tide_score = 10.0
     tide_score = _clamp_0_10(tide_score)
     comp_tide: Dict[str, Any] = {"score_10": round(tide_score, 3), "score_100": int(round(tide_score * 10))}
