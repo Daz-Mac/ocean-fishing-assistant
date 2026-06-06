@@ -503,6 +503,87 @@ def test_tide_missing_phase_with_preference():
         pass
 
 
+# ---- Tide proximity scoring ----
+
+def _prox_payload(**overrides):
+    """Build payload with nearest_high_hours / nearest_low_hours."""
+    p = _build_payload()
+    p["nearest_high_hours"] = [6.0]  # far from high by default
+    p["nearest_low_hours"] = [6.0]
+    p.update(overrides)
+    return p
+
+
+def test_tide_high_proximity_at_peak():
+    profile = _build_profile(preferred_tide_phase=["high"])
+    result = compute_score(_prox_payload(nearest_high_hours=[0.0]), species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 100
+
+
+def test_tide_high_proximity_mid_window():
+    profile = _build_profile(preferred_tide_phase=["high"])
+    result = compute_score(_prox_payload(nearest_high_hours=[0.75]), species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 65
+
+
+def test_tide_high_proximity_at_boundary():
+    profile = _build_profile(preferred_tide_phase=["high"])
+    result = compute_score(_prox_payload(nearest_high_hours=[1.5]), species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 30
+
+
+def test_tide_high_proximity_beyond_window():
+    profile = _build_profile(preferred_tide_phase=["high"])
+    result = compute_score(_prox_payload(nearest_high_hours=[3.0]), species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 30
+
+
+def test_tide_low_proximity_at_peak():
+    profile = _build_profile(preferred_tide_phase=["low"])
+    result = compute_score(_prox_payload(nearest_low_hours=[0.0]), species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 100
+
+
+def test_tide_low_proximity_at_boundary():
+    profile = _build_profile(preferred_tide_phase=["low"])
+    result = compute_score(_prox_payload(nearest_low_hours=[1.5]), species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 30
+
+
+def test_tide_combined_rising_high_good():
+    """Both rising phase and near high tide — scores average high."""
+    profile = _build_profile(preferred_tide_phase=["rising", "high"])
+    payload = _prox_payload(tide_phase=["rising"], nearest_high_hours=[0.25])
+    result = compute_score(payload, species_profile=profile)
+    # avg(phase=100, proximity=~88) = ~94
+    assert result["components"]["tide"]["score_100"] == 94
+
+
+def test_tide_combined_rising_high_phase_misses():
+    """Falling tide phase doesn't match 'rising', but proximity to high carries it."""
+    profile = _build_profile(preferred_tide_phase=["rising", "high"])
+    payload = _prox_payload(tide_phase=["falling"], nearest_high_hours=[0.25])
+    result = compute_score(payload, species_profile=profile)
+    # avg(phase=30, proximity=~88) = ~59
+    assert result["components"]["tide"]["score_100"] == 59
+
+
+def test_tide_high_no_proximity_data_fallback_match():
+    """No nearest_high_hours — falls back to string matching tide_phase."""
+    profile = _build_profile(preferred_tide_phase=["high"])
+    payload = _build_payload(tide_phase=["high"])
+    result = compute_score(payload, species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 100
+
+
+def test_tide_high_no_proximity_data_fallback_no_match():
+    """No nearest_high_hours and tide_phase doesn't match 'high' — score 30."""
+    profile = _build_profile(preferred_tide_phase=["high"])
+    payload = _build_payload(tide_phase=["rising"])
+    result = compute_score(payload, species_profile=profile)
+    assert result["components"]["tide"]["score_100"] == 30
+
+
 # ---- Wind scoring ----
 
 def test_wind_within_preference():
