@@ -232,7 +232,14 @@ class OceanFishingCard extends HTMLElement {
           content += `<div style="grid-column:1/-1;color:var(--secondary-text-color)">No detail data</div>`;
         }
         content += `</div>`;
-        if (r.t) content += `<div style="margin-top:4px;color:var(--secondary-text-color);font-size:10px">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</div>`;
+        if (r.t) {
+          const ts = r.c && r.c.tide && r.c.tide.score_100;
+          const tc = ts != null ? barColor(ts) : '';
+          content += `<div style="margin-top:4px;font-size:10px;display:flex;align-items:center;gap:4px">
+            <span style="color:var(--secondary-text-color)">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</span>
+            ${ts != null ? `<div style="flex:1;height:6px;background:var(--secondary-background-color,#f0f0f0);border-radius:3px;overflow:hidden;max-width:50px"><div style="height:100%;width:${Math.min(ts,100)}%;background:${tc};border-radius:3px"></div></div><span style="color:${tc};font-weight:500">${ts}</span>` : ''}
+          </div>`;
+        }
         detail.innerHTML = content;
         detail.style.display = 'block';
         this._expandedRow = idx;
@@ -256,7 +263,14 @@ class OceanFishingCard extends HTMLElement {
             }
           }
           content += `</div>`;
-          if (r.t) content += `<div style="margin-top:4px;color:var(--secondary-text-color);font-size:10px">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</div>`;
+          if (r.t) {
+            const ts = r.c && r.c.tide && r.c.tide.score_100;
+            const tc = ts != null ? barColor(ts) : '';
+            content += `<div style="margin-top:4px;font-size:10px;display:flex;align-items:center;gap:4px">
+              <span style="color:var(--secondary-text-color)">Tide: ${r.t} ${r.t === 'rising' ? '↑' : r.t === 'falling' ? '↓' : ''}</span>
+              ${ts != null ? `<div style="flex:1;height:6px;background:var(--secondary-background-color,#f0f0f0);border-radius:3px;overflow:hidden;max-width:50px"><div style="height:100%;width:${Math.min(ts,100)}%;background:${tc};border-radius:3px"></div></div><span style="color:${tc};font-weight:500">${ts}</span>` : ''}
+            </div>`;
+          }
           detail.innerHTML = content;
           detail.style.display = 'block';
         } else {
