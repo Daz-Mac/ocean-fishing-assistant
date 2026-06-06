@@ -17,7 +17,7 @@ Each factor contributes to the final score based on its default weight:
 
 | Factor | Weight | What it measures |
 |--------|--------|-----------------|
-| Tide | 25% | How well the tide phase (rising, falling, high, low) matches species preferences |
+| Tide | 25% | How well the tide phase (rising or falling) and proximity to high/low tide match species preferences |
 | Waves | 15% | Wave height relative to the species' tolerance |
 | Time of day | 15% | How well the current time matches the species' preferred feeding hours |
 | Wind | 10% | Wind speed relative to the species' preference |
@@ -41,8 +41,10 @@ Factors that match a category (tide phase, moon phase) score as:
 
 ```
 If current phase matches any preferred phase  → score = 10
-If no match                                   → score = 0
+If no match                                   → score = 0 (3 for tide)
 ```
+
+**Tide proximity:** If a species profile prefers "high" or "low" tide, the score is calculated by proximity to the actual high/low tide event — scoring 10 at the tide peak and tapering to 3  as you move away (within a ±1.5-hour window). This gives more nuanced scores than a simple phase match.
 
 ### Customizing weights
 
@@ -99,7 +101,7 @@ Check the component scores in the sensor attributes. The factor with the lowest 
 
 | Low factor | Likely cause |
 |-----------|-------------|
-| Tide | Tide phase doesn't match your species' preference |
+| Tide | Tide phase doesn't match your species' preference, or you're more than 1.5 hours from the nearest high/low tide |
 | Wind | Too windy for the species, or wind exceeds safety limit |
 | Waves | Too rough for the species or your safety setting |
 | Season | The species isn't active this month |

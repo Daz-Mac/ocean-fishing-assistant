@@ -522,6 +522,8 @@ class TideProxy:
         tidal_heights_for_timestamps: List[float] = []
         tide_phase_list: List[str] = []
         tide_phase_name_list: List[str] = []
+        nearest_high_hours_list: List[Optional[float]] = []
+        nearest_low_hours_list: List[Optional[float]] = []
 
         # For each timestamp, compute interpolated height & phase using bracketing extremes
         for dt in dt_objs:
@@ -573,6 +575,12 @@ class TideProxy:
                 phase_name = "Flat"
             tide_phase_list.append(phase)
             tide_phase_name_list.append(phase_name)
+
+            # Compute hours to nearest high/low extreme (for proximity scoring)
+            high_distances = [abs(epoch - float(t)) for t, typ in zip(times_arr, types_arr) if typ.startswith("h")]
+            low_distances = [abs(epoch - float(t)) for t, typ in zip(times_arr, types_arr) if typ.startswith("l")]
+            nearest_high_hours_list.append((min(high_distances) / 3600.0) if high_distances else None)
+            nearest_low_hours_list.append((min(low_distances) / 3600.0) if low_distances else None)
 
         # Determine next high/low from extremes relative to now
         now_ts = float(now.timestamp())
@@ -637,6 +645,8 @@ class TideProxy:
             "tide_heights_m": tidal_heights_for_timestamps,
             "tide_phase": tide_phase_list,
             "tide_phase_name": tide_phase_name_list,
+            "nearest_high_hours": nearest_high_hours_list,
+            "nearest_low_hours": nearest_low_hours_list,
             "tide_strength": float(round(tide_strength_value, 3)),
             "confidence": TIDE_CONFIDENCE_SOURCE,
             "source": TIDE_SOURCE,

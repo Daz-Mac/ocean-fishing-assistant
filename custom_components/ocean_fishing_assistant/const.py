@@ -66,6 +66,10 @@ WEATHER_FETCHER_CACHE_TTL_DEFAULT = 60 * 60  # seconds (default 1 hour)
 # Tide phase offset default (minutes) — allows per-location tuning of tide predictions
 TIDE_PHASE_OFFSET_MINUTES_DEFAULT = 0
 
+# Tide proximity window (hours) — timestamps within this distance of a high/low
+# extreme get proximity-based scoring for "high"/"low" preferred_tide_phase
+TIDE_HIGH_WINDOW_HOURS = 1.5
+
 # ----- New: coordinate rounding precision used for cache keys and key-coalescing across components -----
 # Use a single canonical rounding precision everywhere to ensure consistent cache keys and predictable hits.
 COORD_ROUND_DECIMALS = 5  # recommended default: 5 decimals ≈ 1.1 meters

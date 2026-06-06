@@ -1,7 +1,9 @@
 {
   "domain": "ocean_fishing_assistant",
   "name": "Ocean Fishing Assistant",
-  "codeowners": ["@Daz-Mac"],
+  "codeowners": [
+    "@Daz-Mac"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/Daz-Mac/ocean-fishing-assistant/",
@@ -13,5 +15,5 @@
     "numpy>=2.3.2,<3",
     "timezonefinder>=8.1.0"
   ],
-  "version": "0.2.8"
+  "version": "0.2.9"
 }
