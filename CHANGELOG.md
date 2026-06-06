@@ -10,8 +10,9 @@
   scoring with a ±1.5-hour window.
 
 ### Added
-- New `nearest_high_hours` and `nearest_low_hours` sensor attributes exposing
-  hours to the nearest high/low tide for each forecast timestamp
+- Tide proximity scoring: species with `"high"` or `"low"` tide preferences now get
+  scored based on how close they are to the actual high/low tide event (within a
+  ±1.5-hour window), rather than a flat 30/100
 - 11 new unit tests covering tide proximity scoring for high/low windows,
   combined phase+proximity preferences, and backward-compatible fallback
 - Tide score bar and numeric value in the forecast row detail popup in the

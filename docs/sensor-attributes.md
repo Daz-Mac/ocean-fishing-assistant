@@ -25,7 +25,7 @@ The main attribute containing the current period's full score breakdown.
 | `current_forecast.score_10` | float | Raw score on a 0-10 scale |
 | `current_forecast.score_100` | integer | Score mapped to 0-100 scale |
 | `current_forecast.safety_capped` | boolean | Whether safety limits reduced the score |
-| `current_forecast.tide_phase` | string | Current tide phase: `rising`, `falling`, `high`, or `low` |
+| `current_forecast.tide_phase` | string | Current tide phase: `rising`, `falling`, or `flat` |
 
 #### Components
 
@@ -34,7 +34,7 @@ Each scoring factor under `current_forecast.components`:
 | Path | Type | Values |
 |------|------|--------|
 | `components.tide.score_100` | integer | 0-100 |
-| `components.tide.tide_phase` | string | `rising`, `falling`, `high`, `low` |
+| `components.tide.tide_phase` | string | `rising`, `falling`, or `flat` |
 | `components.wind.score_100` | integer | 0-100 |
 | `components.wind.wind_speed` | string | e.g., `"18.5 km/h"` or `"11.5 mph"` |
 | `components.wind_direction.score_100` | integer | 0-100 |
