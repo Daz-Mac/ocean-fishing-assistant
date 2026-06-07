@@ -13,7 +13,7 @@
       "max_wave_height_m": [],
       "preferred_tide_phase": ["high"],
       "preferred_times": [{"start_hour": 5, "end_hour": 9}, {"start_hour": 17, "end_hour": 19}],
-      "moon_preference": ["full"]
+      "moon_preference": ["full", "new"]
     }
   },
   "regions": {
