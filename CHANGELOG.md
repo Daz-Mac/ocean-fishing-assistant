@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.10] - 2026-06-07
+
+### Fixed
+- Period tide component now uses peak score instead of average — a 6-hour
+  period containing a high tide shows the best tide window within it rather
+  than diluting across all hours
+- Added "new moon" to the default general profile's moon preferences alongside
+  "full moon"
+
 ## [0.2.9] - 2026-06-06
 
 ### Fixed
