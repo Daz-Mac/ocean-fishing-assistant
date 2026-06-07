@@ -18,6 +18,13 @@
 - Tide score bar and numeric value in the forecast row detail popup in the
   Lovelace custom card
 
+### Fixed
+- Period tide component now uses peak score instead of average — a 6-hour
+  period containing a high tide shows the best tide window within it rather
+  than diluting across all hours
+- Added "new moon" to the default general profile's moon preferences alongside
+  "full moon"
+
 ## [0.2.8] - 2026-06-03
 
 ### Fixed
