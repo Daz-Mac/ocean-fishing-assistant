@@ -87,8 +87,12 @@ def _build_period_summary(
                 if k in c and c[k].get("score_10") is not None:
                     vals.append(float(c[k]["score_10"]))
             if vals:
-                avg = float(sum(vals) / len(vals))
-                out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
+                if k == "tide":
+                    peak = max(vals)
+                    out_comp[k] = {"score_10": round(peak, 3), "score_100": int(round(peak * 10))}
+                else:
+                    avg = float(sum(vals) / len(vals))
+                    out_comp[k] = {"score_10": round(avg, 3), "score_100": int(round(avg * 10))}
         components = out_comp or None
 
     profile_used = next((e.get("profile_used") for e in per_ts_entries if e.get("profile_used")), None)
