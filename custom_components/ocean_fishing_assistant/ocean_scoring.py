@@ -854,7 +854,7 @@ def compute_score(
             spring_tide_bonus = 10
             _LOGGER.debug("Spring tide bonus +10 at idx=%s moon_phase=%.3f", use_index, moon_phase_val)
     if spring_tide_bonus:
-        overall_10 = float(round(overall_10 + 1.0, 3))
+        overall_10 = float(round(min(overall_10 + 1.0, 10.0), 3))
         overall_100 = int(round(overall_10 * 10.0))
 
     breaches: List[Dict[str, Any]] = []
