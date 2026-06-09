@@ -78,7 +78,14 @@ Each breach entry:
 |-----------|------|-------------|
 | `remainder_of_today_periods` | dict | Scores for remaining time periods today |
 
-Each key is a period name (`period_00_06`, `period_06_12`, `period_12_18`, `period_18_24`) with the same structure as `current_forecast` (score, components, safety).
+Each key is a period name (`period_00_06`, `period_06_12`, `period_12_18`, `period_18_24`) with the same structure as `current_forecast` (score, components, safety) plus two period-specific fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spring_tide_bonus` | int | Bonus points added (0 or 10) on full/new moon days |
+| `safety.unsafe` | bool | Whether any safety limit is breached in this period |
+| `safety.caution` | bool | Whether any safety limit is near-breach |
+| `safety.reasons` | string[] | Reason codes for breaches (e.g. `["wind>15"]`) |
 
 **5-day forecast:**
 

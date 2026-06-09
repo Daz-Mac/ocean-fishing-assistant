@@ -12,6 +12,10 @@
   unreachable, instead of displaying NaN. If cached forecast data is available,
   the card shows it with an error banner; otherwise a minimal error card with
   troubleshooting hints is displayed.
+- Forecast rows now display safety breach factor names (e.g. "⚠ Wind") inline on
+  the main card when the score is locked at 30/100 due to unsafe conditions.
+  Clean rows show no extra text. The detail popup also shows a safety line
+  explaining which factors were breached.
 
 ## [0.2.10] - 2026-06-07
 
