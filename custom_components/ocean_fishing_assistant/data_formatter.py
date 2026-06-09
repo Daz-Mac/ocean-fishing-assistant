@@ -130,6 +130,12 @@ def _build_period_summary(
             if isinstance(tp_arr, (list, tuple)) and first_idx < len(tp_arr):
                 tide_phase = tp_arr[first_idx]
 
+    spring_tide_bonus = 0
+    for e in per_ts_entries:
+        if e.get("spring_tide_bonus", 0):
+            spring_tide_bonus = e["spring_tide_bonus"]
+            break
+
     return {
         "score_10": round(score_10, 3) if score_10 is not None else None,
         "score_100": int(round(score_10 * 10)) if score_10 is not None else None,
@@ -137,6 +143,7 @@ def _build_period_summary(
         "profile_used": profile_used,
         "safety": safety,
         "tide_phase": tide_phase,
+        "spring_tide_bonus": spring_tide_bonus,
         "breaches": breaches_summary,
     }
 

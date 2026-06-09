@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.11] - 2026-06-09
+
+### Added
+- Spring tide bonus: all forecast periods on full moon and new moon days now
+  receive a flat +10 point bonus (capped at 100) reflecting the stronger tidal
+  movement from spring tides. The bonus is applied post-scoring, visible in
+  sensor attributes (`spring_tide_bonus`), and displayed in the Lovelace card
+  detail popup. Effects are universal — not species-specific.
+- Card now shows a clear error state when the Open-Meteo or World Tides API is
+  unreachable, instead of displaying NaN. If cached forecast data is available,
+  the card shows it with an error banner; otherwise a minimal error card with
+  troubleshooting hints is displayed.
+
 ## [0.2.10] - 2026-06-07
 
 ### Fixed

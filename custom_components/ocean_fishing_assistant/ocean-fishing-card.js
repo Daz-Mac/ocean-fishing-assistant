@@ -53,8 +53,31 @@ function buildCard(a, config) {
   const title = config.title || 'Ocean Fishing';
   const showForecast = config.show_forecast !== false;
   const forecastDays = Math.min(Math.max(parseInt(config.forecast_days, 10) || 2, 1), 5);
-  const score = parseInt(a.state, 10);
+  const scoreRaw = parseInt(a.state, 10);
+  const isError = a.state === 'unavailable' || isNaN(scoreRaw);
   const attrs = a.attributes || {};
+  const hasCachedData = Object.keys(attrs.remainder_of_today_periods || {}).length > 0 || Object.keys(attrs.next_5_day_periods || {}).length > 0;
+
+  // Unavailable with no cached data — render minimal error card
+  if (isError && !hasCachedData) {
+    return `
+      <ha-card>
+        <div class="card">
+          <div class="header">
+            <span class="header-title">🎣 ${title || 'Ocean Fishing'}</span>
+          </div>
+          <div class="unavailable">
+            <ha-icon icon="hass:alert" style="--mdc-icon-size:32px;color:var(--error-color,#e53935)"></ha-icon>
+            <div style="font-size:13px;font-weight:500;margin-top:4px">Sensor data unavailable</div>
+            <div style="font-size:11px;color:var(--secondary-text-color);margin-top:2px">Open-Meteo or World Tides API may be unreachable</div>
+            <div style="font-size:10px;color:var(--secondary-text-color);margin-top:8px">Check your internet connection and API key configuration</div>
+          </div>
+        </div>
+      </ha-card>
+    `;
+  }
+
+  const score = isError ? (attrs.current_forecast?.score_100 || 0) : scoreRaw;
   const cf = attrs.current_forecast || {};
   const comps = cf.components || {};
   const moon = attrs.moon_phase_name || (comps.moon ? comps.moon.moon_phase_name : null);
@@ -86,20 +109,24 @@ function buildCard(a, config) {
   const pMap = { period_00_06:'00-06', period_06_12:'06-12', period_12_18:'12-18', period_18_24:'18-24' };
   const rows = [];
   for (const [periodName, periodData] of Object.entries(today))
-    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components });
+    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components, b: periodData.spring_tide_bonus || 0 });
   for (const d of Object.keys(next5).sort().slice(0, forecastDays)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
     for (const [pn, pd] of Object.entries(next5[d]))
-      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components });
+      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components, b: pd.spring_tide_bonus || 0 });
   }
   const todayCount = Object.entries(today).length;
   const display = rows.slice(0, todayCount + forecastDays * 4);
   // Store data for click handler (as JSON on container)
-  const rowsData = JSON.stringify(display.map(r => ({ d: r.d, p: r.p, s: r.s, t: r.t, c: r.c })));
+  const rowsData = JSON.stringify(display.map(r => ({ d: r.d, p: r.p, s: r.s, t: r.t, c: r.c, b: r.b })));
 
   return `
     <ha-card>
       <div class="card">
+        ${isError ? `<div style="background:rgba(229,57,53,0.1);border:1px solid rgba(229,57,53,0.3);border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;display:flex;align-items:center;gap:6px">
+          <ha-icon icon="hass:alert" style="color:#e53935;--mdc-icon-size:16px"></ha-icon>
+          <span>Weather/tide data temporarily unavailable — showing cached data</span>
+        </div>` : ''}
         <div class="header">
           <span class="header-title">🎣 ${title || 'Ocean Fishing'}</span>
           ${moon ? `<span class="header-moon">🌙 ${moon}</span>` : ''}
@@ -240,7 +267,9 @@ class OceanFishingCard extends HTMLElement {
             ${ts != null ? `<div style="flex:1;height:6px;background:var(--secondary-background-color,#f0f0f0);border-radius:3px;overflow:hidden;max-width:50px"><div style="height:100%;width:${Math.min(ts,100)}%;background:${tc};border-radius:3px"></div></div><span style="color:${tc};font-weight:500">${ts}</span>` : ''}
           </div>`;
         }
-        detail.innerHTML = content;
+        if (r.b) {
+          content += `<div style="margin-top:2px;font-size:10px;color:#FFD700">🌊 Spring Tide +${r.b}</div>`;
+        }
         detail.style.display = 'block';
         this._expandedRow = idx;
       });
@@ -271,7 +300,9 @@ class OceanFishingCard extends HTMLElement {
               ${ts != null ? `<div style="flex:1;height:6px;background:var(--secondary-background-color,#f0f0f0);border-radius:3px;overflow:hidden;max-width:50px"><div style="height:100%;width:${Math.min(ts,100)}%;background:${tc};border-radius:3px"></div></div><span style="color:${tc};font-weight:500">${ts}</span>` : ''}
             </div>`;
           }
-          detail.innerHTML = content;
+          if (r.b) {
+            content += `<div style="margin-top:2px;font-size:10px;color:#FFD700">🌊 Spring Tide +${r.b}</div>`;
+          }
           detail.style.display = 'block';
         } else {
           this._expandedRow = null;

@@ -802,6 +802,66 @@ def test_moon_missing_phase():
         pass
 
 
+# ---- Spring tide bonus ----
+
+def test_spring_tide_bonus_full_moon():
+    """Full moon (phase 0.5) should get +10 spring tide bonus."""
+    payload = _build_payload(moon_phase=[0.5])
+    result = compute_score(payload, species_profile=MINIMAL_PROFILE)
+    assert result["spring_tide_bonus"] == 10
+
+
+def test_spring_tide_bonus_new_moon():
+    """New moon (phase 0.0) should get +10 spring tide bonus."""
+    payload = _build_payload(moon_phase=[0.0])
+    result = compute_score(payload, species_profile=MINIMAL_PROFILE)
+    assert result["spring_tide_bonus"] == 10
+
+
+def test_spring_tide_bonus_near_full():
+    """Near full moon (phase 0.48) within tolerance should get bonus."""
+    payload = _build_payload(moon_phase=[0.48])
+    result = compute_score(payload, species_profile=MINIMAL_PROFILE)
+    assert result["spring_tide_bonus"] == 10
+
+
+def test_spring_tide_bonus_first_quarter():
+    """First quarter (phase 0.25) should NOT get bonus."""
+    payload = _build_payload(moon_phase=[0.25])
+    result = compute_score(payload, species_profile=MINIMAL_PROFILE)
+    assert result["spring_tide_bonus"] == 0
+
+
+def test_spring_tide_bonus_null_moon():
+    """Missing moon phase should not crash and give no bonus."""
+    payload = _build_payload()
+    del payload["moon_phase"]
+    try:
+        result = compute_score(payload, species_profile=MINIMAL_PROFILE)
+        assert False, "Expected MissingDataError"
+    except MissingDataError:
+        pass
+
+
+def test_spring_tide_bonus_score_cap():
+    """Score should not exceed 100 even with bonus on near-perfect conditions."""
+    payload = _build_payload(
+        moon_phase=[0.5],
+        temperature_c=[20.0],
+        wind_m_s=[2.0],
+        wave_height_m=[0.2],
+        pressure_hpa=[1020.0, 1022.0],
+    )
+    profile = _build_profile(
+        preferred_temp_c=[15, 25],
+        preferred_wind_m_s=[0, 8],
+        max_wave_height_m=2.0,
+    )
+    result = compute_score(payload, species_profile=profile)
+    assert result["spring_tide_bonus"] == 10
+    assert result["score_100"] <= 100
+
+
 # ---- Temperature scoring ----
 
 def test_temp_within_preference():

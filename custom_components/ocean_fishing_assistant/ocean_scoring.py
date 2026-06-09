@@ -846,6 +846,17 @@ def compute_score(
     overall_10 = float(round(overall_10, 3))
     overall_100 = int(round(overall_10 * 10.0))
 
+    # Spring tide bonus: +1.0 to overall_10 (+10 on 100-scale) on full/new moon
+    spring_tide_bonus = 0
+    if moon_phase_val is not None:
+        mp = moon_phase_val
+        if mp <= 0.05 or abs(mp - 0.5) <= 0.05 or abs(mp - 1.0) <= 0.05:
+            spring_tide_bonus = 10
+            _LOGGER.debug("Spring tide bonus +10 at idx=%s moon_phase=%.3f", use_index, moon_phase_val)
+    if spring_tide_bonus:
+        overall_10 = float(round(overall_10 + 1.0, 3))
+        overall_100 = int(round(overall_10 * 10.0))
+
     breaches: List[Dict[str, Any]] = []
     def _add_breach(variable: str, value: Any, unit: Optional[str] = None, expected_min: Any = None, expected_max: Any = None, expected_pref_min: Any = None, expected_pref_max: Any = None, severity: str = "caution", reason: Optional[str] = None, advice: Optional[str] = None):
         item: Dict[str, Any] = {"variable": variable, "value": value, "severity": severity, "reason": reason or f"{variable}_breach", "category": "species"}
@@ -995,6 +1006,7 @@ def compute_score(
         # Change: provide the resolved species profile as a dict so downstream display code can augment it.
         "profile_used": dict(profile),
         "safety": safety,
+        "spring_tide_bonus": spring_tide_bonus,
         "breaches": breaches,
     }
     return result
@@ -1044,6 +1056,7 @@ def compute_forecast(
             "forecast_raw": forecast_raw,
             "profile_used": res.get("profile_used"),
             "safety": res.get("safety"),
+            "spring_tide_bonus": res.get("spring_tide_bonus", 0),
             "breaches": res.get("breaches", []),
         }
         out.append(entry)
