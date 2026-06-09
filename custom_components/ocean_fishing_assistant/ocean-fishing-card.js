@@ -191,7 +191,7 @@ function buildCard(a, config) {
             <span class="rscore" style="color:${barColor(r.s)}">${r.s != null ? r.s : '--'}</span>
             ${r.f ? `<span style="font-size:9px;color:var(--error-color,#e53935);flex-shrink:0;font-weight:500">⚠ ${r.f}</span>` : ''}
           </div>
-          <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px"></div>`;
+          <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px;border:1px solid var(--primary-color,#03a9f4)"></div>`;
         }).join('')}
         </div>
         ` : `<div class="empty">No forecast data</div>`) : ''}
@@ -304,8 +304,10 @@ class OceanFishingCard extends HTMLElement {
       });
 
       // Restore expanded row after re-render
+      const showRestoreLog = window.__oceanFishingDebug === true;
       if (this._expandedRow !== null) {
         const detail = this._shadow.getElementById(`detail-${this._expandedRow}`);
+        if (showRestoreLog) console.log('[OF] restore check: expanded='+this._expandedRow, 'hasDetail='+!!detail, 'hasRowData='+!!rowsData[this._expandedRow]);
         if (detail && rowsData[this._expandedRow]) {
           const r = rowsData[this._expandedRow];
           let content = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px">`;
@@ -336,7 +338,9 @@ class OceanFishingCard extends HTMLElement {
             content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
           }
           detail.style.display = 'block';
+          if (showRestoreLog) console.log('[OF] restore shown');
         } else {
+          if (showRestoreLog) console.log('[OF] restore failed, resetting');
           this._expandedRow = null;
         }
       }
