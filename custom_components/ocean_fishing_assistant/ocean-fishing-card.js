@@ -257,12 +257,14 @@ class OceanFishingCard extends HTMLElement {
         if (!row) { if (showLog) console.log('[OF] click - no .row parent'); return; }
         const idx = parseInt(row.dataset.idx, 10);
         if (showLog) console.log('[OF] click idx='+idx, 'rowsDataLen='+rowsData.length, 'hasRow='+!!rowsData[idx]);
-        if (isNaN(idx)) return;
+        if (isNaN(idx)) { if (showLog) console.log('[OF] bail NaN'); return; }
         const detail = this._shadow.getElementById(`detail-${idx}`);
-        if (!detail) return;
+        if (!detail) { if (showLog) console.log('[OF] bail no detail for idx='+idx); return; }
+        if (showLog) console.log('[OF] detail display='+detail.style.display);
         if (detail.style.display !== 'none') {
           detail.style.display = 'none';
           this._expandedRow = null;
+          if (showLog) console.log('[OF] toggle off');
           return;
         }
         // Build detail content from components
@@ -297,6 +299,7 @@ class OceanFishingCard extends HTMLElement {
           content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
         }
         detail.style.display = 'block';
+        if (showLog) console.log('[OF] detail shown, content length='+content.length);
         this._expandedRow = idx;
       });
 
