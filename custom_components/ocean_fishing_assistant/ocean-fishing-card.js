@@ -121,14 +121,18 @@ function buildCard(a, config) {
   const pMap = { period_00_06:'00-06', period_06_12:'06-12', period_12_18:'12-18', period_18_24:'18-24' };
   const rows = [];
   for (const [periodName, periodData] of Object.entries(today)) {
-    const unsafeReasons = (periodData.safety && periodData.safety.unsafe) ? (periodData.safety.reasons || []) : [];
-    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components, b: periodData.spring_tide_bonus || 0, f: safetyTag(unsafeReasons) });
+    const score = periodData.score_100;
+    const showSafety = (periodData.safety && periodData.safety.unsafe && score != null && score <= 30);
+    const unsafeReasons = showSafety ? (periodData.safety.reasons || []) : [];
+    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: score, t: periodData.tide_phase, c: periodData.components, b: periodData.spring_tide_bonus || 0, f: safetyTag(unsafeReasons) });
   }
   for (const d of Object.keys(next5).sort().slice(0, forecastDays)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
     for (const [pn, pd] of Object.entries(next5[d])) {
-      const unsafeReasons = (pd.safety && pd.safety.unsafe) ? (pd.safety.reasons || []) : [];
-      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components, b: pd.spring_tide_bonus || 0, f: safetyTag(unsafeReasons) });
+      const score = pd.score_100;
+      const showSafety = (pd.safety && pd.safety.unsafe && score != null && score <= 30);
+      const unsafeReasons = showSafety ? (pd.safety.reasons || []) : [];
+      rows.push({ d: label, p: pMap[pn]||pn, s: score, t: pd.tide_phase, c: pd.components, b: pd.spring_tide_bonus || 0, f: safetyTag(unsafeReasons) });
     }
   }
   const todayCount = Object.entries(today).length;
