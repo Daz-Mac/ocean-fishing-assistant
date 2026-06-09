@@ -191,7 +191,7 @@ function buildCard(a, config) {
             <span class="rscore" style="color:${barColor(r.s)}">${r.s != null ? r.s : '--'}</span>
             ${r.f ? `<span style="font-size:9px;color:var(--error-color,#e53935);flex-shrink:0;font-weight:500">⚠ ${r.f}</span>` : ''}
           </div>
-          <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px;border:1px solid var(--primary-color,#03a9f4)"></div>`;
+          <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px"></div>`;
         }).join('')}
         </div>
         ` : `<div class="empty">No forecast data</div>`) : ''}
@@ -298,6 +298,7 @@ class OceanFishingCard extends HTMLElement {
         if (r && r.f) {
           content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
         }
+        detail.innerHTML = content;
         detail.style.display = 'block';
         if (showLog) console.log('[OF] detail shown, content length='+content.length);
         this._expandedRow = idx;
@@ -337,6 +338,7 @@ class OceanFishingCard extends HTMLElement {
           if (r.f) {
             content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
           }
+          detail.innerHTML = content;
           detail.style.display = 'block';
           if (showRestoreLog) console.log('[OF] restore shown');
         } else {
