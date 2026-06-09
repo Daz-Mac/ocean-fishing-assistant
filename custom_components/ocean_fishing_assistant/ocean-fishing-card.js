@@ -48,6 +48,18 @@ function formatTime(ts) {
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 const factorLabels = { tide:'Tide', wind:'Wind', wind_direction:'Wind Dir', waves:'Waves', time:'Time', pressure:'Pressure', season:'Season', moon:'Moon', temperature:'Temp' };
+const SAFETY_FACTOR_NAMES = { wind:'Wind', wave:'Waves', gust:'Gust', swell_period:'Swell', visibility:'Visibility', precipitation:'Precip' };
+function safetyTag(reasons) {
+  if (!reasons || !reasons.length) return '';
+  const seen = {};
+  const parts = [];
+  for (const r of reasons) {
+    const prefix = r.includes('>') ? r.split('>')[0] : r.includes('<') ? r.split('<')[0] : r.replace('_near_limit', '');
+    const label = SAFETY_FACTOR_NAMES[prefix] || prefix;
+    if (label && !seen[label]) { seen[label] = true; parts.push(label); }
+  }
+  return parts.join(', ');
+}
 
 function buildCard(a, config) {
   const title = config.title || 'Ocean Fishing';
@@ -108,17 +120,21 @@ function buildCard(a, config) {
   const next5 = attrs.next_5_day_periods || {};
   const pMap = { period_00_06:'00-06', period_06_12:'06-12', period_12_18:'12-18', period_18_24:'18-24' };
   const rows = [];
-  for (const [periodName, periodData] of Object.entries(today))
-    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components, b: periodData.spring_tide_bonus || 0 });
+  for (const [periodName, periodData] of Object.entries(today)) {
+    const unsafeReasons = (periodData.safety && periodData.safety.unsafe) ? (periodData.safety.reasons || []) : [];
+    rows.push({ d:'Today', p: pMap[periodName]||periodName, s: periodData.score_100, t: periodData.tide_phase, c: periodData.components, b: periodData.spring_tide_bonus || 0, f: safetyTag(unsafeReasons) });
+  }
   for (const d of Object.keys(next5).sort().slice(0, forecastDays)) {
     const label = new Date(d).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-    for (const [pn, pd] of Object.entries(next5[d]))
-      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components, b: pd.spring_tide_bonus || 0 });
+    for (const [pn, pd] of Object.entries(next5[d])) {
+      const unsafeReasons = (pd.safety && pd.safety.unsafe) ? (pd.safety.reasons || []) : [];
+      rows.push({ d: label, p: pMap[pn]||pn, s: pd.score_100, t: pd.tide_phase, c: pd.components, b: pd.spring_tide_bonus || 0, f: safetyTag(unsafeReasons) });
+    }
   }
   const todayCount = Object.entries(today).length;
   const display = rows.slice(0, todayCount + forecastDays * 4);
   // Store data for click handler (as JSON on container)
-  const rowsData = JSON.stringify(display.map(r => ({ d: r.d, p: r.p, s: r.s, t: r.t, c: r.c, b: r.b })));
+  const rowsData = JSON.stringify(display.map(r => ({ d: r.d, p: r.p, s: r.s, t: r.t, c: r.c, b: r.b, f: r.f })));
 
   return `
     <ha-card>
@@ -169,6 +185,7 @@ function buildCard(a, config) {
             <span class="rper">${r.p}</span>
             <div class="rbar-wrap"><div class="rbar" style="width:${Math.min(r.s||0,100)}%;background:${barColor(r.s)}"></div></div>
             <span class="rscore" style="color:${barColor(r.s)}">${r.s != null ? r.s : '--'}</span>
+            ${r.f ? `<span style="font-size:9px;color:var(--error-color,#e53935);flex-shrink:0;font-weight:500">⚠ ${r.f}</span>` : ''}
           </div>
           <div class="row-detail" id="detail-${i}" style="display:none;font-size:11px;padding:6px 8px;background:var(--secondary-background-color,rgba(0,0,0,0.03));border-radius:6px;margin-bottom:4px"></div>`;
         }).join('')}
@@ -270,6 +287,9 @@ class OceanFishingCard extends HTMLElement {
         if (r.b) {
           content += `<div style="margin-top:2px;font-size:10px;color:#FFD700">🌊 Spring Tide +${r.b}</div>`;
         }
+        if (r.f) {
+          content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
+        }
         detail.style.display = 'block';
         this._expandedRow = idx;
       });
@@ -302,6 +322,9 @@ class OceanFishingCard extends HTMLElement {
           }
           if (r.b) {
             content += `<div style="margin-top:2px;font-size:10px;color:#FFD700">🌊 Spring Tide +${r.b}</div>`;
+          }
+          if (r.f) {
+            content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
           }
           detail.style.display = 'block';
         } else {
