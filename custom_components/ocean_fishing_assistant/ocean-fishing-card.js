@@ -252,10 +252,12 @@ class OceanFishingCard extends HTMLElement {
       let rowsData = [];
       try { rowsData = JSON.parse(container.dataset.rows || '[]'); } catch (_) {}
       container.addEventListener('click', (e) => {
+        const showLog = window.__oceanFishingDebug === true;
         const row = e.target.closest('.row');
-        if (!row) return;
+        if (!row) { if (showLog) console.log('[OF] click - no .row parent'); return; }
         const idx = parseInt(row.dataset.idx, 10);
-        if (isNaN(idx) || !rowsData[idx]) return;
+        if (showLog) console.log('[OF] click idx='+idx, 'rowsDataLen='+rowsData.length, 'hasRow='+!!rowsData[idx]);
+        if (isNaN(idx)) return;
         const detail = this._shadow.getElementById(`detail-${idx}`);
         if (!detail) return;
         if (detail.style.display !== 'none') {
@@ -266,7 +268,7 @@ class OceanFishingCard extends HTMLElement {
         // Build detail content from components
         const r = rowsData[idx];
         let content = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px">`;
-        if (r.c) {
+        if (r && r.c) {
           for (const [fk, fv] of Object.entries(r.c)) {
             const name = factorLabels[fk] || fk;
             const sc = fv.score_100 != null ? fv.score_100 : '--';
@@ -280,7 +282,7 @@ class OceanFishingCard extends HTMLElement {
           content += `<div style="grid-column:1/-1;color:var(--secondary-text-color)">No detail data</div>`;
         }
         content += `</div>`;
-        if (r.t) {
+        if (r && r.t) {
           const ts = r.c && r.c.tide && r.c.tide.score_100;
           const tc = ts != null ? barColor(ts) : '';
           content += `<div style="margin-top:4px;font-size:10px;display:flex;align-items:center;gap:4px">
@@ -288,10 +290,10 @@ class OceanFishingCard extends HTMLElement {
             ${ts != null ? `<div style="flex:1;height:6px;background:var(--secondary-background-color,#f0f0f0);border-radius:3px;overflow:hidden;max-width:50px"><div style="height:100%;width:${Math.min(ts,100)}%;background:${tc};border-radius:3px"></div></div><span style="color:${tc};font-weight:500">${ts}</span>` : ''}
           </div>`;
         }
-        if (r.b) {
+        if (r && r.b) {
           content += `<div style="margin-top:2px;font-size:10px;color:#FFD700">🌊 Spring Tide +${r.b}</div>`;
         }
-        if (r.f) {
+        if (r && r.f) {
           content += `<div style="margin-top:2px;font-size:10px;color:var(--error-color,#e53935)">⚠ Safety: ${r.f}</div>`;
         }
         detail.style.display = 'block';
