@@ -15,5 +15,5 @@
     "numpy>=2.3.2,<3",
     "timezonefinder>=8.1.0"
   ],
-  "version": "0.2.10"
+  "version": "0.2.12"
 }

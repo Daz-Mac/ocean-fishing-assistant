@@ -40,9 +40,13 @@ def name_to_fraction(name: Optional[str]) -> Optional[float]:
     return _NAME_TO_FRAC.get(key)
 
 
-def fraction_to_name(frac: Optional[float], tolerance: float = 1e-6) -> Optional[str]:
+def fraction_to_name(frac: Optional[float], tolerance: float = 0.035) -> Optional[str]:
     """Map numeric fractional moon phase to friendly name (e.g. 'Full Moon').
     Returns None if frac is None or cannot be mapped.
+    Tolerance controls how close to exact phase (0.0, 0.25, 0.5, 0.75, 1.0)
+    the phase must be to show the named phase rather than the transitional name.
+    Default 0.035 = ±3.5% of lunar cycle, matching astronomical convention for
+    "near enough to call it" and within the spring tide bonus check (±5%).
     """
     if frac is None:
         return None

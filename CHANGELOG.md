@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.12] - 2026-06-15
+
+### Fixed
+- Moon phase name now correctly shows "New Moon" or "Full Moon" when the phase
+  is within 3.5% of those events (e.g. 0.97 → "New Moon" instead of "Waning
+  Crescent"). Previously the tolerance was set to 1e-6 (essentially exact match),
+  which caused the displayed name to contradict the spring tide bonus on days
+  very close to new/full moon.
+
 ## [0.2.11] - 2026-06-09
 
 ### Added
